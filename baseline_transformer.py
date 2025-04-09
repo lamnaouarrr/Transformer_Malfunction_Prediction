@@ -286,12 +286,12 @@ def file_to_vector_array(file_name,
 
 
 def list_to_vector_array(file_list,
-                         msg="calc...",
                          n_mels,
                          frames,
                          n_fft,
                          hop_length,
-                         power):
+                         power,
+                         msg="calc..."):
     """
     convert the file_list to a vector array.
     file_to_vector_array() is iterated, and the output vector array is concatenated.

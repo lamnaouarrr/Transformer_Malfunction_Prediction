@@ -399,7 +399,7 @@ def positional_encoding(seq_length, d_model):
     
     return pos_encoding.astype(np.float32)
 
-def transformer_model(input_shape, head_size=128, num_heads=4, ff_dim=4, 
+def transformer_model(input_shape, head_size=64, num_heads=4, ff_dim=128, 
                       num_transformer_blocks=2, mlp_units=[128, 64], dropout=0.2):
     """
     Enhanced Sequence-to-Sequence Transformer Model for Anomaly Detection

@@ -1,7 +1,7 @@
 # Minimal package to use MIMII dataset baseline
 tensorflow==2.10.0  # Updated for compatibility with newer NumPy
 numpy==1.23.5  # Compatible with both TF 2.10.0 and Numba
-protobuf==3.20.0  # Add explicit protobuf version for compatibility
+protobuf==3.19.6  # Compatible with TensorFlow 2.10.0 (<3.20)
 matplotlib>=3.7.0
 PyYAML==6.0
 scikit-learn==1.0.2

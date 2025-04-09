@@ -587,9 +587,13 @@ def get_dataset(data, param):
     # Apply data augmentation if training
     if _augment:
         def augment(x, y):
+            # Ensure consistent data types
+            x = tf.cast(x, tf.float32)
+            y = tf.cast(y, tf.float32)
+            
             # Add random noise
             if tf.random.uniform(()) < _augmentation_noise_prob:
-                noise = tf.random.normal(tf.shape(x), mean=0.0, stddev=_augmentation_noise_stddev)
+                noise = tf.random.normal(tf.shape(x), mean=0.0, stddev=_augmentation_noise_stddev, dtype=tf.float32)
                 x_aug = x + noise
                 
                 # Optional: frequency masking
@@ -601,20 +605,32 @@ def get_dataset(data, param):
                     # Ensure freq_mask_size is not larger than the feature dimension
                     freq_mask_size = tf.minimum(freq_mask_size, tf.shape(x)[2])
                     freq_start = tf.random.uniform((), minval=0, maxval=tf.shape(x)[2] - freq_mask_size, dtype=tf.int32)
-                    mask = tf.ones_like(x, dtype=x.dtype)
+                    mask = tf.ones_like(x, dtype=tf.float32)
                     mask_indices = tf.range(freq_start, freq_start + freq_mask_size)
                     
-                    # Correctly handle tensor scattering for frequency masking
-                    # Create a mask tensor with zeros at the masked frequencies
-                    indices_to_update = tf.TensorArray(tf.int32, size=0, dynamic_size=True)
-                    for b in tf.range(tf.shape(x)[0]):
-                        for t in tf.range(tf.shape(x)[1]):
-                            for f in mask_indices:
-                                indices_to_update = indices_to_update.write(indices_to_update.size(), [b, t, f])
-                    scatter_indices = indices_to_update.stack()
-                    updates = tf.zeros(tf.shape(scatter_indices)[0], dtype=x.dtype)
-                    mask = tf.tensor_scatter_nd_update(mask, scatter_indices, updates)
-                                                
+                    # Even simpler masking approach using broadcasting
+                    # Create a mask of ones with the same shape as x
+                    mask = tf.ones_like(x, dtype=tf.float32)
+                    
+                    # Create a frequency mask (1.0 for frequencies to keep, 0.0 for frequencies to mask)
+                    freq_mask = tf.ones((tf.shape(x)[2],), dtype=tf.float32)
+                    mask_start = freq_start
+                    mask_end = freq_start + freq_mask_size
+                    
+                    # Set the masked frequency bins to 0
+                    freq_range = tf.range(0, tf.shape(x)[2], dtype=tf.int32)
+                    freq_mask = tf.where(
+                        (freq_range >= mask_start) & (freq_range < mask_end),
+                        tf.zeros_like(freq_range, dtype=tf.float32),
+                        tf.ones_like(freq_range, dtype=tf.float32)
+                    )
+                    
+                    # Reshape for broadcasting: [1, 1, freq_dims]
+                    freq_mask = tf.reshape(freq_mask, [1, 1, -1])
+                    
+                    # Apply the frequency mask to all time steps and all batches
+                    mask = mask * freq_mask
+                    
                     x_aug = x_aug * mask
                 return x_aug, y
             return x, y
@@ -963,23 +979,39 @@ def main():
         log_memory_usage("before training")
 
         try:
-            history = compile_and_train_model_efficiently(
-                model=model, 
-                train_data=train_data, 
-                param=param, 
-                visualizer=visualizer, 
-                history_img=history_img, 
-                model_file=model_file
-            )
+            # First try to load existing model if it exists
+            if os.path.exists(model_file):
+                try:
+                    logger.info(f"Loading existing model weights from {model_file}")
+                    model.load_weights(model_file)
+                    logger.info("Model weights loaded successfully")
+                except Exception as e:
+                    logger.warning(f"Failed to load existing model weights: {e}")
+                    logger.warning("This may be due to changes in model architecture. Will train a new model.")
+                    # Train a new model since loading failed
+                    history = compile_and_train_model_efficiently(
+                        model=model, 
+                        train_data=train_data, 
+                        param=param, 
+                        visualizer=visualizer, 
+                        history_img=history_img, 
+                        model_file=model_file
+                    )
+            else:
+                # No existing model, train a new one
+                logger.info("No existing model found. Training a new model.")
+                history = compile_and_train_model_efficiently(
+                    model=model, 
+                    train_data=train_data, 
+                    param=param, 
+                    visualizer=visualizer, 
+                    history_img=history_img, 
+                    model_file=model_file
+                )
         except Exception as e:
             logger.error(f"Error during model training: {e}")
-            # Try to load model if training failed but model exists
-            if os.path.exists(model_file):
-                logger.info(f"Loading existing model weights from {model_file}")
-                model.load_weights(model_file)
-            else:
-                logger.error(f"No model weights available at {model_file}")
-                model.summary()
+            logger.error("Unable to train or load model. Check logs for details.")
+            model.summary()
         
         #debug
         log_memory_usage("after training")

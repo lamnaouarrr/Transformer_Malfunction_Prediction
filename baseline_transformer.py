@@ -66,23 +66,16 @@ logger = setup_logging()
 
 
 def ssim_loss(y_true, y_pred):
-    # Get the data dimensions
-    frames = tf.shape(y_true)[1]
+    # Ensure data range is properly calculated
+    data_range = tf.reduce_max(y_true) - tf.reduce_min(y_true)
+    data_range = tf.maximum(data_range, 1e-6)  # Ensure non-zero range
     
-    # Choose an appropriate window size (must be odd and smaller than input dimensions)
-    # For a 5x64 input, a 3x3 window would be appropriate
-    win_size = 3
-    
-    # Reshape tensors to be compatible with tf.image.ssim (needs 4D with channels)
-    y_true_4d = tf.expand_dims(y_true, axis=-1)
-    y_pred_4d = tf.expand_dims(y_pred, axis=-1)
-    
-    # Calculate SSIM with appropriate filter size
+    # Calculate SSIM with fixed filter size of 3
     ssim_val = tf.image.ssim(
-        y_true_4d, 
-        y_pred_4d, 
-        max_val=tf.reduce_max(y_true) - tf.reduce_min(y_true) + 1e-10,
-        filter_size=win_size
+        tf.expand_dims(y_true, -1),  # Add channel dimension
+        tf.expand_dims(y_pred, -1),
+        max_val=data_range,
+        filter_size=3
     )
     
     # Return 1 - SSIM as loss (since we want to minimize loss)
@@ -430,11 +423,8 @@ def transformer_model(input_shape, head_size=128, num_heads=4, ff_dim=4,
     # Positional Encoding
     seq_length, d_model = input_shape
     pos_encoding = positional_encoding(seq_length, d_model)
-    pos_encoding = pos_encoding[np.newaxis, :, :]
-    pos_encoding = tf.expand_dims(pos_encoding, axis=0)
-    #debug
-    print(f"Positional encoding shape: {pos_encoding.shape}")
-    x = x + tf.cast(pos_encoding, dtype=x.dtype) # Inject positional information & Scale positional encoding
+    pos_encoding = tf.constant(pos_encoding, dtype=tf.float32)
+    x = x + pos_encoding  # Inject positional information & Scale positional encoding
     
     # Encoder Transformer Blocks
     for _ in range(num_transformer_blocks):
@@ -515,19 +505,21 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     learning_rate = param["fit"].get("learning_rate", 0.001)
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     
-    # Sample 60% of training data to reduce memory usage
-    sample_size = int(0.6 * len(train_data))  # Use 60% of the dataset
-    indices = np.random.choice(len(train_data), sample_size, replace=False)
-    train_data_sampled = train_data[indices]
-    logger.info(f"Sampled training data from {len(train_data)} to {sample_size} examples (60%)")
+    train_data_sampled = train_data
+    logger.info(f"Using full training dataset of {len(train_data)} examples")
     
     # Enable mixed precision if available
     try:
+        # RTX 4000 Ada has Tensor Cores that can accelerate mixed precision
         policy = tf.keras.mixed_precision.Policy('mixed_float16')
         tf.keras.mixed_precision.set_global_policy(policy)
-        logger.info("Mixed precision enabled")
+        logger.info("Mixed precision enabled for RTX 4000 Ada")
+        
+        # Additional optimization for RTX GPUs
+        tf.config.optimizer.set_jit(True)  # Enable XLA compilation
+        logger.info("XLA compilation enabled")
     except Exception as e:
-        logger.warning(f"Mixed precision not available: {e}")
+        logger.warning(f"GPU optimizations not fully available: {e}")
     
     # Compile the model
     model.compile(
@@ -555,7 +547,24 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         )
     )
     
-    # Your new code starts here
+    model_file_parts = os.path.basename(model_file).split('_')
+    machine_type = model_file_parts[1]
+    machine_id = model_file_parts[2]
+    db = model_file_parts[3].split('.')[0]
+
+    checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
+    os.makedirs(checkpoint_path, exist_ok=True)
+
+    callbacks.append(
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=os.path.join(checkpoint_path, "model_{epoch:02d}.weights.h5"),
+            save_weights_only=True,
+            save_best_only=True,
+            monitor='val_loss',
+            mode='min'
+        )
+    )
+
     batch_size = param["fit"]["batch_size"]
     validation_split = param["fit"]["validation_split"]
     
@@ -568,11 +577,26 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         if is_training:
             np.random.shuffle(indices)
         
-        for start_idx in range(0, len(indices), batch_size):
-            end_idx = min(start_idx + batch_size, len(indices))
-            batch_indices = indices[start_idx:end_idx]
-            batch_x = data[batch_indices]
-            yield batch_x, batch_x  # Input = output for autoencoder
+        while True:  # Make this an infinite generator for Keras
+            for start_idx in range(0, len(indices), batch_size):
+                end_idx = min(start_idx + batch_size, len(indices))
+                batch_indices = indices[start_idx:end_idx]
+                batch_x = data[batch_indices]
+                # Apply data augmentation for training
+                if is_training and np.random.random() < 0.5:
+                    # Add random noise + time masking
+                    noise = np.random.normal(0, 0.01, batch_x.shape)
+                    batch_x_aug = batch_x + noise
+                    
+                    # Optional: frequency masking (randomly mask some frequency bands)
+                    if np.random.random() < 0.3:
+                        freq_mask_size = np.random.randint(1, 10)
+                        freq_start = np.random.randint(0, batch_x.shape[2] - freq_mask_size)
+                        batch_x_aug[:, :, freq_start:freq_start+freq_mask_size] = 0
+                    
+                    yield batch_x_aug, batch_x
+                else:
+                    yield batch_x, batch_x
     
     # Calculate steps per epoch
     steps_per_epoch = split_idx // batch_size
@@ -604,7 +628,7 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
 # main
 ########################################################################
 def main():
-    
+
     # Record the start time
     start_time = time.time()
 
@@ -612,10 +636,39 @@ def main():
     with open("baseline_transformer.yaml", "r") as stream:
         param = yaml.safe_load(stream)
 
+    #THE EXPERIMENT TRACKING CODE
+    experiment_name = f"transformer_ssim_{int(time.time())}"
+    results = {}  # Initialize results dictionary
+    results["experiment_info"] = {
+        "name": experiment_name,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "feature_config": param["feature"],
+        "transformer_config": param["transformer"],
+        "fit_config": param["fit"],
+        "notes": "RTX 4000 Ada run with memory optimizations"
+    }
+
     # make output directory
     os.makedirs(param["pickle_directory"], exist_ok=True)
     os.makedirs(param["model_directory"], exist_ok=True)
     os.makedirs(param["result_directory"], exist_ok=True)
+
+    # Set TensorFlow memory growth
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                
+            # For RTX GPUs, set memory limit to leave some memory for system
+            if len(gpus) > 0:
+                tf.config.experimental.set_virtual_device_configuration(
+                    gpus[0],
+                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=14000)]  # 14GB limit
+                )
+            logger.info(f"Found {len(gpus)} GPUs with memory growth enabled")
+        except RuntimeError as e:
+            logger.warning(f"Memory growth setting failed: {e}")
 
     # initialize the visualizer
     visualizer = Visualizer()
@@ -712,19 +765,6 @@ def main():
 
         print(f"Train data shape: {train_data.shape}")  # Should be (num_samples, 5, 64)
         print(f"Eval files: {len(eval_files)}, Eval labels: {len(eval_labels)}")
-
-        #sampling code and caching
-        sampled_train_pickle = f"{param['pickle_directory']}/train_sampled_{machine_type}_{machine_id}_{db}.pickle"
-        if os.path.exists(sampled_train_pickle):
-            train_data_sampled = load_pickle(sampled_train_pickle)
-            logger.info(f"Loaded pre-sampled training data: {train_data_sampled.shape}")
-        else:
-            # Sample 60% of training data to reduce memory usage
-            sample_size = int(0.6 * len(train_data))  # Use 60% of the dataset
-            indices = np.random.choice(len(train_data), sample_size, replace=False)
-            train_data_sampled = train_data[indices]
-            logger.info(f"Sampled training data from {len(train_data)} to {sample_size} examples (60%)")
-            save_pickle(sampled_train_pickle, train_data_sampled)
 
         # Check data shape
         print(f"Train data actual shape: {train_data.shape}")
@@ -839,13 +879,27 @@ def main():
                     logger.warning(f"No valid features extracted from file: {file_name}")
                     continue
                     
-                pred = model.predict(data, verbose=0)
-                error = np.mean(np.square(data - pred), axis=(1, 2))
-                y_pred[num] = np.mean(error)
-                original_specs.append(data)
-                reconstructed_specs.append(pred)
+                # Batch prediction to avoid memory spikes
+                batch_size = 128
+                error_list = []
+                for i in range(0, len(data), batch_size):
+                    batch_data = data[i:i+batch_size]
+                    batch_pred = model.predict(batch_data, verbose=0)
+                    batch_error = np.mean(np.square(batch_data - batch_pred), axis=(1, 2))
+                    error_list.extend(batch_error)
+                    
+                # Use mean squared error as anomaly score
+                if error_list:
+                    y_pred[num] = np.mean(error_list)
+                    
+                    # Store only a subset of spectrograms to avoid memory issues
+                    if len(original_specs) < 20:  # Limit number of stored spectrograms
+                        original_specs.append(data[:10])  # Store only first 10 samples
+                        reconstructed_specs.append(batch_pred[:10])
+
             except Exception as e:
                 logger.warning(f"Error processing file: {file_name}, error: {e}")
+                continue
 
         # Calculate AUC score
         try:

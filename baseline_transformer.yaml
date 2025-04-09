@@ -1,0 +1,33 @@
+# Feature extraction parameters
+feature:
+  n_mels: 32          # Reduced from 64
+  frames: 5
+  n_fft: 1024
+  hop_length: 512
+  power: 2.0
+
+# Transformer model parameters - memory efficient version
+transformer:
+  head_size: 16       # Further reduced
+  num_heads: 1        # Minimum
+  ff_dim: 32          # Further reduced
+  num_transformer_blocks: 1  # Absolute minimum
+  mlp_units: [32, 16]  # Further simplified
+  dropout: 0.1
+
+# Fit algorithm parameters
+fit:
+  epochs: 50          # Reduced from 100
+  batch_size: 1       # Minimum possible
+  shuffle: True
+  validation_split: 0.1
+  verbose: 1
+  early_stopping: True
+  learning_rate: 0.0005  # Slightly reduced for stability with smaller batches
+
+# Directory paths
+base_directory: "./dataset"
+pickle_directory: "./pickle"
+model_directory: "./model"
+result_directory: "./result"
+result_file: "result_transformer.yaml"

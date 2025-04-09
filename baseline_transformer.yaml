@@ -8,22 +8,37 @@ feature:
 
 # Transformer model parameters
 transformer:
-  head_size: 64
-  num_heads: 4
-  ff_dim: 128
-  num_transformer_blocks: 2
-  mlp_units: [128, 64]
+  head_size: 128
+  num_heads: 12 # Increased from 8 to better utilize GPU
+  ff_dim: 512 # Increased from 256 to improve model capacity
+  num_transformer_blocks: 4 # Increased from 3 for better representation
+  mlp_units: [512, 256] # Increased from [256, 128]
   dropout: 0.2
 
 # Fit algorithm parameters
 fit:
   epochs: 100
-  batch_size: 32
+  batch_size: 512 # Increased from 256 to better utilize GPU
   shuffle: True
+  shuffle_buffer_size: 1024
+  augmentation_noise_prob: 0.5
+  augmentation_noise_stddev: 0.1
+  augmentation_freq_mask_prob: 0.5
+  augmentation_freq_mask_min_size: 2
+  augmentation_freq_mask_max_size: 10
   validation_split: 0.1
   verbose: 1
   early_stopping: True
+  early_stopping_monitor: val_loss
+  early_stopping_patience: 10
+  early_stopping_restore_best_weights: True
   learning_rate: 0.001
+  reduce_lr_on_plateau: True
+  reduce_lr_monitor: val_loss
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  reduce_lr_min_lr: 0.000001
+  evaluation_batch_size: 1024
 
 # Directory paths
 base_directory: "./dataset"
@@ -31,3 +46,15 @@ pickle_directory: "./pickle"
 model_directory: "./model"
 result_directory: "./result"
 result_file: "result_transformer.yaml"
+
+# Memory optimization
+memory:
+  enable_memory_growth: True
+  data_prefetch_buffer: 4
+  cache_preprocessed_data: True
+
+# Performance optimizations
+performance:
+  enable_xla: True # XLA compilation for TensorFlow
+  enable_tensorrt: True # TensorRT optimization if compatible
+  data_loading_workers: 9 # Increased from 4 to use all 9 vCPUs

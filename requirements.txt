@@ -1,6 +1,7 @@
 # Minimal package to use MIMII dataset baseline
 tensorflow==2.8.0
-numpy==1.21.3
+numpy==1.21.3  # Keep this version for TF 2.8.0 compatibility
+protobuf==3.20.0  # Add explicit protobuf version for compatibility
 matplotlib>=3.7.0
 PyYAML==6.0
 scikit-learn==1.0.2
@@ -8,6 +9,6 @@ librosa==0.8.1
 audioread>=3.0.0
 tqdm>=4.65.0
 scikit-image>=0.19.0
-psutil
-pandas
-seaborn
+psutil>=5.9.0
+pandas>=1.4.0
+seaborn>=0.11.0

@@ -655,20 +655,20 @@ def main():
 
     # Set TensorFlow memory growth
     gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
+    #if gpus:
+        #try:
+            #for gpu in gpus:
+                #tf.config.experimental.set_memory_growth(gpu, True)
                 
             # For RTX GPUs, set memory limit to leave some memory for system
-            if len(gpus) > 0:
-                tf.config.experimental.set_virtual_device_configuration(
-                    gpus[0],
-                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=14000)]  # 14GB limit
-                )
-            logger.info(f"Found {len(gpus)} GPUs with memory growth enabled")
-        except RuntimeError as e:
-            logger.warning(f"Memory growth setting failed: {e}")
+            #if len(gpus) > 0:
+                #tf.config.experimental.set_virtual_device_configuration(
+                    #gpus[0],
+                    #[tf.config.experimental.VirtualDeviceConfiguration(memory_limit=14000)]  # 14GB limit
+                #)
+            #logger.info(f"Found {len(gpus)} GPUs with memory growth enabled")
+        #except RuntimeError as e:
+            #logger.warning(f"Memory growth setting failed: {e}")
 
     # initialize the visualizer
     visualizer = Visualizer()

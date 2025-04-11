@@ -510,9 +510,12 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     
     # Enable mixed precision if available
     try:
+        # RTX 4000 Ada has Tensor Cores that can accelerate mixed precision
         policy = tf.keras.mixed_precision.Policy('mixed_float16')
         tf.keras.mixed_precision.set_global_policy(policy)
         logger.info("Mixed precision enabled for RTX 4000 Ada")
+        
+        # Additional optimization for RTX GPUs
         tf.config.optimizer.set_jit(True)  # Enable XLA compilation
         logger.info("XLA compilation enabled")
     except Exception as e:
@@ -524,43 +527,6 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         loss=ssim_loss,
         metrics=['mae', 'mse']
     )
-    
-    # Check for existing final weights (skip if training is complete)
-    if os.path.exists(model_file):
-        logger.info(f"Final model weights found at {model_file}, skipping training")
-        model.load_weights(model_file)
-        return None  # Skip training, return None for history
-    
-    # Check for checkpoints
-    model_file_parts = os.path.basename(model_file).split('_')
-    machine_type = model_file_parts[1]
-    machine_id = model_file_parts[2]
-    db = model_file_parts[3].split('.')[0]
-    checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
-    os.makedirs(checkpoint_path, exist_ok=True)
-    
-    # Find the latest checkpoint
-    checkpoint_files = glob.glob(os.path.join(checkpoint_path, "model_*.weights.h5"))
-    initial_epoch = 0
-    if checkpoint_files:
-        latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
-        logger.info(f"Found checkpoint: {latest_checkpoint}")
-        try:
-            model.load_weights(latest_checkpoint)
-            # Extract epoch number from filename (e.g., model_25.weights.h5 -> epoch 25)
-            checkpoint_epoch = int(os.path.basename(latest_checkpoint).split('_')[1].split('.')[0])
-            initial_epoch = checkpoint_epoch
-            logger.info(f"Resuming training from epoch {initial_epoch}")
-        except Exception as e:
-            logger.error(f"Failed to load checkpoint {latest_checkpoint}: {e}")
-            logger.info("Starting training from scratch")
-            initial_epoch = 0
-    else:
-        logger.info(f"No checkpoints found in {checkpoint_path}, checking for previous weights")
-        if os.path.exists(model_file):
-            logger.info(f"Loading previous weights: {model_file}")
-            model.load_weights(model_file)
-            initial_epoch = 0  # Assume starting fresh, adjust if you know the epoch
     
     # Callbacks
     callbacks = []
@@ -581,16 +547,21 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         )
     )
     
-    # Use a single checkpoint file
-    checkpoint_file = os.path.join(checkpoint_path, "best_model.weights.h5")
+    model_file_parts = os.path.basename(model_file).split('_')
+    machine_type = model_file_parts[1]
+    machine_id = model_file_parts[2]
+    db = model_file_parts[3].split('.')[0]
+
+    checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
+    os.makedirs(checkpoint_path, exist_ok=True)
+
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(
-            filepath=checkpoint_file,
+            filepath=os.path.join(checkpoint_path, "model_{epoch:02d}.weights.h5"),
             save_weights_only=True,
             save_best_only=True,
             monitor='val_loss',
-            mode='min',
-            verbose=1
+            mode='min'
         )
     )
 
@@ -606,18 +577,23 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         if is_training:
             np.random.shuffle(indices)
         
-        while True:
+        while True:  # Make this an infinite generator for Keras
             for start_idx in range(0, len(indices), batch_size):
                 end_idx = min(start_idx + batch_size, len(indices))
                 batch_indices = indices[start_idx:end_idx]
                 batch_x = data[batch_indices]
+                # Apply data augmentation for training
                 if is_training and np.random.random() < 0.5:
+                    # Add random noise + time masking
                     noise = np.random.normal(0, 0.01, batch_x.shape)
                     batch_x_aug = batch_x + noise
+                    
+                    # Optional: frequency masking (randomly mask some frequency bands)
                     if np.random.random() < 0.3:
                         freq_mask_size = np.random.randint(1, 10)
                         freq_start = np.random.randint(0, batch_x.shape[2] - freq_mask_size)
                         batch_x_aug[:, :, freq_start:freq_start+freq_mask_size] = 0
+                    
                     yield batch_x_aug, batch_x
                 else:
                     yield batch_x, batch_x
@@ -638,15 +614,13 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         validation_data=data_generator(train_data_sampled[split_idx:], batch_size, is_training=False),
         validation_steps=validation_steps,
         callbacks=callbacks,
-        verbose=1,
-        initial_epoch=initial_epoch
+        verbose=1
     )
     
     # Save artifacts
-    if history is not None:
-        visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
-        visualizer.save_figure(history_img)
-        model.save_weights(model_file)
+    visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
+    visualizer.save_figure(history_img)
+    model.save_weights(model_file)
     
     return history
 

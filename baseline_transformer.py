@@ -47,28 +47,6 @@ __versions__ = "3.0.0"
 
 
 ########################################################################
-# GPU optimizations
-########################################################################
-# Enable XLA compilation for better GPU performance
-tf.config.optimizer.set_jit(True)  # Enable XLA
-
-# Force tensor cores to be used with mixed precision
-policy = tf.keras.mixed_precision.Policy('mixed_float16')
-tf.keras.mixed_precision.set_global_policy(policy)
-
-# Set memory growth to avoid allocating all GPU memory at once
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print(f"Found {len(gpus)} GPUs and enabled memory growth")
-    except RuntimeError as e:
-        print(f"Memory growth setting failed: {e}")
-########################################################################
-
-
-########################################################################
 # setup STD I/O
 ########################################################################
 """
@@ -87,7 +65,6 @@ logger = setup_logging()
 ########################################################################
 
 
-@tf.function(jit_compile=True)  # Add XLA compilation
 def ssim_loss(y_true, y_pred):
     # Ensure data range is properly calculated
     data_range = tf.reduce_max(y_true) - tf.reduce_min(y_true)
@@ -241,11 +218,11 @@ def demux_wav(wav_name, channel=0):
 # feature extractor
 ########################################################################
 def file_to_vector_array(file_name,
-                         n_mels,
-                         frames,
-                         n_fft,
-                         hop_length,
-                         power):
+                         n_mels=64,
+                         frames=5,
+                         n_fft=1024,
+                         hop_length=512,
+                         power=2.0):
     """
     Modified to return 3D tensor for transformer input
     """
@@ -286,12 +263,12 @@ def file_to_vector_array(file_name,
 
 
 def list_to_vector_array(file_list,
-                         n_mels,
-                         frames,
-                         n_fft,
-                         hop_length,
-                         power,
-                         msg="calc..."):
+                         msg="calc...",
+                         n_mels=32,
+                         frames=5,
+                         n_fft=1024,
+                         hop_length=512,
+                         power=2.0):
     """
     convert the file_list to a vector array.
     file_to_vector_array() is iterated, and the output vector array is concatenated.
@@ -516,141 +493,14 @@ def log_memory_usage(message=""):
         logger.warning("psutil not installed, memory usage logging disabled")
 
 
-def log_gpu_utilization(message=""):
-    """Log GPU utilization and memory usage"""
-    try:
-        import subprocess
-        result = subprocess.check_output(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used', '--format=csv,nounits,noheader'])
-        gpu_util, mem_used = map(int, result.decode('utf-8').strip().split(','))
-        logger.info(f"GPU Utilization {message}: {gpu_util}%, Memory Used: {mem_used} MB")
-    except Exception as e:
-        logger.warning(f"Could not check GPU utilization: {e}")
-
-
-def preprocess_files(file_list, n_mels, frames, n_fft, hop_length, power):
-    """Process data in parallel using all available vCPUs"""
-    from multiprocessing import Pool, cpu_count
-    
-    # Use all available CPUs but cap at 9 (as specified)
-    num_processes = min(9, cpu_count())
-    logger.info(f"Using {num_processes} processes for parallel preprocessing")
-    
-    # Define a worker function that processes a single file
-    def process_file(file_name):
-        return file_to_vector_array(
-            file_name,
-            n_mels=n_mels,
-            frames=frames,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            power=power
-        )
-    
-    # Process files in parallel
-    with Pool(processes=num_processes) as pool:
-        results = pool.map(process_file, file_list)
-    
-    # Concatenate results
-    if results:
-        return np.concatenate([r for r in results if r.shape[0] > 0], axis=0)
-    else:
-        return np.array([])
-
-
 ########################################################################
 # The replacement code compiles the model using parameters from YAML configuration.
 # It trains the model with the train_data (normal samples) and saves the weights/callbacks.
 # If the model weights fail to load, the code falls back to training a new model.
 ########################################################################
 
-def get_dataset(data, param):
-    """Optimized data pipeline with tf.data for better GPU utilization"""
-    
-    # Get params or use defaults
-    _shuffle = param["fit"].get("shuffle", True)
-    _augment = param["fit"].get("augment", True) # Assuming 'augment' is a new param we might add
-    _shuffle_buffer_size = param["fit"].get("shuffle_buffer_size", 10000)
-    _augmentation_noise_prob = param["fit"].get("augmentation_noise_prob", 0.5)
-    _augmentation_noise_stddev = param["fit"].get("augmentation_noise_stddev", 0.1)
-    _augmentation_freq_mask_prob = param["fit"].get("augmentation_freq_mask_prob", 0.5)
-    _augmentation_freq_mask_min_size = param["fit"].get("augmentation_freq_mask_min_size", 2)
-    _augmentation_freq_mask_max_size = param["fit"].get("augmentation_freq_mask_max_size", 10)
-    _num_parallel_calls = tf.data.experimental.AUTOTUNE # Keep AUTOTUNE for now unless specified
-    _batch_size = param["fit"]["batch_size"]
-
-    dataset = tf.data.Dataset.from_tensor_slices((data, data))  # (input, target) pairs
-    if _shuffle:
-        dataset = dataset.shuffle(buffer_size=_shuffle_buffer_size)
-    dataset = dataset.batch(_batch_size)
-    dataset = dataset.prefetch(_num_parallel_calls)
-    
-    # Apply data augmentation if training
-    if _augment:
-        def augment(x, y):
-            # Ensure consistent data types
-            x = tf.cast(x, tf.float32)
-            y = tf.cast(y, tf.float32)
-            
-            # Add random noise
-            if tf.random.uniform(()) < _augmentation_noise_prob:
-                noise = tf.random.normal(tf.shape(x), mean=0.0, stddev=_augmentation_noise_stddev, dtype=tf.float32)
-                x_aug = x + noise
-                
-                # Optional: frequency masking
-                if tf.random.uniform(()) < _augmentation_freq_mask_prob:
-                    freq_mask_size = tf.random.uniform((), 
-                                                       minval=_augmentation_freq_mask_min_size, 
-                                                       maxval=_augmentation_freq_mask_max_size, 
-                                                       dtype=tf.int32)
-                    # Ensure freq_mask_size is not larger than the feature dimension
-                    freq_mask_size = tf.minimum(freq_mask_size, tf.shape(x)[2])
-                    freq_start = tf.random.uniform((), minval=0, maxval=tf.shape(x)[2] - freq_mask_size, dtype=tf.int32)
-                    mask = tf.ones_like(x, dtype=tf.float32)
-                    mask_indices = tf.range(freq_start, freq_start + freq_mask_size)
-                    
-                    # Even simpler masking approach using broadcasting
-                    # Create a mask of ones with the same shape as x
-                    mask = tf.ones_like(x, dtype=tf.float32)
-                    
-                    # Create a frequency mask (1.0 for frequencies to keep, 0.0 for frequencies to mask)
-                    freq_mask = tf.ones((tf.shape(x)[2],), dtype=tf.float32)
-                    mask_start = freq_start
-                    mask_end = freq_start + freq_mask_size
-                    
-                    # Set the masked frequency bins to 0
-                    freq_range = tf.range(0, tf.shape(x)[2], dtype=tf.int32)
-                    freq_mask = tf.where(
-                        (freq_range >= mask_start) & (freq_range < mask_end),
-                        tf.zeros_like(freq_range, dtype=tf.float32),
-                        tf.ones_like(freq_range, dtype=tf.float32)
-                    )
-                    
-                    # Reshape for broadcasting: [1, 1, freq_dims]
-                    freq_mask = tf.reshape(freq_mask, [1, 1, -1])
-                    
-                    # Apply the frequency mask to all time steps and all batches
-                    mask = mask * freq_mask
-                    
-                    x_aug = x_aug * mask
-                return x_aug, y
-            return x, y
-        
-        dataset = dataset.map(augment, num_parallel_calls=_num_parallel_calls)
-    
-    return dataset.cache()
-
-@tf.function(jit_compile=True)
-def train_step(model, x, y, optimizer, loss_fn):
-    """CUDA graph optimized training step"""
-    with tf.GradientTape() as tape:
-        predictions = model(x, training=True)
-        loss = loss_fn(y, predictions)
-    gradients = tape.gradient(loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    return loss
-
 def compile_and_train_model_efficiently(model, train_data, param, visualizer, history_img, model_file):
-    """Memory-efficient model training with optimized data pipeline for maximum GPU utilization"""
+    """Memory-efficient model training with data batching and generator-based approach"""
     # Default compilation parameters
     learning_rate = param["fit"].get("learning_rate", 0.001)
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
@@ -658,8 +508,15 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     train_data_sampled = train_data
     logger.info(f"Using full training dataset of {len(train_data)} examples")
     
-    # Log GPU utilization before training
-    log_gpu_utilization()
+    # Enable mixed precision if available
+    try:
+        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        tf.keras.mixed_precision.set_global_policy(policy)
+        logger.info("Mixed precision enabled for RTX 4000 Ada")
+        tf.config.optimizer.set_jit(True)  # Enable XLA compilation
+        logger.info("XLA compilation enabled")
+    except Exception as e:
+        logger.warning(f"GPU optimizations not fully available: {e}")
     
     # Compile the model
     model.compile(
@@ -668,133 +525,130 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         metrics=['mae', 'mse']
     )
     
-    # Callbacks
-    callbacks = []
-    if param["fit"].get("early_stopping", False):
-        callbacks.append(tf.keras.callbacks.EarlyStopping(
-            monitor=param["fit"]["early_stopping_monitor"],
-            patience=param["fit"]["early_stopping_patience"],
-            restore_best_weights=param["fit"]["early_stopping_restore_best_weights"]
-        ))
+    # Check for existing final weights (skip if training is complete)
+    if os.path.exists(model_file):
+        logger.info(f"Final model weights found at {model_file}, skipping training")
+        model.load_weights(model_file)
+        return None  # Skip training, return None for history
     
-    if param["fit"].get("reduce_lr_on_plateau", False):
-        callbacks.append(
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor=param["fit"]["reduce_lr_monitor"],
-                factor=param["fit"]["reduce_lr_factor"],
-                patience=param["fit"]["reduce_lr_patience"],
-                min_lr=param["fit"]["reduce_lr_min_lr"],
-                verbose=1
-            )
-        )
-    
-    # Add callback to log GPU utilization during training
-    class GPUUtilizationCallback(tf.keras.callbacks.Callback):
-        def on_epoch_end(self, epoch, logs=None):
-            log_gpu_utilization(f"End of epoch {epoch}")
-    
-    callbacks.append(GPUUtilizationCallback())
-    
+    # Check for checkpoints
     model_file_parts = os.path.basename(model_file).split('_')
     machine_type = model_file_parts[1]
     machine_id = model_file_parts[2]
     db = model_file_parts[3].split('.')[0]
-
     checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
     os.makedirs(checkpoint_path, exist_ok=True)
-
+    
+    # Find the latest checkpoint
+    checkpoint_files = glob.glob(os.path.join(checkpoint_path, "model_*.weights.h5"))
+    initial_epoch = 0
+    if checkpoint_files:
+        latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
+        logger.info(f"Found checkpoint: {latest_checkpoint}")
+        try:
+            model.load_weights(latest_checkpoint)
+            # Extract epoch number from filename (e.g., model_25.weights.h5 -> epoch 25)
+            checkpoint_epoch = int(os.path.basename(latest_checkpoint).split('_')[1].split('.')[0])
+            initial_epoch = checkpoint_epoch
+            logger.info(f"Resuming training from epoch {initial_epoch}")
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint {latest_checkpoint}: {e}")
+            logger.info("Starting training from scratch")
+            initial_epoch = 0
+    else:
+        logger.info(f"No checkpoints found in {checkpoint_path}, checking for previous weights")
+        if os.path.exists(model_file):
+            logger.info(f"Loading previous weights: {model_file}")
+            model.load_weights(model_file)
+            initial_epoch = 0  # Assume starting fresh, adjust if you know the epoch
+    
+    # Callbacks
+    callbacks = []
+    if param["fit"].get("early_stopping", False):
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            restore_best_weights=True
+        ))
+    
+    callbacks.append(
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=5,
+            min_lr=1e-6,
+            verbose=1
+        )
+    )
+    
+    # Use a single checkpoint file
+    checkpoint_file = os.path.join(checkpoint_path, "best_model.weights.h5")
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(checkpoint_path, "model_{epoch:02d}.weights.h5"),
+            filepath=checkpoint_file,
             save_weights_only=True,
             save_best_only=True,
             monitor='val_loss',
-            mode='min'
+            mode='min',
+            verbose=1
         )
     )
 
+    batch_size = param["fit"]["batch_size"]
     validation_split = param["fit"]["validation_split"]
-    shuffle = param["fit"].get("shuffle", True)
-    augment = param["fit"].get("augment", True)
-    shuffle_buffer_size = param["fit"].get("shuffle_buffer_size", 10000)
-    num_parallel_calls = param["fit"].get("num_parallel_calls", tf.data.experimental.AUTOTUNE)
     
     # Calculate split point
     split_idx = int(len(train_data_sampled) * (1 - validation_split))
     
-    # Create optimized tf.data datasets
-    train_dataset = get_dataset(train_data_sampled[:split_idx], param)
-    val_dataset = get_dataset(train_data_sampled[split_idx:], param)
+    # Create training and validation generators
+    def data_generator(data, batch_size, is_training=True):
+        indices = np.arange(len(data))
+        if is_training:
+            np.random.shuffle(indices)
+        
+        while True:
+            for start_idx in range(0, len(indices), batch_size):
+                end_idx = min(start_idx + batch_size, len(indices))
+                batch_indices = indices[start_idx:end_idx]
+                batch_x = data[batch_indices]
+                if is_training and np.random.random() < 0.5:
+                    noise = np.random.normal(0, 0.01, batch_x.shape)
+                    batch_x_aug = batch_x + noise
+                    if np.random.random() < 0.3:
+                        freq_mask_size = np.random.randint(1, 10)
+                        freq_start = np.random.randint(0, batch_x.shape[2] - freq_mask_size)
+                        batch_x_aug[:, :, freq_start:freq_start+freq_mask_size] = 0
+                    yield batch_x_aug, batch_x
+                else:
+                    yield batch_x, batch_x
+    
+    # Calculate steps per epoch
+    steps_per_epoch = split_idx // batch_size
+    validation_steps = (len(train_data_sampled) - split_idx) // batch_size
     
     # Free up memory
     gc.collect()
     tf.keras.backend.clear_session()
     
-    # Use custom training loop for maximum performance
-    if param.get("performance", {}).get("use_custom_training", False):
-        logger.info("Using custom training loop with XLA optimization")
-        epochs = param["fit"]["epochs"]
-        train_loss_metric = tf.keras.metrics.Mean('train_loss', dtype=tf.float32)
-        val_loss_metric = tf.keras.metrics.Mean('val_loss', dtype=tf.float32)
-        
-        history = {"loss": [], "val_loss": []}
-        
-        for epoch in range(epochs):
-            # Reset metrics
-            train_loss_metric.reset_states()
-            val_loss_metric.reset_states()
-            
-            # Training loop
-            for x_batch, y_batch in train_dataset:
-                loss = train_step(model, x_batch, y_batch, optimizer, ssim_loss)
-                train_loss_metric.update_state(loss)
-            
-            # Validation loop
-            for x_val, y_val in val_dataset:
-                val_predictions = model(x_val, training=False)
-                val_loss = ssim_loss(y_val, val_predictions)
-                val_loss_metric.update_state(val_loss)
-            
-            # Update history
-            history["loss"].append(train_loss_metric.result().numpy())
-            history["val_loss"].append(val_loss_metric.result().numpy())
-            
-            # Log results
-            logger.info(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_metric.result().numpy():.4f} - val_loss: {val_loss_metric.result().numpy():.4f}")
-            
-            # Check for early stopping
-            # (simplified implementation)
-            
-            # Log GPU utilization
-            log_gpu_utilization(f"During epoch {epoch+1}")
-        
-        # Convert to keras History object for compatibility
-        class HistoryObject:
-            def __init__(self, history_dict):
-                self.history = history_dict
-        
-        history_obj = HistoryObject(history)
-    else:
-        # Use standard Keras training
-        logger.info("Using standard Keras training with tf.data optimization")
-        history = model.fit(
-            train_dataset,
-            epochs=param["fit"]["epochs"],
-            validation_data=val_dataset,
-            callbacks=callbacks,
-            verbose=1
-        )
-        history_obj = history
+    # Train with generator
+    history = model.fit(
+        data_generator(train_data_sampled[:split_idx], batch_size),
+        epochs=param["fit"]["epochs"],
+        steps_per_epoch=steps_per_epoch,
+        validation_data=data_generator(train_data_sampled[split_idx:], batch_size, is_training=False),
+        validation_steps=validation_steps,
+        callbacks=callbacks,
+        verbose=1,
+        initial_epoch=initial_epoch
+    )
     
     # Save artifacts
-    visualizer.loss_plot(history_obj.history["loss"], history_obj.history.get("val_loss", []))
-    visualizer.save_figure(history_img)
-    model.save_weights(model_file)
+    if history is not None:
+        visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
+        visualizer.save_figure(history_img)
+        model.save_weights(model_file)
     
-    # Final GPU utilization check
-    log_gpu_utilization("After training")
-    
-    return history_obj
+    return history
 
 ########################################################################
 # main
@@ -913,16 +767,13 @@ def main():
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue
 
-            # Use parallel preprocessing for better CPU utilization
-            logger.info("Using parallel preprocessing with all available vCPUs")
-            train_data = preprocess_files(
-                file_list=train_files,
-                n_mels=param["feature"]["n_mels"],
-                frames=param["feature"]["frames"],
-                n_fft=param["feature"]["n_fft"],
-                hop_length=param["feature"]["hop_length"],
-                power=param["feature"]["power"]
-            )
+            train_data = list_to_vector_array(train_files,
+                                            msg="generate train_dataset",
+                                            n_mels=param["feature"]["n_mels"],
+                                            frames=param["feature"]["frames"],
+                                            n_fft=param["feature"]["n_fft"],
+                                            hop_length=param["feature"]["hop_length"],
+                                            power=param["feature"]["power"])
             
 
             #debuging
@@ -979,39 +830,23 @@ def main():
         log_memory_usage("before training")
 
         try:
-            # First try to load existing model if it exists
-            if os.path.exists(model_file):
-                try:
-                    logger.info(f"Loading existing model weights from {model_file}")
-                    model.load_weights(model_file)
-                    logger.info("Model weights loaded successfully")
-                except Exception as e:
-                    logger.warning(f"Failed to load existing model weights: {e}")
-                    logger.warning("This may be due to changes in model architecture. Will train a new model.")
-                    # Train a new model since loading failed
-                    history = compile_and_train_model_efficiently(
-                        model=model, 
-                        train_data=train_data, 
-                        param=param, 
-                        visualizer=visualizer, 
-                        history_img=history_img, 
-                        model_file=model_file
-                    )
-            else:
-                # No existing model, train a new one
-                logger.info("No existing model found. Training a new model.")
-                history = compile_and_train_model_efficiently(
-                    model=model, 
-                    train_data=train_data, 
-                    param=param, 
-                    visualizer=visualizer, 
-                    history_img=history_img, 
-                    model_file=model_file
-                )
+            history = compile_and_train_model_efficiently(
+                model=model, 
+                train_data=train_data, 
+                param=param, 
+                visualizer=visualizer, 
+                history_img=history_img, 
+                model_file=model_file
+            )
         except Exception as e:
             logger.error(f"Error during model training: {e}")
-            logger.error("Unable to train or load model. Check logs for details.")
-            model.summary()
+            # Try to load model if training failed but model exists
+            if os.path.exists(model_file):
+                logger.info(f"Loading existing model weights from {model_file}")
+                model.load_weights(model_file)
+            else:
+                logger.error(f"No model weights available at {model_file}")
+                model.summary()
         
         #debug
         log_memory_usage("after training")
@@ -1029,16 +864,13 @@ def main():
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue
 
-            # Use parallel preprocessing for better CPU utilization
-            logger.info("Using parallel preprocessing with all available vCPUs")
-            train_data = preprocess_files(
-                file_list=train_files,
-                n_mels=param["feature"]["n_mels"],
-                frames=param["feature"]["frames"],
-                n_fft=param["feature"]["n_fft"],
-                hop_length=param["feature"]["hop_length"],
-                power=param["feature"]["power"]
-            )
+            train_data = list_to_vector_array(train_files,
+                                            msg="generate train_dataset",
+                                            n_mels=param["feature"]["n_mels"],
+                                            frames=param["feature"]["frames"],
+                                            n_fft=param["feature"]["n_fft"],
+                                            hop_length=param["feature"]["hop_length"],
+                                            power=param["feature"]["power"])
             
             # Check if any valid training data was found
             if train_data.shape[0] == 0:
@@ -1074,7 +906,7 @@ def main():
                     continue
                     
                 # Batch prediction to avoid memory spikes
-                batch_size = param["fit"]["evaluation_batch_size"]
+                batch_size = 128
                 error_list = []
                 for i in range(0, len(data), batch_size):
                     batch_data = data[i:i+batch_size]

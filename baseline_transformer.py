@@ -497,6 +497,28 @@ def log_memory_usage(message=""):
         logger.warning("psutil not installed, memory usage logging disabled")
 
 
+
+
+def save_backup_history_plot(history, filename):
+    """Generate and save a backup history plot using direct matplotlib calls"""
+    try:
+        plt.figure(figsize=(12, 8))
+        plt.plot(history.history['loss'])
+        if 'val_loss' in history.history:
+            plt.plot(history.history['val_loss'])
+            plt.legend(['Training Loss', 'Validation Loss'])
+        else:
+            plt.legend(['Training Loss'])
+        plt.title('Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.savefig(filename)
+        plt.close()
+        logger.info(f"Backup history plot saved to {filename}")
+    except Exception as e:
+        logger.error(f"Failed to create backup history plot: {e}")
+
+
 ########################################################################
 # The replacement code compiles the model using parameters from YAML configuration.
 # It trains the model with the train_data (normal samples) and saves the weights/callbacks.
@@ -643,11 +665,28 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         callbacks=callbacks,
         verbose=param["fit"].get("verbose", 1)
     )
+
+    # Check if history was properly recorded
+    if not hasattr(history, 'history') or not history.history:
+        logger.warning(f"No history was recorded during training for {machine_type}_{machine_id}_{db}")
+        # Create a dummy history object if needed
+        class DummyHistory:
+            def __init__(self):
+                self.history = {"loss": [0], "val_loss": [0]}
+        history = DummyHistory()
+
     
+    #debug Log training history
+    logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
     # Save artifacts
     visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
     visualizer.save_figure(history_img)
+    #debug
+    logger.info(f"Plot saved to {history_img}")
     model.save_weights(model_file)
+
+    backup_history_img = f"{param['model_directory']}/backup_history_{machine_type}_{machine_id}_{db}.png"
+    save_backup_history_plot(history, backup_history_img)
     
     return history
 

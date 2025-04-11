@@ -875,7 +875,7 @@ def main():
                 logger.error(f"No model weights available at {model_file}")
                 model.summary()
         
-        #debugg
+        #debug
         log_memory_usage("after training")
         if 'history' in locals() and hasattr(history, 'history'):
             logger.info(f"Training completed for {machine_type}_{machine_id}_{db}: epochs={len(history.history['loss'])}")

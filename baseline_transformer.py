@@ -90,25 +90,29 @@ class Visualizer:
         self.fig = plt.figure(figsize=(30, 10))
         plt.subplots_adjust(wspace=0.3, hspace=0.3)
 
-    def loss_plot(self, loss, val_loss):
-        """
-        Plot loss curve.
-
-        loss : list [ float ]
-            training loss time series.
-        val_loss : list [ float ]
-            validation loss time series.
-
-        return   : None
-        """
-        ax = self.fig.add_subplot(1, 1, 1)
-        ax.cla()
-        ax.plot(loss)
-        ax.plot(val_loss)
-        ax.set_title("Model loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.legend(["Train", "Test"], loc="upper right")
+    # In the visualizer.loss_plot method, add error checking:
+def loss_plot(self, loss, val_loss):
+    """
+    Plot loss curve with error checking.
+    """
+    ax = self.fig.add_subplot(1, 1, 1)
+    ax.cla()
+    
+    # Check if history data exists
+    if not loss or len(loss) == 0:
+        logger.warning("No loss history data available for plotting")
+        # Add text to the empty plot
+        ax.text(0.5, 0.5, "No training history available", 
+                horizontalalignment='center', verticalalignment='center',
+                transform=ax.transAxes, fontsize=14)
+        return
+        
+    ax.plot(loss)
+    ax.plot(val_loss)
+    ax.set_title("Model loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.legend(["Train", "Test"], loc="upper right")
 
     def save_figure(self, name):
         """
@@ -849,6 +853,9 @@ def main():
         log_memory_usage("after model creation")
         log_memory_usage("before training")
 
+        #debug Check if the model file exists
+        logger.info(f"Training data for {machine_type}_{machine_id}_{db}: shape={train_data.shape}")
+
         try:
             history = compile_and_train_model_efficiently(
                 model=model, 
@@ -870,6 +877,10 @@ def main():
         
         #debug
         log_memory_usage("after training")
+        if 'history' in locals() and hasattr(history, 'history'):
+            logger.info(f"Training completed for {machine_type}_{machine_id}_{db}: epochs={len(history.history['loss'])}")
+        else:
+            logger.warning(f"No training history available for {machine_type}_{machine_id}_{db}")
 
 
         if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):

@@ -501,73 +501,62 @@ def log_memory_usage(message=""):
 
 def compile_and_train_model_efficiently(model, train_data, param, visualizer, history_img, model_file):
     """Memory-efficient model training with data batching and generator-based approach"""
-    # Default compilation parameters
+    # Get compilation parameters from YAML config
     learning_rate = param["fit"].get("learning_rate", 0.001)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    optimizer_name = param["fit"]["compile"].get("optimizer", "adam").lower()
+    loss_name = param["fit"]["compile"].get("loss", "ssim_loss").lower()
+    
+    # Configure optimizer based on YAML
+    if optimizer_name == "adam":
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    elif optimizer_name == "sgd":
+        optimizer = tf.keras.optimizers.SGD(learning_rate=learning_rate)
+    elif optimizer_name == "rmsprop":
+        optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
+    else:
+        logger.warning(f"Unknown optimizer {optimizer_name}, using Adam")
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     
     train_data_sampled = train_data
     logger.info(f"Using full training dataset of {len(train_data)} examples")
     
     # Enable mixed precision if available
     try:
+        # RTX 4000 Ada has Tensor Cores that can accelerate mixed precision
         policy = tf.keras.mixed_precision.Policy('mixed_float16')
         tf.keras.mixed_precision.set_global_policy(policy)
         logger.info("Mixed precision enabled for RTX 4000 Ada")
+        
+        # Additional optimization for RTX GPUs
         tf.config.optimizer.set_jit(True)  # Enable XLA compilation
         logger.info("XLA compilation enabled")
     except Exception as e:
         logger.warning(f"GPU optimizations not fully available: {e}")
     
-    # Compile the model
+    # Compile the model with loss function from YAML config
+    if loss_name == "ssim_loss":
+        loss_function = ssim_loss
+    elif loss_name == "mean_squared_error" or loss_name == "mse":
+        loss_function = "mse"
+    elif loss_name == "mean_absolute_error" or loss_name == "mae":
+        loss_function = "mae"
+    else:
+        logger.warning(f"Unknown loss {loss_name}, using ssim_loss")
+        loss_function = ssim_loss
+        
     model.compile(
         optimizer=optimizer,
-        loss=ssim_loss,
+        loss=loss_function,
         metrics=['mae', 'mse']
     )
     
-    # Check for existing final weights (skip if training is complete)
-    if os.path.exists(model_file):
-        logger.info(f"Final model weights found at {model_file}, skipping training")
-        model.load_weights(model_file)
-        return None  # Skip training, return None for history
-    
-    # Check for checkpoints
-    model_file_parts = os.path.basename(model_file).split('_')
-    machine_type = model_file_parts[1]
-    machine_id = model_file_parts[2]
-    db = model_file_parts[3].split('.')[0]
-    checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
-    os.makedirs(checkpoint_path, exist_ok=True)
-    
-    # Find the latest checkpoint
-    checkpoint_files = glob.glob(os.path.join(checkpoint_path, "model_*.weights.h5"))
-    initial_epoch = 0
-    if checkpoint_files:
-        latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
-        logger.info(f"Found checkpoint: {latest_checkpoint}")
-        try:
-            model.load_weights(latest_checkpoint)
-            # Extract epoch number from filename (e.g., model_25.weights.h5 -> epoch 25)
-            checkpoint_epoch = int(os.path.basename(latest_checkpoint).split('_')[1].split('.')[0])
-            initial_epoch = checkpoint_epoch
-            logger.info(f"Resuming training from epoch {initial_epoch}")
-        except Exception as e:
-            logger.error(f"Failed to load checkpoint {latest_checkpoint}: {e}")
-            logger.info("Starting training from scratch")
-            initial_epoch = 0
-    else:
-        logger.info(f"No checkpoints found in {checkpoint_path}, checking for previous weights")
-        if os.path.exists(model_file):
-            logger.info(f"Loading previous weights: {model_file}")
-            model.load_weights(model_file)
-            initial_epoch = 0  # Assume starting fresh, adjust if you know the epoch
-    
-    # Callbacks
+    # Callbacks from YAML config
     callbacks = []
     if param["fit"].get("early_stopping", False):
+        early_stopping_patience = param["fit"].get("early_stopping_patience", 10)
         callbacks.append(tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=10,
+            patience=early_stopping_patience,
             restore_best_weights=True
         ))
     
@@ -581,16 +570,21 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         )
     )
     
-    # Use a single checkpoint file
-    checkpoint_file = os.path.join(checkpoint_path, "best_model.weights.h5")
+    model_file_parts = os.path.basename(model_file).split('_')
+    machine_type = model_file_parts[1]
+    machine_id = model_file_parts[2]
+    db = model_file_parts[3].split('.')[0]
+
+    checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
+    os.makedirs(checkpoint_path, exist_ok=True)
+
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(
-            filepath=checkpoint_file,
+            filepath=os.path.join(checkpoint_path, "model_{epoch:02d}.weights.h5"),
             save_weights_only=True,
             save_best_only=True,
             monitor='val_loss',
-            mode='min',
-            verbose=1
+            mode='min'
         )
     )
 
@@ -606,18 +600,23 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         if is_training:
             np.random.shuffle(indices)
         
-        while True:
+        while True:  # Make this an infinite generator for Keras
             for start_idx in range(0, len(indices), batch_size):
                 end_idx = min(start_idx + batch_size, len(indices))
                 batch_indices = indices[start_idx:end_idx]
                 batch_x = data[batch_indices]
+                # Apply data augmentation for training
                 if is_training and np.random.random() < 0.5:
+                    # Add random noise + time masking
                     noise = np.random.normal(0, 0.01, batch_x.shape)
                     batch_x_aug = batch_x + noise
+                    
+                    # Optional: frequency masking (randomly mask some frequency bands)
                     if np.random.random() < 0.3:
                         freq_mask_size = np.random.randint(1, 10)
                         freq_start = np.random.randint(0, batch_x.shape[2] - freq_mask_size)
                         batch_x_aug[:, :, freq_start:freq_start+freq_mask_size] = 0
+                    
                     yield batch_x_aug, batch_x
                 else:
                     yield batch_x, batch_x
@@ -630,7 +629,7 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     gc.collect()
     tf.keras.backend.clear_session()
     
-    # Train with generator
+    # Train with generator using parameters from YAML config
     history = model.fit(
         data_generator(train_data_sampled[:split_idx], batch_size),
         epochs=param["fit"]["epochs"],
@@ -638,15 +637,13 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         validation_data=data_generator(train_data_sampled[split_idx:], batch_size, is_training=False),
         validation_steps=validation_steps,
         callbacks=callbacks,
-        verbose=1,
-        initial_epoch=initial_epoch
+        verbose=param["fit"].get("verbose", 1)
     )
     
     # Save artifacts
-    if history is not None:
-        visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
-        visualizer.save_figure(history_img)
-        model.save_weights(model_file)
+    visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
+    visualizer.save_figure(history_img)
+    model.save_weights(model_file)
     
     return history
 
@@ -659,8 +656,17 @@ def main():
     start_time = time.time()
 
     # load parameter yaml
-    with open("baseline_transformer.yaml", "r") as stream:
+    yaml_file = "baseline_transformer.yaml"
+    logger.info(f"Loading configuration from {yaml_file}")
+    with open(yaml_file, "r") as stream:
         param = yaml.safe_load(stream)
+        
+    # Validate required configuration sections
+    required_sections = ["feature", "transformer", "fit", "base_directory", "pickle_directory", "model_directory", "result_directory"]
+    for section in required_sections:
+        if section not in param:
+            logger.error(f"Missing required configuration section: {section}")
+            return
 
     #THE EXPERIMENT TRACKING CODE
     experiment_name = f"transformer_ssim_{int(time.time())}"
@@ -700,9 +706,23 @@ def main():
     visualizer = Visualizer()
 
     # load base_directory list using pathlib for better path handling
+    #base_path = Path(param["base_directory"])
+    #dirs = sorted(list(base_path.glob("*/*/*")))
+    #dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
+
+    ########################################################################
+    # Load only fan 0dB dataset
     base_path = Path(param["base_directory"])
-    dirs = sorted(list(base_path.glob("*/*/*")))
+    fan_0db_pattern = "0dB/fan/*"  # This pattern matches only fan directories in the 0dB folder
+    dirs = sorted(list(base_path.glob(fan_0db_pattern)))
     dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
+
+    # Verify the selected directories
+    logger.info(f"Found {len(dirs)} fan directories to process:")
+    for dir_path in dirs:
+        logger.info(f"  - {dir_path}")
+
+    ########################################################################
 
     # Print dirs for debugging
     logger.info(f"Found {len(dirs)} directories to process:")
@@ -810,19 +830,19 @@ def main():
         log_memory_usage("after data loading")
         #debug
         log_memory_usage("before model creation")
-        # model training
+        # model training with parameters from YAML config
         print("============== MODEL TRAINING ==============")
         model = transformer_model(
             input_shape=(
                 param["feature"]["frames"], 
                 param["feature"]["n_mels"]
             ),
-            head_size=param["transformer"]["head_size"],
-            num_heads=param["transformer"]["num_heads"],
-            ff_dim=param["transformer"]["ff_dim"],
-            num_transformer_blocks=param["transformer"]["num_transformer_blocks"],
-            mlp_units=param["transformer"]["mlp_units"],
-            dropout=param["transformer"]["dropout"]
+            head_size=param["transformer"].get("head_size", 64),
+            num_heads=param["transformer"].get("num_heads", 4),
+            ff_dim=param["transformer"].get("ff_dim", 128),
+            num_transformer_blocks=param["transformer"].get("num_transformer_blocks", 2),
+            mlp_units=param["transformer"].get("mlp_units", [128, 64]),
+            dropout=param["transformer"].get("dropout", 0.2)
         )
         model.summary()
         #debug
@@ -905,8 +925,8 @@ def main():
                     logger.warning(f"No valid features extracted from file: {file_name}")
                     continue
                     
-                # Batch prediction to avoid memory spikes
-                batch_size = 128
+                # Batch prediction to avoid memory spikes - use size from YAML config
+                batch_size = param["fit"].get("prediction_batch_size", 128)
                 error_list = []
                 for i in range(0, len(data), batch_size):
                     batch_data = data[i:i+batch_size]

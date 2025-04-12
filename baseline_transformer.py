@@ -679,13 +679,7 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     #debug Log training history
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
     # Save artifacts
-    visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
-    visualizer.save_figure(history_img)
-    #debug
-    logger.info(f"Plot saved to {history_img}")
-    model.save_weights(model_file)
-
-    backup_history_img = f"{param['model_directory']}/backup_history_{machine_type}_{machine_id}_{db}.png"
+    backup_history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
     save_backup_history_plot(history, backup_history_img)
     
     return history

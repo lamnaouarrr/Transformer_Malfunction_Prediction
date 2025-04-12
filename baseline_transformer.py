@@ -638,7 +638,6 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         history = DummyHistory()
 
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
-    # Use visualizer
     visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
     visualizer.save_figure(history_img)
     
@@ -647,14 +646,21 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     return history
 
 
-def cleanup_history_files():
-    """Move or delete old history files"""
+def cleanup_history_files(param):
+    """Delete old history files before training"""
     try:
         # Delete backup files
         backup_files = glob.glob(f"{param['model_directory']}/backup_history_*.png")
         for file_path in backup_files:
             os.remove(file_path)
             logger.info(f"Removed backup history file: {file_path}")
+        
+        # Delete old history files without dB suffix
+        old_history_files = glob.glob(f"{param['model_directory']}/history_*.png")
+        for file_path in old_history_files:
+            if not file_path.endswith("_0dB.png") and not file_path.endswith("_6dB.png"):
+                os.remove(file_path)
+                logger.info(f"Removed old history file: {file_path}")
     except Exception as e:
         logger.error(f"Error during cleanup of history files: {e}")
 
@@ -662,8 +668,6 @@ def cleanup_history_files():
 # main
 ########################################################################
 def main():
-
-    # Record the start time
     start_time = time.time()
 
     yaml_file = "baseline_transformer.yaml"
@@ -692,11 +696,13 @@ def main():
     os.makedirs(param["model_directory"], exist_ok=True)
     os.makedirs(param["result_directory"], exist_ok=True)
 
+    # Clean up old history files before training
+    cleanup_history_files(param)
+
     visualizer = Visualizer()
 
-    # Replace hardcoded dataset selection (lines 952-958)
     base_path = Path(param["base_directory"])
-    dataset_pattern = param.get("dataset_pattern", "*/*/*")  # Default to full dataset
+    dataset_pattern = param.get("dataset_pattern", "*/*/*")
     dirs = sorted(list(base_path.glob(dataset_pattern)))
     dirs = [str(dir_path) for dir_path in dirs]
 
@@ -741,10 +747,6 @@ def main():
         eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
         eval_labels_pickle = f"{param['pickle_directory']}/eval_labels_{machine_type}_{machine_id}_{db}.pickle"
         model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.weights.h5"
-        #history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
-        history_dir = f"{param['model_directory']}/history_plots/{db}"
-        os.makedirs(history_dir, exist_ok=True)
-        history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
 
@@ -1036,7 +1038,6 @@ def main():
     # saving the execution time to the results file
     results["execution_time_seconds"] = float(total_time)
     
-    cleanup_history_files()
 
     # output results
     print("\n===========================")

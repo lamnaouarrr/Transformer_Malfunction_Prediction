@@ -789,297 +789,297 @@ def main():
 
         logger.info(f"Processing: db={db}, machine_type={machine_type}, machine_id={machine_id}")
         try:
-        # setup path
-        # setup path
-        evaluation_result = {}
-        train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
-        eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
-        eval_labels_pickle = f"{param['pickle_directory']}/eval_labels_{machine_type}_{machine_id}_{db}.pickle"
-        model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.weights.h5"
-        history_dir = f"{param['model_directory']}/history_plots/{db}"
-        os.makedirs(history_dir, exist_ok=True)
-        history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
-        logger.info(f"Saving history plot to: {history_img}")
-        evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
+            # setup path
+            # setup path
+            evaluation_result = {}
+            train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
+            eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
+            eval_labels_pickle = f"{param['pickle_directory']}/eval_labels_{machine_type}_{machine_id}_{db}.pickle"
+            model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.weights.h5"
+            history_dir = f"{param['model_directory']}/history_plots/{db}"
+            os.makedirs(history_dir, exist_ok=True)
+            history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
+            logger.info(f"Saving history plot to: {history_img}")
+            evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
 
-        # dataset generator
-        print("============== DATASET_GENERATOR ==============")
-        #debug
-        log_memory_usage("before loading data for evaluation")
-        if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
-            train_data = load_pickle(train_pickle)
-            eval_files = load_pickle(eval_files_pickle)
-            eval_labels = load_pickle(eval_labels_pickle)
-        else:
-            train_files, train_labels, eval_files, eval_labels = dataset_generator(target_dir)
-            
-            # Check if any files were found
-            if len(train_files) == 0 or len(eval_files) == 0:
-                logger.error(f"No files found for {evaluation_result_key}, skipping...")
-                continue
-
-            train_data = list_to_vector_array(train_files,
-                                            msg="generate train_dataset",
-                                            n_mels=param["feature"]["n_mels"],
-                                            frames=param["feature"]["frames"],
-                                            n_fft=param["feature"]["n_fft"],
-                                            hop_length=param["feature"]["hop_length"],
-                                            power=param["feature"]["power"])
-            
-
-            #debuging
-            print("Train data shape:", train_data.shape)
-            print("First sample shape:", train_data[0].shape if len(train_data) > 0 else "No data")
-
-            # Check if any valid training data was found
-            if train_data.shape[0] == 0:
-                logger.error(f"No valid training data for {evaluation_result_key}, skipping...")
-                continue
-
-            save_pickle(train_pickle, train_data)
-            save_pickle(eval_files_pickle, eval_files)
-            save_pickle(eval_labels_pickle, eval_labels)
-
-        print(f"Train data shape: {train_data.shape}")  # Should be (num_samples, 5, 64)
-        print(f"Eval files: {len(eval_files)}, Eval labels: {len(eval_labels)}")
-
-        # Check data shape
-        print(f"Train data actual shape: {train_data.shape}")
-        print(f"Expected shape: (N, {param['feature']['frames']}, {param['feature']['n_mels']})")
-
-        # Reshape if necessary
-        if len(train_data.shape) == 2:
-            if train_data.shape[1] == param['feature']['frames'] * param['feature']['n_mels']:
-                print("Reshaping data to correct format...")
-                train_data = train_data.reshape(-1, param['feature']['frames'], param['feature']['n_mels'])
-                print(f"New shape: {train_data.shape}")
+            # dataset generator
+            print("============== DATASET_GENERATOR ==============")
+            #debug
+            log_memory_usage("before loading data for evaluation")
+            if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
+                train_data = load_pickle(train_pickle)
+                eval_files = load_pickle(eval_files_pickle)
+                eval_labels = load_pickle(eval_labels_pickle)
             else:
-                logger.error(f"Cannot reshape data: {train_data.shape[1]} != {param['feature']['frames'] * param['feature']['n_mels']}")
-                continue  # Skip to next directory
-
-        #debug
-        log_memory_usage("after data loading")
-        #debug
-        log_memory_usage("before model creation")
-        # model training with parameters from YAML config
-        print("============== MODEL TRAINING ==============")
-        model = transformer_model(
-            input_shape=(
-                param["feature"]["frames"], 
-                param["feature"]["n_mels"]
-            ),
-            head_size=param["transformer"].get("head_size", 64),
-            num_heads=param["transformer"].get("num_heads", 4),
-            ff_dim=param["transformer"].get("ff_dim", 128),
-            num_transformer_blocks=param["transformer"].get("num_transformer_blocks", 2),
-            mlp_units=param["transformer"].get("mlp_units", [128, 64]),
-            dropout=param["transformer"].get("dropout", 0.2)
-        )
-        model.summary()
-        #debug
-        log_memory_usage("after model creation")
-        log_memory_usage("before training")
-
-        #debug Check if the model file exists
-        logger.info(f"Training data for {machine_type}_{machine_id}_{db}: shape={train_data.shape}")
-
-        try:
-            history = compile_and_train_model_efficiently(
-                model=model, 
-                train_data=train_data, 
-                param=param, 
-                visualizer=visualizer, 
-                history_img=history_img, 
-                model_file=model_file
-            )
-        except Exception as e:
-            logger.error(f"Error during model training: {e}")
-            # Try to load model if training failed but model exists
-            if os.path.exists(model_file):
-                logger.info(f"Loading existing model weights from {model_file}")
-                model.load_weights(model_file)
-            else:
-                logger.error(f"No model weights available at {model_file}")
-                model.summary()
-        
-        #debug
-        log_memory_usage("after training")
-        if 'history' in locals() and hasattr(history, 'history'):
-            logger.info(f"Training completed for {machine_type}_{machine_id}_{db}: epochs={len(history.history['loss'])}")
-        else:
-            logger.warning(f"No training history available for {machine_type}_{machine_id}_{db}")
-
-
-        if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
-            train_data = load_pickle(train_pickle)
-            eval_files = load_pickle(eval_files_pickle)
-            eval_labels = load_pickle(eval_labels_pickle)
-        else:
-            train_files, train_labels, eval_files, eval_labels = dataset_generator(target_dir)
-            
-            # Check if any files were found
-            if len(train_files) == 0 or len(eval_files) == 0:
-                logger.error(f"No files found for {evaluation_result_key}, skipping...")
-                continue
-
-            train_data = list_to_vector_array(train_files,
-                                            msg="generate train_dataset",
-                                            n_mels=param["feature"]["n_mels"],
-                                            frames=param["feature"]["frames"],
-                                            n_fft=param["feature"]["n_fft"],
-                                            hop_length=param["feature"]["hop_length"],
-                                            power=param["feature"]["power"])
-            
-            # Check if any valid training data was found
-            if train_data.shape[0] == 0:
-                logger.error(f"No valid training data for {evaluation_result_key}, skipping...")
-                continue
-
-            save_pickle(train_pickle, train_data)
-            save_pickle(eval_files_pickle, eval_files)
-            save_pickle(eval_labels_pickle, eval_labels)
-
-        #debug        
-        log_memory_usage("after model prediction")
-
-        # evaluation
-        print("============== EVALUATION ==============")
-        y_pred = [0. for _ in eval_labels]
-        y_true = eval_labels
-        original_specs = []
-        reconstructed_specs = []
-
-
-        for num, file_name in tqdm(enumerate(eval_files), total=len(eval_files)):
-            try:
-                data = file_to_vector_array(file_name,
-                                           n_mels=param["feature"]["n_mels"],
-                                           frames=param["feature"]["frames"],
-                                           n_fft=param["feature"]["n_fft"],
-                                           hop_length=param["feature"]["hop_length"],
-                                           power=param["feature"]["power"])
-                                           
-                if data.shape[0] == 0:
-                    logger.warning(f"No valid features extracted from file: {file_name}")
+                train_files, train_labels, eval_files, eval_labels = dataset_generator(target_dir)
+                
+                # Check if any files were found
+                if len(train_files) == 0 or len(eval_files) == 0:
+                    logger.error(f"No files found for {evaluation_result_key}, skipping...")
                     continue
-                    
-                # Batch prediction to avoid memory spikes - use size from YAML config
-                batch_size = param["fit"].get("prediction_batch_size", 128)
-                error_list = []
-                for i in range(0, len(data), batch_size):
-                    batch_data = data[i:i+batch_size]
-                    batch_pred = model.predict(batch_data, verbose=0)
-                    batch_error = np.mean(np.square(batch_data - batch_pred), axis=(1, 2))
-                    error_list.extend(batch_error)
-                    
-                # Use mean squared error as anomaly score
-                if error_list:
-                    y_pred[num] = np.mean(error_list)
-                    
-                    # Store only a subset of spectrograms to avoid memory issues
-                    if len(original_specs) < param["fit"].get("max_spectrograms_to_store", 20):  # Configurable limit
-                        original_specs.append(data[:param["fit"].get("max_samples_per_spectrogram", 10)])  # Configurable sample limit
-                        reconstructed_specs.append(batch_pred[:param["fit"].get("max_samples_per_spectrogram", 10)])
 
+                train_data = list_to_vector_array(train_files,
+                                                msg="generate train_dataset",
+                                                n_mels=param["feature"]["n_mels"],
+                                                frames=param["feature"]["frames"],
+                                                n_fft=param["feature"]["n_fft"],
+                                                hop_length=param["feature"]["hop_length"],
+                                                power=param["feature"]["power"])
+                
+
+                #debuging
+                print("Train data shape:", train_data.shape)
+                print("First sample shape:", train_data[0].shape if len(train_data) > 0 else "No data")
+
+                # Check if any valid training data was found
+                if train_data.shape[0] == 0:
+                    logger.error(f"No valid training data for {evaluation_result_key}, skipping...")
+                    continue
+
+                save_pickle(train_pickle, train_data)
+                save_pickle(eval_files_pickle, eval_files)
+                save_pickle(eval_labels_pickle, eval_labels)
+
+            print(f"Train data shape: {train_data.shape}")  # Should be (num_samples, 5, 64)
+            print(f"Eval files: {len(eval_files)}, Eval labels: {len(eval_labels)}")
+
+            # Check data shape
+            print(f"Train data actual shape: {train_data.shape}")
+            print(f"Expected shape: (N, {param['feature']['frames']}, {param['feature']['n_mels']})")
+
+            # Reshape if necessary
+            if len(train_data.shape) == 2:
+                if train_data.shape[1] == param['feature']['frames'] * param['feature']['n_mels']:
+                    print("Reshaping data to correct format...")
+                    train_data = train_data.reshape(-1, param['feature']['frames'], param['feature']['n_mels'])
+                    print(f"New shape: {train_data.shape}")
+                else:
+                    logger.error(f"Cannot reshape data: {train_data.shape[1]} != {param['feature']['frames'] * param['feature']['n_mels']}")
+                    continue  # Skip to next directory
+
+            #debug
+            log_memory_usage("after data loading")
+            #debug
+            log_memory_usage("before model creation")
+            # model training with parameters from YAML config
+            print("============== MODEL TRAINING ==============")
+            model = transformer_model(
+                input_shape=(
+                    param["feature"]["frames"], 
+                    param["feature"]["n_mels"]
+                ),
+                head_size=param["transformer"].get("head_size", 64),
+                num_heads=param["transformer"].get("num_heads", 4),
+                ff_dim=param["transformer"].get("ff_dim", 128),
+                num_transformer_blocks=param["transformer"].get("num_transformer_blocks", 2),
+                mlp_units=param["transformer"].get("mlp_units", [128, 64]),
+                dropout=param["transformer"].get("dropout", 0.2)
+            )
+            model.summary()
+            #debug
+            log_memory_usage("after model creation")
+            log_memory_usage("before training")
+
+            #debug Check if the model file exists
+            logger.info(f"Training data for {machine_type}_{machine_id}_{db}: shape={train_data.shape}")
+
+            try:
+                history = compile_and_train_model_efficiently(
+                    model=model, 
+                    train_data=train_data, 
+                    param=param, 
+                    visualizer=visualizer, 
+                    history_img=history_img, 
+                    model_file=model_file
+                )
             except Exception as e:
-                logger.warning(f"Error processing file: {file_name}, error: {e}")
-                continue
-
-        # Calculate AUC score
-        try:
-            score = metrics.roc_auc_score(y_true, y_pred)
-            logger.info(f"AUC : {score}")
-            evaluation_result["AUC"] = float(score)
+                logger.error(f"Error during model training: {e}")
+                # Try to load model if training failed but model exists
+                if os.path.exists(model_file):
+                    logger.info(f"Loading existing model weights from {model_file}")
+                    model.load_weights(model_file)
+                else:
+                    logger.error(f"No model weights available at {model_file}")
+                    model.summary()
             
-            # Additional metrics
-            precision, recall, thresholds = metrics.precision_recall_curve(y_true, y_pred)
-            evaluation_result["Average Precision"] = float(metrics.average_precision_score(y_true, y_pred))
+            #debug
+            log_memory_usage("after training")
+            if 'history' in locals() and hasattr(history, 'history'):
+                logger.info(f"Training completed for {machine_type}_{machine_id}_{db}: epochs={len(history.history['loss'])}")
+            else:
+                logger.warning(f"No training history available for {machine_type}_{machine_id}_{db}")
+
+
+            if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
+                train_data = load_pickle(train_pickle)
+                eval_files = load_pickle(eval_files_pickle)
+                eval_labels = load_pickle(eval_labels_pickle)
+            else:
+                train_files, train_labels, eval_files, eval_labels = dataset_generator(target_dir)
+                
+                # Check if any files were found
+                if len(train_files) == 0 or len(eval_files) == 0:
+                    logger.error(f"No files found for {evaluation_result_key}, skipping...")
+                    continue
+
+                train_data = list_to_vector_array(train_files,
+                                                msg="generate train_dataset",
+                                                n_mels=param["feature"]["n_mels"],
+                                                frames=param["feature"]["frames"],
+                                                n_fft=param["feature"]["n_fft"],
+                                                hop_length=param["feature"]["hop_length"],
+                                                power=param["feature"]["power"])
+                
+                # Check if any valid training data was found
+                if train_data.shape[0] == 0:
+                    logger.error(f"No valid training data for {evaluation_result_key}, skipping...")
+                    continue
+
+                save_pickle(train_pickle, train_data)
+                save_pickle(eval_files_pickle, eval_files)
+                save_pickle(eval_labels_pickle, eval_labels)
+
+            #debug        
+            log_memory_usage("after model prediction")
+
+            # evaluation
+            print("============== EVALUATION ==============")
+            y_pred = [0. for _ in eval_labels]
+            y_true = eval_labels
+            original_specs = []
+            reconstructed_specs = []
+
+
+            for num, file_name in tqdm(enumerate(eval_files), total=len(eval_files)):
+                try:
+                    data = file_to_vector_array(file_name,
+                                            n_mels=param["feature"]["n_mels"],
+                                            frames=param["feature"]["frames"],
+                                            n_fft=param["feature"]["n_fft"],
+                                            hop_length=param["feature"]["hop_length"],
+                                            power=param["feature"]["power"])
+                                            
+                    if data.shape[0] == 0:
+                        logger.warning(f"No valid features extracted from file: {file_name}")
+                        continue
+                        
+                    # Batch prediction to avoid memory spikes - use size from YAML config
+                    batch_size = param["fit"].get("prediction_batch_size", 128)
+                    error_list = []
+                    for i in range(0, len(data), batch_size):
+                        batch_data = data[i:i+batch_size]
+                        batch_pred = model.predict(batch_data, verbose=0)
+                        batch_error = np.mean(np.square(batch_data - batch_pred), axis=(1, 2))
+                        error_list.extend(batch_error)
+                        
+                    # Use mean squared error as anomaly score
+                    if error_list:
+                        y_pred[num] = np.mean(error_list)
+                        
+                        # Store only a subset of spectrograms to avoid memory issues
+                        if len(original_specs) < param["fit"].get("max_spectrograms_to_store", 20):  # Configurable limit
+                            original_specs.append(data[:param["fit"].get("max_samples_per_spectrogram", 10)])  # Configurable sample limit
+                            reconstructed_specs.append(batch_pred[:param["fit"].get("max_samples_per_spectrogram", 10)])
+
+                except Exception as e:
+                    logger.warning(f"Error processing file: {file_name}, error: {e}")
+                    continue
+
+            # Calculate AUC score
+            try:
+                score = metrics.roc_auc_score(y_true, y_pred)
+                logger.info(f"AUC : {score}")
+                evaluation_result["AUC"] = float(score)
+                
+                # Additional metrics
+                precision, recall, thresholds = metrics.precision_recall_curve(y_true, y_pred)
+                evaluation_result["Average Precision"] = float(metrics.average_precision_score(y_true, y_pred))
+                
+                # Find optimal F1 score
+                f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
+                best_threshold_idx = np.argmax(f1_scores)
+                evaluation_result["Best F1"] = float(f1_scores[best_threshold_idx])
+                best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
+                evaluation_result["Best Threshold"] = float(thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1])
+                
+                # Apply best threshold to get binary predictions
+                y_pred_binary = (np.array(y_pred) >= best_threshold).astype(int)
+
+                # Calculate additional metrics at the best threshold
+                tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred_binary).ravel()
+                
+                # Precision and Recall at best threshold
+                evaluation_result["Precision"] = float(tp / (tp + fp + 1e-10))
+                evaluation_result["Recall"] = float(tp / (tp + fn + 1e-10))
+                
+                # Specificity (True Negative Rate)
+                evaluation_result["Specificity"] = float(tn / (tn + fp + 1e-10))
+                
+                # Matthews Correlation Coefficient (MCC)
+                mcc_numerator = (tp * tn) - (fp * fn)
+                mcc_denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-10)
+                evaluation_result["MCC"] = float(mcc_numerator / mcc_denominator)
+                
+                # Mean Absolute Error
+                evaluation_result["MAE"] = float(metrics.mean_absolute_error(y_true, y_pred_binary))
+
+
+                # Log some of the new metrics
+                logger.info(f"Precision: {evaluation_result['Precision']:.4f}, Recall: {evaluation_result['Recall']:.4f}")
+                logger.info(f"Specificity: {evaluation_result['Specificity']:.4f}, MCC: {evaluation_result['MCC']:.4f}")
+                
+
+                # Average SSIM
+                ssim_scores = []
+                for orig, recon in zip(original_specs, reconstructed_specs):
+                    for i in range(min(len(orig), len(recon))):
+                        try:
+                            # Check time dimension (frames) instead of Mel bands
+                            if orig[i].shape[0] < param["feature"]["frames"] or recon[i].shape[0] < param["feature"]["frames"]:
+                                logger.warning(f"Skipping SSIM: Insufficient frames in sample {i}")
+                                continue
+
+                            # Slice time axis (axis=0) and transpose to (n_mels, frames)
+                            orig_spec = orig[i][:param["feature"]["frames"], :].T  # Shape: (n_mels, frames)
+                            recon_spec = recon[i][:param["feature"]["frames"], :].T
+
+                            # Validate shapes (should be (64, 5))
+                            if orig_spec.shape != (param["feature"]["n_mels"], param["feature"]["frames"]):
+                                logger.warning(f"SSIM skipped: Shape mismatch {orig_spec.shape}")
+                                continue
+
+                            # Dynamic window size (fixed for small spectrograms)
+                            win_size = min(orig_spec.shape)  # min(64, 5) = 5
+                            win_size = min(param["feature"].get("ssim_window_size", 3), min(orig_spec.shape) - 2)
+                            if win_size % 2 == 0:
+                                win_size += 1
+
+                            # Calculate SSIM
+                            ssim_value = ssim(
+                                orig_spec,
+                                recon_spec,
+                                win_size=win_size,
+                                data_range=orig_spec.max() - orig_spec.min() + 1e-10
+                            )
+                            ssim_scores.append(ssim_value)
+
+                        except Exception as e:
+                            logger.warning(f"SSIM error: {e}")
+
+                # Save average SSIM
+                evaluation_result["SSIM"] = float(np.mean(ssim_scores) if ssim_scores else -1.0)
+                
+            except Exception as e:
+                logger.error(f"Error calculating metrics: {e}")
+
+            results[evaluation_result_key] = evaluation_result
             
-            # Find optimal F1 score
-            f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
-            best_threshold_idx = np.argmax(f1_scores)
-            evaluation_result["Best F1"] = float(f1_scores[best_threshold_idx])
-            best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
-            evaluation_result["Best Threshold"] = float(thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1])
-            
-            # Apply best threshold to get binary predictions
-            y_pred_binary = (np.array(y_pred) >= best_threshold).astype(int)
+            # Clear memory at the end of each machine iteration
+            tf.keras.backend.clear_session()
+            gc.collect()
 
-            # Calculate additional metrics at the best threshold
-            tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred_binary).ravel()
-            
-            # Precision and Recall at best threshold
-            evaluation_result["Precision"] = float(tp / (tp + fp + 1e-10))
-            evaluation_result["Recall"] = float(tp / (tp + fn + 1e-10))
-            
-            # Specificity (True Negative Rate)
-            evaluation_result["Specificity"] = float(tn / (tn + fp + 1e-10))
-            
-            # Matthews Correlation Coefficient (MCC)
-            mcc_numerator = (tp * tn) - (fp * fn)
-            mcc_denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-10)
-            evaluation_result["MCC"] = float(mcc_numerator / mcc_denominator)
-            
-            # Mean Absolute Error
-            evaluation_result["MAE"] = float(metrics.mean_absolute_error(y_true, y_pred_binary))
-
-
-            # Log some of the new metrics
-            logger.info(f"Precision: {evaluation_result['Precision']:.4f}, Recall: {evaluation_result['Recall']:.4f}")
-            logger.info(f"Specificity: {evaluation_result['Specificity']:.4f}, MCC: {evaluation_result['MCC']:.4f}")
-            
-
-            # Average SSIM
-            ssim_scores = []
-            for orig, recon in zip(original_specs, reconstructed_specs):
-                for i in range(min(len(orig), len(recon))):
-                    try:
-                        # Check time dimension (frames) instead of Mel bands
-                        if orig[i].shape[0] < param["feature"]["frames"] or recon[i].shape[0] < param["feature"]["frames"]:
-                            logger.warning(f"Skipping SSIM: Insufficient frames in sample {i}")
-                            continue
-
-                        # Slice time axis (axis=0) and transpose to (n_mels, frames)
-                        orig_spec = orig[i][:param["feature"]["frames"], :].T  # Shape: (n_mels, frames)
-                        recon_spec = recon[i][:param["feature"]["frames"], :].T
-
-                        # Validate shapes (should be (64, 5))
-                        if orig_spec.shape != (param["feature"]["n_mels"], param["feature"]["frames"]):
-                            logger.warning(f"SSIM skipped: Shape mismatch {orig_spec.shape}")
-                            continue
-
-                        # Dynamic window size (fixed for small spectrograms)
-                        win_size = min(orig_spec.shape)  # min(64, 5) = 5
-                        win_size = min(param["feature"].get("ssim_window_size", 3), min(orig_spec.shape) - 2)
-                        if win_size % 2 == 0:
-                            win_size += 1
-
-                        # Calculate SSIM
-                        ssim_value = ssim(
-                            orig_spec,
-                            recon_spec,
-                            win_size=win_size,
-                            data_range=orig_spec.max() - orig_spec.min() + 1e-10
-                        )
-                        ssim_scores.append(ssim_value)
-
-                    except Exception as e:
-                        logger.warning(f"SSIM error: {e}")
-
-            # Save average SSIM
-            evaluation_result["SSIM"] = float(np.mean(ssim_scores) if ssim_scores else -1.0)
-            
-        except Exception as e:
-            logger.error(f"Error calculating metrics: {e}")
-
-        results[evaluation_result_key] = evaluation_result
-        
-        # Clear memory at the end of each machine iteration
-        tf.keras.backend.clear_session()
-        gc.collect()
-
-        print("===========================")
+            print("===========================")
 
         except Exception as e:
             logger.error(f"Unexpected error processing {target_dir}: {e}")

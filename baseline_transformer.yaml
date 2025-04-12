@@ -1,5 +1,5 @@
 # Dataset pattern for selecting directories
-dataset_pattern: "0dB/fan/*"
+dataset_pattern: "*/*/*"
 
 # Feature extraction parameters
 feature:
@@ -8,6 +8,7 @@ feature:
   n_fft: 1024
   hop_length: 512
   power: 2.0
+  ssim_window_size: 3
 
 # Transformer model parameters
 transformer:
@@ -31,6 +32,8 @@ fit:
   validation_split: 0.1
   verbose: 1
   early_stopping: True
+  max_spectrograms_to_store: 20
+  max_samples_per_spectrogram: 10
 
 # Directory paths
 base_directory: "./dataset"

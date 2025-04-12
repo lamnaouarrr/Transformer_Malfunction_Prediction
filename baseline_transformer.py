@@ -21,20 +21,22 @@ from pathlib import Path
 ########################################################################
 # import additional python-library
 ########################################################################
-import numpy as np
 import librosa
 import librosa.core
 import librosa.feature
 import yaml
 import time
 import gc
+import re
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
 # from import
 from tqdm import tqdm
 from sklearn import metrics
-import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Dropout, LayerNormalization, MultiHeadAttention, Flatten, Reshape
-import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim
 ########################################################################
 
@@ -91,28 +93,28 @@ class Visualizer:
         plt.subplots_adjust(wspace=0.3, hspace=0.3)
 
     # In the visualizer.loss_plot method, add error checking:
-    def loss_plot(self, loss, val_loss):
-        """
-        Plot loss curve with error checking.
-        """
-        ax = self.fig.add_subplot(1, 1, 1)
-        ax.cla()
-        
-        # Check if history data exists
-        if not loss or len(loss) == 0:
-            logger.warning("No loss history data available for plotting")
-            # Add text to the empty plot
-            ax.text(0.5, 0.5, "No training history available", 
-                    horizontalalignment='center', verticalalignment='center',
-                    transform=ax.transAxes, fontsize=14)
-            return
-        
-        ax.plot(loss)
-        ax.plot(val_loss)
-        ax.set_title("Model loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.legend(["Train", "Test"], loc="upper right")
+    def loss_plot(self, loss, val_loss, machine_type, machine_id, db):
+    """
+    Plot loss curve with error checking.
+    """
+    ax = self.fig.add_subplot(1, 1, 1)
+    ax.cla()
+    
+    # Check if history data exists
+    if not loss or len(loss) == 0:
+        logger.warning("No loss history data available for plotting")
+        # Add text to the empty plot
+        ax.text(0.5, 0.5, "No training history available", 
+                horizontalalignment='center', verticalalignment='center',
+                transform=ax.transAxes, fontsize=14)
+        return
+    
+    ax.plot(loss)
+    ax.plot(val_loss)
+    ax.set_title(f"Model Loss - {machine_type} {machine_id} ({db})")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.legend(["Training Loss", "Validation Loss"], loc="upper right")
 
     def save_figure(self, name):
         """
@@ -638,7 +640,7 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         history = DummyHistory()
 
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
-    visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
+    visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []), machine_type, machine_id, db)
     visualizer.save_figure(history_img)
     
     model.save_weights(model_file)
@@ -655,10 +657,12 @@ def cleanup_history_files(param):
             os.remove(file_path)
             logger.info(f"Removed backup history file: {file_path}")
         
-        # Delete old history files without dB suffix
+        # Delete old history files without a valid dB suffix
         old_history_files = glob.glob(f"{param['model_directory']}/history_*.png")
         for file_path in old_history_files:
-            if not file_path.endswith("_0dB.png") and not file_path.endswith("_6dB.png"):
+            # Extract the file name and check for a dB suffix pattern (e.g., _0dB, _6dB, _-6dB)
+            file_name = os.path.basename(file_path)
+            if not re.search(r"_\d+dB\.png$", file_name) and not re.search(r"_-\d+dB\.png$", file_name):
                 os.remove(file_path)
                 logger.info(f"Removed old history file: {file_path}")
     except Exception as e:
@@ -925,9 +929,9 @@ def main():
                     y_pred[num] = np.mean(error_list)
                     
                     # Store only a subset of spectrograms to avoid memory issues
-                    if len(original_specs) < 20:  # Limit number of stored spectrograms
-                        original_specs.append(data[:10])  # Store only first 10 samples
-                        reconstructed_specs.append(batch_pred[:10])
+                    if len(original_specs) < param["fit"].get("max_spectrograms_to_store", 20):  # Configurable limit
+                    original_specs.append(data[:param["fit"].get("max_samples_per_spectrogram", 10)])  # Configurable sample limit
+                    reconstructed_specs.append(batch_pred[:param["fit"].get("max_samples_per_spectrogram", 10)])
 
             except Exception as e:
                 logger.warning(f"Error processing file: {file_name}, error: {e}")
@@ -998,7 +1002,7 @@ def main():
 
                         # Dynamic window size (fixed for small spectrograms)
                         win_size = min(orig_spec.shape)  # min(64, 5) = 5
-                        win_size = min(3, min(orig_spec.shape) - 2)
+                        win_size = min(param["feature"].get("ssim_window_size", 3), min(orig_spec.shape) - 2)
                         if win_size % 2 == 0:
                             win_size += 1
 

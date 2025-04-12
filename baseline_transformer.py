@@ -665,7 +665,7 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
 
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
     if any(np.isnan(history.history['loss'])) or any(np.isinf(history.history['loss'])):
-    logger.warning(f"Training loss contains invalid values: {history.history['loss']}")
+        logger.warning(f"Training loss contains invalid values: {history.history['loss']}")
     if 'val_loss' in history.history and (any(np.isnan(history.history['val_loss'])) or any(np.isinf(history.history['val_loss']))):
         logger.warning(f"Validation loss contains invalid values: {history.history['val_loss']}")
     visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []), machine_type, machine_id, db)

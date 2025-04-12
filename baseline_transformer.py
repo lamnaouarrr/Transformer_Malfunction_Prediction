@@ -555,7 +555,7 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         callbacks.append(tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
             patience=early_stopping_patience,
-            restore_best_weights=True
+            restore_best_weights=True,
             min_delta=0.001,  # Minimum improvement to consider
             start_from_epoch=5  # Start monitoring after 5 epochs
         ))
@@ -1080,7 +1080,7 @@ def main():
         gc.collect()
 
         print("===========================")
-        
+
         except Exception as e:
             logger.error(f"Unexpected error processing {target_dir}: {e}")
             continue

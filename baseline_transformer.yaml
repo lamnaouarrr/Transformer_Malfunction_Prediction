@@ -1,3 +1,6 @@
+# Dataset pattern for selecting directories
+dataset_pattern: "0dB/fan/*"
+
 # Feature extraction parameters
 feature:
   n_mels: 64
@@ -23,7 +26,7 @@ fit:
   learning_rate: 0.001
   epochs: 100
   batch_size: 512
-  prediction_batch_size: 128  # Batch size used during prediction/evaluation
+  prediction_batch_size: 128
   shuffle: True
   validation_split: 0.1
   verbose: 1

@@ -497,28 +497,6 @@ def log_memory_usage(message=""):
         logger.warning("psutil not installed, memory usage logging disabled")
 
 
-
-
-def save_history_plot(history, filename):
-    """Generate and save a backup history plot using direct matplotlib calls"""
-    try:
-        plt.figure(figsize=(12, 8))
-        plt.plot(history.history['loss'])
-        if 'val_loss' in history.history:
-            plt.plot(history.history['val_loss'])
-            plt.legend(['Training Loss', 'Validation Loss'])
-        else:
-            plt.legend(['Training Loss'])
-        plt.title('Model Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.savefig(filename)
-        plt.close()
-        logger.info(f"History plot saved to {filename}")
-    except Exception as e:
-        logger.error(f"Failed to create history plot: {e}")
-
-
 ########################################################################
 # The replacement code compiles the model using parameters from YAML configuration.
 # It trains the model with the train_data (normal samples) and saves the weights/callbacks.
@@ -527,12 +505,10 @@ def save_history_plot(history, filename):
 
 def compile_and_train_model_efficiently(model, train_data, param, visualizer, history_img, model_file):
     """Memory-efficient model training with data batching and generator-based approach"""
-    # Get compilation parameters from YAML config
     learning_rate = param["fit"].get("learning_rate", 0.001)
     optimizer_name = param["fit"]["compile"].get("optimizer", "adam").lower()
     loss_name = param["fit"]["compile"].get("loss", "ssim_loss").lower()
     
-    # Configure optimizer based on YAML
     if optimizer_name == "adam":
         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     elif optimizer_name == "sgd":
@@ -546,20 +522,15 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     train_data_sampled = train_data
     logger.info(f"Using full training dataset of {len(train_data)} examples")
     
-    # Enable mixed precision if available
     try:
-        # RTX 4000 Ada has Tensor Cores that can accelerate mixed precision
         policy = tf.keras.mixed_precision.Policy('mixed_float16')
         tf.keras.mixed_precision.set_global_policy(policy)
         logger.info("Mixed precision enabled for RTX 4000 Ada")
-        
-        # Additional optimization for RTX GPUs
-        tf.config.optimizer.set_jit(True)  # Enable XLA compilation
+        tf.config.optimizer.set_jit(True)
         logger.info("XLA compilation enabled")
     except Exception as e:
         logger.warning(f"GPU optimizations not fully available: {e}")
     
-    # Compile the model with loss function from YAML config
     if loss_name == "ssim_loss":
         loss_function = ssim_loss
     elif loss_name == "mean_squared_error" or loss_name == "mse":
@@ -576,7 +547,6 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         metrics=['mae', 'mse']
     )
     
-    # Callbacks from YAML config
     callbacks = []
     if param["fit"].get("early_stopping", False):
         early_stopping_patience = param["fit"].get("early_stopping_patience", 10)
@@ -601,15 +571,11 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     machine_id = model_file_parts[2]
     db = model_file_parts[3].split('.')[0]
 
-    # Keep the existing checkpoint path code
     checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
     os.makedirs(checkpoint_path, exist_ok=True)
     
-    # Add the new history directory code
     history_dir = f"{param['model_directory']}/history_plots/{db}"
     os.makedirs(history_dir, exist_ok=True)
-    
-    # Update the history_img path to use the new directory
     history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
 
     callbacks.append(
@@ -625,45 +591,35 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     batch_size = param["fit"]["batch_size"]
     validation_split = param["fit"]["validation_split"]
     
-    # Calculate split point
     split_idx = int(len(train_data_sampled) * (1 - validation_split))
     
-    # Create training and validation generators
     def data_generator(data, batch_size, is_training=True):
         indices = np.arange(len(data))
         if is_training:
             np.random.shuffle(indices)
         
-        while True:  # Make this an infinite generator for Keras
+        while True:
             for start_idx in range(0, len(indices), batch_size):
                 end_idx = min(start_idx + batch_size, len(indices))
                 batch_indices = indices[start_idx:end_idx]
                 batch_x = data[batch_indices]
-                # Apply data augmentation for training
                 if is_training and np.random.random() < 0.5:
-                    # Add random noise + time masking
                     noise = np.random.normal(0, 0.01, batch_x.shape)
                     batch_x_aug = batch_x + noise
-                    
-                    # Optional: frequency masking (randomly mask some frequency bands)
                     if np.random.random() < 0.3:
                         freq_mask_size = np.random.randint(1, 10)
                         freq_start = np.random.randint(0, batch_x.shape[2] - freq_mask_size)
                         batch_x_aug[:, :, freq_start:freq_start+freq_mask_size] = 0
-                    
                     yield batch_x_aug, batch_x
                 else:
                     yield batch_x, batch_x
     
-    # Calculate steps per epoch
     steps_per_epoch = split_idx // batch_size
     validation_steps = (len(train_data_sampled) - split_idx) // batch_size
     
-    # Free up memory
     gc.collect()
     tf.keras.backend.clear_session()
     
-    # Train with generator using parameters from YAML config
     history = model.fit(
         data_generator(train_data_sampled[:split_idx], batch_size),
         epochs=param["fit"]["epochs"],
@@ -674,20 +630,17 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         verbose=param["fit"].get("verbose", 1)
     )
 
-    # Check if history was properly recorded
     if not hasattr(history, 'history') or not history.history:
         logger.warning(f"No history was recorded during training for {machine_type}_{machine_id}_{db}")
-        # Create a dummy history object if needed
         class DummyHistory:
             def __init__(self):
                 self.history = {"loss": [0], "val_loss": [0]}
         history = DummyHistory()
 
-    
-    #debug Log training history
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
-    # Save artifacts
-    save_history_plot(history, history_img)
+    # Use visualizer
+    visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []))
+    visualizer.save_figure(history_img)
     
     model.save_weights(model_file)
     
@@ -713,22 +666,19 @@ def main():
     # Record the start time
     start_time = time.time()
 
-    # load parameter yaml
     yaml_file = "baseline_transformer.yaml"
     logger.info(f"Loading configuration from {yaml_file}")
     with open(yaml_file, "r") as stream:
         param = yaml.safe_load(stream)
         
-    # Validate required configuration sections
     required_sections = ["feature", "transformer", "fit", "base_directory", "pickle_directory", "model_directory", "result_directory"]
     for section in required_sections:
         if section not in param:
             logger.error(f"Missing required configuration section: {section}")
             return
 
-    #THE EXPERIMENT TRACKING CODE
     experiment_name = f"transformer_ssim_{int(time.time())}"
-    results = {}  # Initialize results dictionary
+    results = {}
     results["experiment_info"] = {
         "name": experiment_name,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -738,56 +688,22 @@ def main():
         "notes": "RTX 4000 Ada run with memory optimizations"
     }
 
-    # make output directory
     os.makedirs(param["pickle_directory"], exist_ok=True)
     os.makedirs(param["model_directory"], exist_ok=True)
     os.makedirs(param["result_directory"], exist_ok=True)
 
-    # Set TensorFlow memory growth
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    #if gpus:
-        #try:
-            #for gpu in gpus:
-                #tf.config.experimental.set_memory_growth(gpu, True)
-                
-            # For RTX GPUs, set memory limit to leave some memory for system
-            #if len(gpus) > 0:
-                #tf.config.experimental.set_virtual_device_configuration(
-                    #gpus[0],
-                    #[tf.config.experimental.VirtualDeviceConfiguration(memory_limit=14000)]  # 14GB limit
-                #)
-            #logger.info(f"Found {len(gpus)} GPUs with memory growth enabled")
-        #except RuntimeError as e:
-            #logger.warning(f"Memory growth setting failed: {e}")
-
-    # initialize the visualizer
     visualizer = Visualizer()
 
-    # load base_directory list using pathlib for better path handling
-    #base_path = Path(param["base_directory"])
-    #dirs = sorted(list(base_path.glob("*/*/*")))
-    #dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
-
-    ########################################################################
-    # Load only fan 0dB dataset
+    # Replace hardcoded dataset selection (lines 952-958)
     base_path = Path(param["base_directory"])
-    fan_0db_pattern = "0dB/fan/*"  # This pattern matches only fan directories in the 0dB folder
-    dirs = sorted(list(base_path.glob(fan_0db_pattern)))
-    dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
+    dataset_pattern = param.get("dataset_pattern", "*/*/*")  # Default to full dataset
+    dirs = sorted(list(base_path.glob(dataset_pattern)))
+    dirs = [str(dir_path) for dir_path in dirs]
 
-    # Verify the selected directories
-    logger.info(f"Found {len(dirs)} fan directories to process:")
-    for dir_path in dirs:
-        logger.info(f"  - {dir_path}")
-
-    ########################################################################
-
-    # Print dirs for debugging
     logger.info(f"Found {len(dirs)} directories to process:")
     for dir_path in dirs:
         logger.info(f"  - {dir_path}")
 
-    # setup the result
     result_file = f"{param['result_directory']}/result_transformer.yaml"
     results = {}
 

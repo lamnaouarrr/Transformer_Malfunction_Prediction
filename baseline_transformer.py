@@ -693,6 +693,18 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     
     return history
 
+
+def cleanup_history_files():
+    """Move or delete old history files"""
+    try:
+        # Delete backup files
+        backup_files = glob.glob(f"{param['model_directory']}/backup_history_*.png")
+        for file_path in backup_files:
+            os.remove(file_path)
+            logger.info(f"Removed backup history file: {file_path}")
+    except Exception as e:
+        logger.error(f"Error during cleanup of history files: {e}")
+
 ########################################################################
 # main
 ########################################################################
@@ -813,7 +825,10 @@ def main():
         eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
         eval_labels_pickle = f"{param['pickle_directory']}/eval_labels_{machine_type}_{machine_id}_{db}.pickle"
         model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.weights.h5"
-        history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
+        #history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
+        history_dir = f"{param['model_directory']}/history_plots/{db}"
+        os.makedirs(history_dir, exist_ok=True)
+        history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
 
@@ -1104,7 +1119,8 @@ def main():
 
     # saving the execution time to the results file
     results["execution_time_seconds"] = float(total_time)
-
+    
+    cleanup_history_files()
 
     # output results
     print("\n===========================")

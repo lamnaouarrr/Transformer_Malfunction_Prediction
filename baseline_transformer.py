@@ -28,6 +28,8 @@ import yaml
 import time
 import gc
 import re
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for saving plots
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
@@ -89,21 +91,20 @@ def ssim_loss(y_true, y_pred):
 ########################################################################
 class Visualizer:
     def __init__(self):
-        self.fig = plt.figure(figsize=(30, 10))
-        plt.subplots_adjust(wspace=0.3, hspace=0.3)
+        # Remove the shared figure to avoid state issues
+        pass
 
-    # In the visualizer.loss_plot method, add error checking:
     def loss_plot(self, loss, val_loss, machine_type, machine_id, db):
         """
         Plot loss curve with error checking.
         """
-        ax = self.fig.add_subplot(1, 1, 1)
-        ax.cla()
+        # Create a new figure for each plot
+        fig = plt.figure(figsize=(10, 6))  # Adjusted size for better readability
+        ax = fig.add_subplot(1, 1, 1)
         
         # Check if history data exists
         if not loss or len(loss) == 0:
             logger.warning("No loss history data available for plotting")
-            # Add text to the empty plot
             ax.text(0.5, 0.5, "No training history available", 
                     horizontalalignment='center', verticalalignment='center',
                     transform=ax.transAxes, fontsize=14)
@@ -115,17 +116,14 @@ class Visualizer:
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend(["Training Loss", "Validation Loss"], loc="upper right")
+        plt.tight_layout()  # Ensure layout fits well
 
     def save_figure(self, name):
         """
         Save figure.
-
-        name : str
-            save .png file path.
-
-        return : None
         """
-        plt.savefig(name)
+        logger.info(f"Saving plot to {name}")
+        plt.savefig(name, bbox_inches='tight')
         plt.close()
 
 
@@ -666,6 +664,10 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         history = DummyHistory()
 
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
+    if any(np.isnan(history.history['loss'])) or any(np.isinf(history.history['loss'])):
+    logger.warning(f"Training loss contains invalid values: {history.history['loss']}")
+    if 'val_loss' in history.history and (any(np.isnan(history.history['val_loss'])) or any(np.isinf(history.history['val_loss']))):
+        logger.warning(f"Validation loss contains invalid values: {history.history['val_loss']}")
     visualizer.loss_plot(history.history["loss"], history.history.get("val_loss", []), machine_type, machine_id, db)
     visualizer.save_figure(history_img)
     

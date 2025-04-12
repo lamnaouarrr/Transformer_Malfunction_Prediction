@@ -94,27 +94,27 @@ class Visualizer:
 
     # In the visualizer.loss_plot method, add error checking:
     def loss_plot(self, loss, val_loss, machine_type, machine_id, db):
-    """
-    Plot loss curve with error checking.
-    """
-    ax = self.fig.add_subplot(1, 1, 1)
-    ax.cla()
-    
-    # Check if history data exists
-    if not loss or len(loss) == 0:
-        logger.warning("No loss history data available for plotting")
-        # Add text to the empty plot
-        ax.text(0.5, 0.5, "No training history available", 
-                horizontalalignment='center', verticalalignment='center',
-                transform=ax.transAxes, fontsize=14)
-        return
-    
-    ax.plot(loss)
-    ax.plot(val_loss)
-    ax.set_title(f"Model Loss - {machine_type} {machine_id} ({db})")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.legend(["Training Loss", "Validation Loss"], loc="upper right")
+        """
+        Plot loss curve with error checking.
+        """
+        ax = self.fig.add_subplot(1, 1, 1)
+        ax.cla()
+        
+        # Check if history data exists
+        if not loss or len(loss) == 0:
+            logger.warning("No loss history data available for plotting")
+            # Add text to the empty plot
+            ax.text(0.5, 0.5, "No training history available", 
+                    horizontalalignment='center', verticalalignment='center',
+                    transform=ax.transAxes, fontsize=14)
+            return
+        
+        ax.plot(loss)
+        ax.plot(val_loss)
+        ax.set_title(f"Model Loss - {machine_type} {machine_id} ({db})")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend(["Training Loss", "Validation Loss"], loc="upper right")
 
     def save_figure(self, name):
         """

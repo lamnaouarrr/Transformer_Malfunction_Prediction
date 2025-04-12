@@ -578,7 +578,6 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     
     history_dir = f"{param['model_directory']}/history_plots/{db}"
     os.makedirs(history_dir, exist_ok=True)
-    history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
 
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(
@@ -746,11 +745,15 @@ def main():
         logger.info(f"Processing: db={db}, machine_type={machine_type}, machine_id={machine_id}")
 
         # setup path
+        # setup path
         evaluation_result = {}
         train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
         eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
         eval_labels_pickle = f"{param['pickle_directory']}/eval_labels_{machine_type}_{machine_id}_{db}.pickle"
         model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.weights.h5"
+        history_dir = f"{param['model_directory']}/history_plots/{db}"
+        os.makedirs(history_dir, exist_ok=True)
+        history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
 

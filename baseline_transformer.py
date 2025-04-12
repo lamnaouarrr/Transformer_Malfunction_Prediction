@@ -601,8 +601,16 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     machine_id = model_file_parts[2]
     db = model_file_parts[3].split('.')[0]
 
+    # Keep the existing checkpoint path code
     checkpoint_path = f"{param['model_directory']}/checkpoint_{machine_type}_{machine_id}_{db}"
     os.makedirs(checkpoint_path, exist_ok=True)
+    
+    # Add the new history directory code
+    history_dir = f"{param['model_directory']}/history_plots/{db}"
+    os.makedirs(history_dir, exist_ok=True)
+    
+    # Update the history_img path to use the new directory
+    history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
 
     callbacks.append(
         tf.keras.callbacks.ModelCheckpoint(

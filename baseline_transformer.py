@@ -556,6 +556,8 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
             monitor='val_loss',
             patience=early_stopping_patience,
             restore_best_weights=True
+            min_delta=0.001,  # Minimum improvement to consider
+            start_from_epoch=5  # Start monitoring after 5 epochs
         ))
     
     callbacks.append(
@@ -617,6 +619,31 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     
     steps_per_epoch = split_idx // batch_size
     validation_steps = (len(train_data_sampled) - split_idx) // batch_size
+
+    # Add logging for debugging
+    logger.info(f"Training split: {split_idx} samples for training, {len(train_data_sampled) - split_idx} for validation")
+    logger.info(f"Steps per epoch: {steps_per_epoch}, Validation steps: {validation_steps}")
+    if steps_per_epoch == 0 or validation_steps == 0:
+        logger.error("Steps per epoch or validation steps are 0, training will not proceed!")
+        class DummyHistory:
+            def __init__(self):
+                self.history = {"loss": [], "val_loss": []}
+        return DummyHistory()
+
+    # Debug the data generator output
+    train_gen = data_generator(train_data_sampled[:split_idx], batch_size)
+    val_gen = data_generator(train_data_sampled[split_idx:], batch_size, is_training=False)
+    try:
+        sample_x, sample_y = next(train_gen)
+        logger.info(f"Sample training batch shape: x={sample_x.shape}, y={sample_y.shape}")
+        sample_x_val, sample_y_val = next(val_gen)
+        logger.info(f"Sample validation batch shape: x={sample_x_val.shape}, y={sample_y_val.shape}")
+    except Exception as e:
+        logger.error(f"Error in data generator: {e}")
+        class DummyHistory:
+            def __init__(self):
+                self.history = {"loss": [], "val_loss": []}
+        return DummyHistory()
     
     gc.collect()
     tf.keras.backend.clear_session()
@@ -659,9 +686,9 @@ def cleanup_history_files(param):
         # Delete old history files without a valid dB suffix
         old_history_files = glob.glob(f"{param['model_directory']}/history_*.png")
         for file_path in old_history_files:
-            # Extract the file name and check for a dB suffix pattern (e.g., _0dB, _6dB, _-6dB)
+            # Extract the file name and check for a dB suffix pattern (e.g., _0dB, _6dB, _min6dB)
             file_name = os.path.basename(file_path)
-            if not re.search(r"_\d+dB\.png$", file_name) and not re.search(r"_-\d+dB\.png$", file_name):
+            if not re.search(r"_\d+dB\.png$", file_name) and not re.search(r"_-\d+dB\.png$", file_name) and not re.search(r"_min6dB\.png$", file_name):
                 os.remove(file_path)
                 logger.info(f"Removed old history file: {file_path}")
     except Exception as e:
@@ -709,6 +736,24 @@ def main():
     dirs = sorted(list(base_path.glob(dataset_pattern)))
     dirs = [str(dir_path) for dir_path in dirs]
 
+    # Filter directories based on valid dB levels and machine types
+    valid_db_levels = param.get("dataset", {}).get("db_levels", ["0dB", "6dB", "min6dB"])
+    valid_machine_types = param.get("dataset", {}).get("machine_types", ["fan", "pump", "slider", "valve"])
+    filtered_dirs = []
+    for dir_path in dirs:
+        parts = Path(dir_path).parts
+        if len(parts) < 3:  # Ensure the path has at least 3 levels (dB, machine_type, machine_id)
+            logger.warning(f"Skipping invalid directory: {dir_path}")
+            continue
+        db = parts[-3]
+        machine_type = parts[-2]
+        if db in valid_db_levels and machine_type in valid_machine_types:
+            filtered_dirs.append(dir_path)
+        else:
+            logger.warning(f"Skipping directory with invalid dB or machine type: {dir_path} (db={db}, machine_type={machine_type})")
+
+    dirs = filtered_dirs
+
     logger.info(f"Found {len(dirs)} directories to process:")
     for dir_path in dirs:
         logger.info(f"  - {dir_path}")
@@ -743,7 +788,7 @@ def main():
 
 
         logger.info(f"Processing: db={db}, machine_type={machine_type}, machine_id={machine_id}")
-
+        try:
         # setup path
         # setup path
         evaluation_result = {}
@@ -754,6 +799,7 @@ def main():
         history_dir = f"{param['model_directory']}/history_plots/{db}"
         os.makedirs(history_dir, exist_ok=True)
         history_img = f"{history_dir}/history_{machine_type}_{machine_id}_{db}.png"
+        logger.info(f"Saving history plot to: {history_img}")
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
 
@@ -1034,6 +1080,11 @@ def main():
         gc.collect()
 
         print("===========================")
+        
+        except Exception as e:
+            logger.error(f"Unexpected error processing {target_dir}: {e}")
+            continue
+        
 
     # Recording the end time
     end_time = time.time()
@@ -1044,6 +1095,13 @@ def main():
 
     # saving the execution time to the results file
     results["execution_time_seconds"] = float(total_time)
+
+    # Clean up empty history plot directories
+    history_plots_base = f"{param['model_directory']}/history_plots"
+    for subdir in glob.glob(f"{history_plots_base}/*/"):
+        if not os.listdir(subdir):  # Check if directory is empty
+            logger.info(f"Removing empty history plot directory: {subdir}")
+            os.rmdir(subdir)
     
 
     # output results

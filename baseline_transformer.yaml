@@ -1,6 +1,10 @@
 # Dataset pattern for selecting directories
 dataset_pattern: "0dB/fan/*"
 
+dataset:
+  db_levels: ["0dB", "6dB", "min6dB"]
+  machine_types: ["fan", "pump", "slider", "valve"]
+
 # Feature extraction parameters
 feature:
   n_mels: 64

@@ -1,5 +1,5 @@
 # Dataset pattern for selecting directories
-dataset_pattern: "0db/fan/*"
+dataset_pattern: "./0db/fan/*"
 
 # Feature extraction parameters
 feature:

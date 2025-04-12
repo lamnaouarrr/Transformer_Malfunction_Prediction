@@ -930,8 +930,8 @@ def main():
                     
                     # Store only a subset of spectrograms to avoid memory issues
                     if len(original_specs) < param["fit"].get("max_spectrograms_to_store", 20):  # Configurable limit
-                    original_specs.append(data[:param["fit"].get("max_samples_per_spectrogram", 10)])  # Configurable sample limit
-                    reconstructed_specs.append(batch_pred[:param["fit"].get("max_samples_per_spectrogram", 10)])
+                        original_specs.append(data[:param["fit"].get("max_samples_per_spectrogram", 10)])  # Configurable sample limit
+                        reconstructed_specs.append(batch_pred[:param["fit"].get("max_samples_per_spectrogram", 10)])
 
             except Exception as e:
                 logger.warning(f"Error processing file: {file_name}, error: {e}")

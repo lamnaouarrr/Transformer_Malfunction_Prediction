@@ -499,7 +499,7 @@ def log_memory_usage(message=""):
 
 
 
-def save_backup_history_plot(history, filename):
+def save_history_plot(history, filename):
     """Generate and save a backup history plot using direct matplotlib calls"""
     try:
         plt.figure(figsize=(12, 8))
@@ -514,9 +514,9 @@ def save_backup_history_plot(history, filename):
         plt.ylabel('Loss')
         plt.savefig(filename)
         plt.close()
-        logger.info(f"Backup history plot saved to {filename}")
+        logger.info(f"History plot saved to {filename}")
     except Exception as e:
-        logger.error(f"Failed to create backup history plot: {e}")
+        logger.error(f"Failed to create history plot: {e}")
 
 
 ########################################################################
@@ -679,8 +679,9 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     #debug Log training history
     logger.info(f"Plot data - Loss: {len(history.history['loss'])} points, Val Loss: {len(history.history.get('val_loss', []))} points")
     # Save artifacts
-    backup_history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
-    save_backup_history_plot(history, backup_history_img)
+    save_history_plot(history, history_img)
+    
+    model.save_weights(model_file)
     
     return history
 
@@ -1095,6 +1096,7 @@ def main():
 
     # saving the execution time to the results file
     results["execution_time_seconds"] = float(total_time)
+
 
     # output results
     print("\n===========================")

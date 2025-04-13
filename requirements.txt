@@ -1,6 +1,6 @@
 # Minimal package to use MIMII dataset baseline
 tensorflow==2.10.0  # Requires CUDA 11.2 and cuDNN 8.1 for GPU support
-numpy==1.24.4  # Latest compatible with TF 2.10.0
+numpy==1.23.5  # Downgraded to resolve conflict with numba
 protobuf==3.19.6  # Compatible with TensorFlow 2.10.0 (<3.20)
 matplotlib==3.8.4
 PyYAML==6.0.1

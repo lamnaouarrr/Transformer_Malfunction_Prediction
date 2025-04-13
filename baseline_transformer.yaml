@@ -1,5 +1,5 @@
 # Dataset pattern for selecting directories
-dataset_pattern: "*/*/*"
+dataset_pattern: "0dB/fan/id_00/*"
 
 dataset:
   db_levels: ["0dB", "6dB", "min6dB"]

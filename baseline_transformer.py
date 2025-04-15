@@ -401,7 +401,9 @@ def positional_encoding(seq_length, d_model):
     pos_encoding[:, 0::2] = np.sin(position * div_term)
     pos_encoding[:, 1::2] = np.cos(position * div_term)
     
-    return pos_encoding.astype(np.float32)
+    # Convert to tensorflow tensor with no specific dtype (will follow global policy)
+    return tf.convert_to_tensor(pos_encoding)
+    #return pos_encoding.astype(np.float32)
 
 def transformer_model(input_shape, head_size=64, num_heads=4, ff_dim=128, 
                       num_transformer_blocks=2, mlp_units=[128, 64], dropout=0.2):
@@ -420,20 +422,16 @@ def transformer_model(input_shape, head_size=64, num_heads=4, ff_dim=128,
     Returns:
         Keras Model with sequence-to-sequence reconstruction capability
     """
-    # Get the computation dtype from the mixed precision policy
-    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
-    if dtype is None:
-        dtype = 'float32'  # Fallback to float32 if no policy is set
-
     # Input layer
-    inputs = Input(shape=input_shape, dtype=dtype)  # Shape: (frames, n_mels)
+    inputs = Input(shape=input_shape)  # Shape: (frames, n_mels)
     x = inputs
     
     # Positional Encoding
     seq_length, d_model = input_shape
     pos_encoding = positional_encoding(seq_length, d_model)
-    pos_encoding = tf.constant(pos_encoding, dtype=dtype)  # Cast to computation dtype
-    x = x + pos_encoding  # Inject positional information
+    #pos_encoding = tf.constant(pos_encoding, dtype=tf.float32)
+    pos_encoding = tf.cast(pos_encoding, dtype=x.dtype)
+    x = x + pos_encoding  # Inject positional information & Scale positional encoding
     
     # Encoder Transformer Blocks
     for _ in range(num_transformer_blocks):
@@ -445,16 +443,14 @@ def transformer_model(input_shape, head_size=64, num_heads=4, ff_dim=128,
         )(x, x)
         
         # Residual connection and layer normalization
-        x = x + attention_output
-        x = LayerNormalization(dtype=dtype)(x)
+        x = LayerNormalization()(x + attention_output)
         
         # Feed-forward network
-        ff_output = Dense(d_model, activation="relu", dtype=dtype)(x)
+        ff_output = Dense(d_model, activation="relu")(x)
         ff_output = Dropout(dropout)(ff_output)
         
         # Residual connection and layer normalization
-        x = x + ff_output
-        x = LayerNormalization(dtype=dtype)(x)
+        x = LayerNormalization()(x + ff_output)
     
     # Bottleneck representation
     encoded = x
@@ -470,24 +466,22 @@ def transformer_model(input_shape, head_size=64, num_heads=4, ff_dim=128,
         )(x, x)
         
         # Residual connection and layer normalization
-        x = x + attention_output
-        x = LayerNormalization(dtype=dtype)(x)
+        x = LayerNormalization()(x + attention_output)
         
         # Feed-forward network
-        ff_output = Dense(d_model, activation="relu", dtype=dtype)(x)
+        ff_output = Dense(d_model, activation="relu")(x)
         ff_output = Dropout(dropout)(ff_output)
         
         # Residual connection and layer normalization
-        x = x + ff_output
-        x = LayerNormalization(dtype=dtype)(x)
+        x = LayerNormalization()(x + ff_output)
     
     # Final reconstruction layers
     for dim in mlp_units:
-        x = Dense(dim, activation="relu", dtype=dtype)(x)
+        x = Dense(dim, activation="relu")(x)
         x = Dropout(dropout)(x)
     
     # Output layer (reconstruct the original sequence)
-    outputs = Dense(d_model, dtype=dtype)(x)
+    outputs = Dense(d_model)(x)
     
     return Model(inputs=inputs, outputs=outputs)
 
@@ -514,15 +508,6 @@ def log_memory_usage(message=""):
 
 def compile_and_train_model_efficiently(model, train_data, param, visualizer, history_img, model_file):
     """Memory-efficient model training with data batching and generator-based approach"""
-    # Get the computation dtype
-    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
-    if dtype is None:
-        dtype = 'float32'
-
-    # Cast train_data to the computation dtype
-    train_data = tf.cast(train_data, dtype=dtype)
-    logger.info(f"Train data cast to dtype: {train_data.dtype}")
-
     learning_rate = param["fit"].get("learning_rate", 0.001)
     optimizer_name = param["fit"]["compile"].get("optimizer", "adam").lower()
     loss_name = param["fit"]["compile"].get("loss", "ssim_loss").lower()
@@ -540,14 +525,14 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     train_data_sampled = train_data
     logger.info(f"Using full training dataset of {len(train_data)} examples")
     
-    try:
-        policy = tf.keras.mixed_precision.Policy('mixed_float16')
-        tf.keras.mixed_precision.set_global_policy(policy)
-        logger.info("Mixed precision enabled for RTX 4000 Ada")
-        tf.config.optimizer.set_jit(True)
-        logger.info("XLA compilation enabled")
-    except Exception as e:
-        logger.warning(f"GPU optimizations not fully available: {e}")
+    #try:
+    #    policy = tf.keras.mixed_precision.Policy('mixed_float16')
+    #    tf.keras.mixed_precision.set_global_policy(policy)
+    #    logger.info("Mixed precision enabled for RTX 4000 Ada")
+    #    tf.config.optimizer.set_jit(True)
+    #    logger.info("XLA compilation enabled")
+    #except Exception as e:
+    #    logger.warning(f"GPU optimizations not fully available: {e}")
     
     if loss_name == "ssim_loss":
         loss_function = ssim_loss
@@ -565,7 +550,6 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
         metrics=['mae', 'mse']
     )
     
-    
     callbacks = []
     if param["fit"].get("early_stopping", False):
         early_stopping_patience = param["fit"].get("early_stopping_patience", 10)
@@ -573,8 +557,8 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
             monitor='val_loss',
             patience=early_stopping_patience,
             restore_best_weights=True,
-            #min_delta=0.001,  # Minimum improvement to consider
-            #start_from_epoch=5  # Start monitoring after 5 epochs
+            min_delta=0.001,  # Minimum improvement to consider
+            start_from_epoch=5  # Start monitoring after 5 epochs
         ))
     
     callbacks.append(
@@ -614,10 +598,6 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
     split_idx = int(len(train_data_sampled) * (1 - validation_split))
     
     def data_generator(data, batch_size, is_training=True):
-        dtype = tf.keras.mixed_precision.global_policy().compute_dtype
-        if dtype is None:
-            dtype = 'float32'
-
         indices = np.arange(len(data))
         if is_training:
             np.random.shuffle(indices)
@@ -634,11 +614,8 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
                         freq_mask_size = np.random.randint(1, 10)
                         freq_start = np.random.randint(0, batch_x.shape[2] - freq_mask_size)
                         batch_x_aug[:, :, freq_start:freq_start+freq_mask_size] = 0
-                    batch_x_aug = tf.cast(batch_x_aug, dtype=dtype)
-                    batch_x = tf.cast(batch_x, dtype=dtype)
                     yield batch_x_aug, batch_x
                 else:
-                    batch_x = tf.cast(batch_x, dtype=dtype)
                     yield batch_x, batch_x
     
     steps_per_epoch = split_idx // batch_size
@@ -972,33 +949,25 @@ def main():
             log_memory_usage("after model prediction")
 
             # evaluation
-            # evaluation
             print("============== EVALUATION ==============")
             y_pred = [0. for _ in eval_labels]
             y_true = eval_labels
             original_specs = []
             reconstructed_specs = []
 
-            # Get the computation dtype
-            dtype = tf.keras.mixed_precision.global_policy().compute_dtype
-            if dtype is None:
-                dtype = 'float32'
 
             for num, file_name in tqdm(enumerate(eval_files), total=len(eval_files)):
                 try:
                     data = file_to_vector_array(file_name,
-                                                n_mels=param["feature"]["n_mels"],
-                                                frames=param["feature"]["frames"],
-                                                n_fft=param["feature"]["n_fft"],
-                                                hop_length=param["feature"]["hop_length"],
-                                                power=param["feature"]["power"])
-                                                
+                                            n_mels=param["feature"]["n_mels"],
+                                            frames=param["feature"]["frames"],
+                                            n_fft=param["feature"]["n_fft"],
+                                            hop_length=param["feature"]["hop_length"],
+                                            power=param["feature"]["power"])
+                                            
                     if data.shape[0] == 0:
                         logger.warning(f"No valid features extracted from file: {file_name}")
                         continue
-                        
-                    # Cast data to the computation dtype
-                    data = tf.cast(data, dtype=dtype)
                         
                     # Batch prediction to avoid memory spikes - use size from YAML config
                     batch_size = param["fit"].get("prediction_batch_size", 128)

@@ -554,8 +554,8 @@ def compile_and_train_model_efficiently(model, train_data, param, visualizer, hi
             monitor='val_loss',
             patience=early_stopping_patience,
             restore_best_weights=True,
-            min_delta=0.001,  # Minimum improvement to consider
-            start_from_epoch=5  # Start monitoring after 5 epochs
+            #min_delta=0.001,  # Minimum improvement to consider
+            #start_from_epoch=5  # Start monitoring after 5 epochs
         ))
     
     callbacks.append(

@@ -542,13 +542,13 @@ def keras_model(input_dim, **params):
 
 def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
     """
-    Combines MSE and SSIM loss with proper handling of non-square data.
+    Combines MSE and SSIM loss with proper handling of small dimensions.
+    Falls back to MSE only when dimensions are too small for SSIM.
     """
     # MSE component
     mse = tf.reduce_mean(tf.square(y_true - y_pred))
     
     # For SSIM, we need to ensure dimensions make sense
-    # Instead of forcing a square, reshape to a more natural spectrogram shape
     batch_size = tf.shape(y_true)[0]
     
     if feature_params:
@@ -559,13 +559,18 @@ def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
         n_mels = 64
         frames = 5
     
-    y_true_reshaped = tf.reshape(y_true, [batch_size, frames, n_mels, 1])
-    y_pred_reshaped = tf.reshape(y_pred, [batch_size, frames, n_mels, 1])
-    
-    ssim_value = tf.image.ssim(y_true_reshaped, y_pred_reshaped, max_val=1.0)
-    ssim_loss = 1.0 - tf.reduce_mean(ssim_value)
-    
-    return alpha * mse + (1 - alpha) * ssim_loss
+    # Check if dimensions are large enough for SSIM (needs at least 11x11)
+    if frames >= 11 and n_mels >= 11:
+        y_true_reshaped = tf.reshape(y_true, [batch_size, frames, n_mels, 1])
+        y_pred_reshaped = tf.reshape(y_pred, [batch_size, frames, n_mels, 1])
+        
+        ssim_value = tf.image.ssim(y_true_reshaped, y_pred_reshaped, max_val=1.0)
+        ssim_loss = 1.0 - tf.reduce_mean(ssim_value)
+        
+        return alpha * mse + (1 - alpha) * ssim_loss
+    else:
+        # Fall back to MSE only for small dimensions
+        return mse
 
 
 def get_optimizer_with_scheduler(optimizer_name="adam", lr=0.001):

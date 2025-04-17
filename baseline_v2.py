@@ -567,21 +567,6 @@ def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
     
     return alpha * mse + (1 - alpha) * ssim_loss
 
-#custom loss function that includes feature parameters
-def get_loss_function():
-    feature_params = param["feature"]
-    alpha = param["fit"].get("loss_alpha", 0.7)
-    def custom_hybrid_loss(y_true, y_pred):
-        return hybrid_loss(y_true, y_pred, alpha=alpha, feature_params=feature_params)
-    return custom_hybrid_loss
-
-if compile_params.get("loss") == "hybrid_loss":
-    loss_function = get_loss_function()
-else:
-    loss_function = compile_params.get("loss")
-
-model.compile(optimizer=compile_params.get("optimizer"), loss=loss_function)
-
 
 def get_optimizer_with_scheduler(optimizer_name="adam", lr=0.001):
     """
@@ -891,6 +876,21 @@ def main():
                     "adam", 
                     lr=param["fit"].get("learning_rate", 0.001)
                 )
+            
+            #custom loss function that includes feature parameters
+            def get_loss_function():
+                feature_params = param["feature"]
+                alpha = param["fit"].get("loss_alpha", 0.7)
+                def custom_hybrid_loss(y_true, y_pred):
+                    return hybrid_loss(y_true, y_pred, alpha=alpha, feature_params=feature_params)
+                return custom_hybrid_loss
+
+            if compile_params.get("loss") == "hybrid_loss":
+                loss_function = get_loss_function()
+            else:
+                loss_function = compile_params.get("loss")
+
+            model.compile(optimizer=compile_params.get("optimizer"), loss=loss_function)
                 
             model.compile(optimizer=compile_params.get("optimizer"), 
               loss=hybrid_loss if compile_params.get("loss") == "hybrid_loss" else compile_params.get("loss"))

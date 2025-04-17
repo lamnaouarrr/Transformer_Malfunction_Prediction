@@ -592,7 +592,7 @@ def get_optimizer_with_scheduler(optimizer_name="adam", lr=0.001):
             m_mul=m_mul,
             alpha=alpha
         )
-        return tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        return tf.keras.optimizers.Adam(learning_rate=lr)
     return optimizer_name
 
 
@@ -902,13 +902,65 @@ def main():
             
             # Use TensorFlow callbacks
             callbacks = []
+
+            if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
+                # Use a simple Adam optimizer with a fixed learning rate
+                compile_params["optimizer"] = tf.keras.optimizers.Adam(
+                    learning_rate=param["fit"].get("learning_rate", 0.001)
+                )
+
+            if compile_params.get("loss") == "hybrid_loss":
+                loss_function = get_loss_function()
+            else:
+                loss_function = compile_params.get("loss")
+
+            model.compile(optimizer=compile_params.get("optimizer"), loss=loss_function)
+
+            # Set up callbacks
+            callbacks = []
+
             if param["fit"].get("use_augmentation", False):
                 train_data = augment_data(
                     train_data, 
                     augmentation_factor=param["fit"].get("augmentation_factor", 2),
-                    params=param  # Pass parameters for better augmentation
+                    params=param
                 )
                 logger.info(f"Data augmented: {train_data.shape[0]} samples")
+
+            if param["fit"].get("use_lr_scheduler", True):
+                # Create cosine decay schedule
+                def cosine_decay_scheduler(epoch, lr):
+                    first_decay_steps = param["fit"].get("lr_first_decay_steps", 20)
+                    t_mul = param["fit"].get("lr_t_mul", 2.0)
+                    m_mul = param["fit"].get("lr_m_mul", 0.9)
+                    alpha = param["fit"].get("lr_min_factor", 0.1)
+                    initial_lr = param["fit"].get("learning_rate", 0.001)
+                    
+                    # Calculate cycle
+                    cycle = 1
+                    cycle_steps = first_decay_steps
+                    total_steps = 0
+                    
+                    # Find which cycle we're in
+                    while epoch >= total_steps + cycle_steps:
+                        total_steps += cycle_steps
+                        cycle += 1
+                        cycle_steps = cycle_steps * t_mul
+                    
+                    # Calculate where in the cycle we are
+                    cycle_epoch = epoch - total_steps
+                    cycle_progress = cycle_epoch / cycle_steps
+                    
+                    # Calculate decay
+                    cosine_decay = 0.5 * (1 + np.cos(np.pi * cycle_progress))
+                    decay = (1 - alpha) * cosine_decay + alpha
+                    
+                    # Apply cycle multiplier
+                    cycle_multiplier = m_mul ** (cycle - 1)
+                    
+                    return initial_lr * decay * cycle_multiplier
+                
+                callbacks.append(tf.keras.callbacks.LearningRateScheduler(cosine_decay_scheduler))
 
             # Model checkpoint
             callbacks.append(tf.keras.callbacks.ModelCheckpoint(
@@ -934,7 +986,8 @@ def main():
                 min_lr=1e-6,
                 verbose=1
             ))
-                
+
+            #fit the model
             history = model.fit(
                 train_data,
                 train_data,

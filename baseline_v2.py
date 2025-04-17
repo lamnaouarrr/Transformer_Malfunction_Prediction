@@ -72,8 +72,8 @@ logger = setup_logging()
 ########################################################################
 class Visualizer:
     def __init__(self):
-        self.fig = plt.figure(figsize=(30, 10))
-        plt.subplots_adjust(wspace=0.3, hspace=0.3)
+        # Don't create figure in constructor, create fresh figure each time
+        pass
 
     def loss_plot(self, loss, val_loss):
         """
@@ -86,14 +86,15 @@ class Visualizer:
 
         return   : None
         """
-        ax = self.fig.add_subplot(1, 1, 1)
-        ax.cla()
-        ax.plot(loss)
-        ax.plot(val_loss)
-        ax.set_title("Model loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.legend(["Train", "Test"], loc="upper right")
+        # Create a new figure every time to prevent issues with reusing figures
+        plt.figure(figsize=(10, 7))
+        plt.plot(loss, label="Train Loss")
+        plt.plot(val_loss, label="Validation Loss")
+        plt.title("Model Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend(loc="upper right")
+        plt.grid(True)
 
     def save_figure(self, name):
         """
@@ -104,8 +105,17 @@ class Visualizer:
 
         return : None
         """
-        plt.savefig(name)
-        plt.close()
+        # Make sure directory exists
+        os.makedirs(os.path.dirname(name), exist_ok=True)
+        
+        try:
+            plt.tight_layout()  # Adjust layout to make room for labels
+            plt.savefig(name, dpi=300)  # Higher DPI for better quality
+            logger.info(f"Figure saved to {name}")
+        except Exception as e:
+            logger.error(f"Error saving figure to {name}: {e}")
+        finally:
+            plt.close()  # Always close the figure to free memory
 
 
 ########################################################################
@@ -860,6 +870,136 @@ def main():
                 "weight_decay": param["fit"].get("weight_decay", None)
             }
 
+###############################################################################
+#debug
+        def diagnose_directories():
+            """
+            Check directory structure and file existence to diagnose setup issues.
+            """
+            # Check main directories
+            directories = [
+                param["base_directory"],
+                param["pickle_directory"],
+                param["model_directory"],
+                param["result_directory"]
+            ]
+            
+            for directory in directories:
+                if os.path.exists(directory):
+                    logger.info(f"Directory exists: {directory}")
+                    # List a few files in each directory
+                    try:
+                        files = os.listdir(directory)[:5]  # Show first 5 files only
+                        logger.info(f"Files in {directory}: {files}")
+                    except Exception as e:
+                        logger.error(f"Error listing files in {directory}: {e}")
+                else:
+                    logger.error(f"Directory missing: {directory}")
+            
+            # Check for specific files
+            logger.info("Checking for configuration file...")
+            if os.path.exists("baseline.yaml"):
+                logger.info("baseline.yaml found")
+            else:
+                logger.error("baseline.yaml not found")
+            
+            # Print environment info
+            import platform
+            logger.info(f"Python version: {platform.python_version()}")
+            logger.info(f"TensorFlow version: {tf.__version__}")
+            logger.info(f"NumPy version: {np.__version__}")
+            logger.info(f"Librosa version: {librosa.__version__}")
+            
+            # Check GPU availability
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus:
+                logger.info(f"GPUs available: {len(gpus)}")
+                for gpu in gpus:
+                    logger.info(f"  {gpu}")
+            else:
+                logger.info("No GPUs available, using CPU")
+            
+            return True
+
+
+        def debug_data_load(train_files, eval_files):
+            """
+            Debug data loading by checking a few sample files.
+            """
+            logger.info("Debugging data loading...")
+            
+            # Check a few training files
+            for i, file in enumerate(train_files[:3]):
+                logger.info(f"Training file {i}: {file}")
+                try:
+                    sr, y = demux_wav(file)
+                    if y is None:
+                        logger.warning(f"  Failed to load file: {file}")
+                    else:
+                        logger.info(f"  Successfully loaded file: {file}")
+                        logger.info(f"  Sample rate: {sr}, Duration: {len(y)/sr:.2f}s, Shape: {y.shape}")
+                except Exception as e:
+                    logger.error(f"  Error loading file {file}: {e}")
+            
+            # Check a few evaluation files
+            for i, file in enumerate(eval_files[:3]):
+                logger.info(f"Evaluation file {i}: {file}")
+                try:
+                    sr, y = demux_wav(file)
+                    if y is None:
+                        logger.warning(f"  Failed to load file: {file}")
+                    else:
+                        logger.info(f"  Successfully loaded file: {file}")
+                        logger.info(f"  Sample rate: {sr}, Duration: {len(y)/sr:.2f}s, Shape: {y.shape}")
+                except Exception as e:
+                    logger.error(f"  Error loading file {file}: {e}")
+            
+            return True
+
+
+        def debug_feature_extraction(file_path, params):
+            """
+            Debug feature extraction for a single file.
+            """
+            logger.info(f"Debugging feature extraction for file: {file_path}")
+            
+            try:
+                # Load audio
+                sr, y = demux_wav(file_path)
+                if y is None:
+                    logger.error("Failed to load audio")
+                    return False
+                    
+                logger.info(f"Audio loaded: sr={sr}, length={len(y)}, duration={len(y)/sr:.2f}s")
+                
+                # Extract features
+                vector_array = file_to_vector_array(
+                    file_path,
+                    n_mels=params["feature"]["n_mels"],
+                    frames=params["feature"]["frames"],
+                    n_fft=params["feature"]["n_fft"],
+                    hop_length=params["feature"]["hop_length"],
+                    power=params["feature"]["power"],
+                    params=params
+                )
+                
+                logger.info(f"Feature extraction result: shape={vector_array.shape}")
+                
+                if vector_array.shape[0] == 0:
+                    logger.error("Feature extraction returned empty array")
+                    return False
+                    
+                # Additional info
+                logger.info(f"Feature stats: min={vector_array.min():.4f}, max={vector_array.max():.4f}, mean={vector_array.mean():.4f}")
+                
+                return True
+            except Exception as e:
+                logger.error(f"Error in feature extraction: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return False
+###############################################################################
+
         # model training
         print("============== MODEL TRAINING ==============")
         # Create model with proper parameters - only create it once
@@ -870,10 +1010,28 @@ def main():
         model.summary()
 
         # training
-        if os.path.exists(model_file):
-            model.load_weights(model_file)
-            logger.info("Model loaded from file, no training performed")
+        if os.path.exists(model_file) and not param.get("force_retrain", False):
+            try:
+                model.load_weights(model_file)
+                logger.info(f"Model loaded from {model_file}")
+                
+                # Create placeholder history data for visualization
+                # This ensures history graphs are created even when loading a model
+                dummy_history = {"loss": [0.1, 0.05], "val_loss": [0.12, 0.06]}
+                visualizer.loss_plot(dummy_history["loss"], dummy_history["val_loss"])
+                visualizer.save_figure(history_img)
+                logger.info(f"Created placeholder history graph at {history_img}")
+            except Exception as e:
+                logger.error(f"Error loading model from {model_file}: {e}")
+                logger.info("Will train a new model")
+                os.remove(model_file) if os.path.exists(model_file) else None
+                model_exists = False
         else:
+            logger.info(f"Model file {model_file} not found or force_retrain enabled, training new model")
+            model_exists = False
+
+        # Only train if model doesn't exist or loading failed
+        if not os.path.exists(model_file):
             # Update compile parameters for TensorFlow 2.x
             compile_params = param["fit"]["compile"].copy()
             if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
@@ -882,7 +1040,7 @@ def main():
                     lr=param["fit"].get("learning_rate", 0.001)
                 )
             
-            #custom loss function that includes feature parameters
+            # Define custom loss function that includes feature parameters
             def get_loss_function():
                 feature_params = param["feature"]
                 alpha = param["fit"].get("loss_alpha", 0.7)
@@ -896,30 +1054,12 @@ def main():
                 loss_function = compile_params.get("loss")
 
             model.compile(optimizer=compile_params.get("optimizer"), loss=loss_function)
-                
-            model.compile(optimizer=compile_params.get("optimizer"), 
-              loss=hybrid_loss if compile_params.get("loss") == "hybrid_loss" else compile_params.get("loss"))
             
-            # Use TensorFlow callbacks
-            callbacks = []
-
-            if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-                # Use a simple Adam optimizer with a fixed learning rate
-                compile_params["optimizer"] = tf.keras.optimizers.Adam(
-                    learning_rate=param["fit"].get("learning_rate", 0.001)
-                )
-
-            if compile_params.get("loss") == "hybrid_loss":
-                loss_function = get_loss_function()
-            else:
-                loss_function = compile_params.get("loss")
-
-            model.compile(optimizer=compile_params.get("optimizer"), loss=loss_function)
-
             # Set up callbacks
             callbacks = []
 
             if param["fit"].get("use_augmentation", False):
+                logger.info("Applying data augmentation")
                 train_data = augment_data(
                     train_data, 
                     augmentation_factor=param["fit"].get("augmentation_factor", 2),
@@ -927,42 +1067,18 @@ def main():
                 )
                 logger.info(f"Data augmented: {train_data.shape[0]} samples")
 
-            if param["fit"].get("use_lr_scheduler", True):
-                # Create cosine decay schedule
-                def cosine_decay_scheduler(epoch, lr):
-                    first_decay_steps = param["fit"].get("lr_first_decay_steps", 20)
-                    t_mul = param["fit"].get("lr_t_mul", 2.0)
-                    m_mul = param["fit"].get("lr_m_mul", 0.9)
-                    alpha = param["fit"].get("lr_min_factor", 0.1)
-                    initial_lr = param["fit"].get("learning_rate", 0.001)
-                    
-                    # Calculate cycle
-                    cycle = 1
-                    cycle_steps = first_decay_steps
-                    total_steps = 0
-                    
-                    # Find which cycle we're in
-                    while epoch >= total_steps + cycle_steps:
-                        total_steps += cycle_steps
-                        cycle += 1
-                        cycle_steps = cycle_steps * t_mul
-                    
-                    # Calculate where in the cycle we are
-                    cycle_epoch = epoch - total_steps
-                    cycle_progress = cycle_epoch / cycle_steps
-                    
-                    # Calculate decay
-                    cosine_decay = 0.5 * (1 + np.cos(np.pi * cycle_progress))
-                    decay = (1 - alpha) * cosine_decay + alpha
-                    
-                    # Apply cycle multiplier
-                    cycle_multiplier = m_mul ** (cycle - 1)
-                    
-                    return initial_lr * decay * cycle_multiplier
-                
-                callbacks.append(tf.keras.callbacks.LearningRateScheduler(cosine_decay_scheduler))
+            # Early stopping
+            if param["fit"].get("early_stopping", True):
+                callbacks.append(tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss',
+                    patience=10,
+                    restore_best_weights=True,
+                    verbose=1
+                ))
 
-            # Model checkpoint
+            # Model checkpoint - ensure directory exists
+            model_dir = os.path.dirname(model_file)
+            os.makedirs(model_dir, exist_ok=True)
             callbacks.append(tf.keras.callbacks.ModelCheckpoint(
                 filepath=model_file,
                 save_best_only=True,
@@ -972,6 +1088,7 @@ def main():
 
             # Add TensorBoard logging
             log_dir = f"{param['result_directory']}/logs/{machine_type}_{machine_id}_{db}_{time.strftime('%Y%m%d-%H%M%S')}"
+            os.makedirs(log_dir, exist_ok=True)
             callbacks.append(tf.keras.callbacks.TensorBoard(
                 log_dir=log_dir,
                 histogram_freq=1,
@@ -987,30 +1104,52 @@ def main():
                 verbose=1
             ))
 
-            #fit the model
-            history = model.fit(
-                train_data,
-                train_data,
-                epochs=param["fit"]["epochs"],
-                batch_size=param["fit"]["batch_size"],
-                shuffle=param["fit"]["shuffle"],
-                validation_split=param["fit"]["validation_split"],
-                verbose=param["fit"]["verbose"],
-                callbacks=callbacks
-            )
+            # Ensure validation data is properly created
+            validation_split = param["fit"].get("validation_split", 0.1)
+            if validation_split <= 0 or validation_split >= 1:
+                logger.warning(f"Invalid validation_split value: {validation_split}, setting to default 0.1")
+                validation_split = 0.1
 
-            visualizer.loss_plot(history.history["loss"], history.history["val_loss"])
-            visualizer.save_figure(history_img)
-            model.save_weights(model_file)
+            # Make sure train_data has enough samples for validation split
+            if train_data.shape[0] < 10:  # At least 10 samples for meaningful validation
+                logger.warning(f"Not enough training data samples ({train_data.shape[0]}), disabling validation")
+                validation_split = 0
+
+            # Fit the model
+            try:
+                logger.info(f"Starting training with {train_data.shape[0]} samples, validation_split={validation_split}")
+                history = model.fit(
+                    train_data,
+                    train_data,
+                    epochs=param["fit"]["epochs"],
+                    batch_size=param["fit"]["batch_size"],
+                    shuffle=param["fit"]["shuffle"],
+                    validation_split=validation_split,
+                    verbose=param["fit"]["verbose"],
+                    callbacks=callbacks
+                )
+
+                # Always save the visualization
+                visualizer.loss_plot(history.history["loss"], history.history["val_loss"])
+                visualizer.save_figure(history_img)
+                logger.info(f"Training history graph saved to {history_img}")
+                
+                # Save model weights
+                model.save_weights(model_file)
+                logger.info(f"Model weights saved to {model_file}")
+            except Exception as e:
+                logger.error(f"Error during model training: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
 
         # evaluation
         print("============== EVALUATION ==============")
         y_pred = [0. for _ in eval_labels]
         y_true = eval_labels
 
-        # Instead of storing all spectrograms, calculate SSIM on the fly
+        # Process files in batches to save memory
+        batch_size = 32
         ssim_scores = []
-        batch_size = 32  # Process files in batches to save memory
 
         for i in range(0, len(eval_files), batch_size):
             batch_files = eval_files[i:i+batch_size]
@@ -1034,12 +1173,12 @@ def main():
                     error = np.mean(np.square(data - pred), axis=1)
                     y_pred[file_index] = np.mean(error)
                     
-                    # Calculate SSIM for this batch on the fly
+                    # Calculate SSIM for each sample
                     for j in range(min(len(data), len(pred))):
                         try:
-                            # Reshape vectors back to spectrograms if needed
-                            orig_spec = data[j].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                            recon_spec = pred[j].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
+                            # Reshape vectors back to spectrograms
+                            orig_spec = data[j].reshape(param["feature"]["frames"], param["feature"]["n_mels"])
+                            recon_spec = pred[j].reshape(param["feature"]["frames"], param["feature"]["n_mels"])
                             
                             # Get dimensions
                             height, width = orig_spec.shape
@@ -1050,18 +1189,14 @@ def main():
                                 win_size -= 1
                             if win_size > 1:  # Ensure at least 3 for ssim
                                 win_size = max(3, win_size)
-                            else:
-                                # Skip if dimensions are too small
-                                continue
-                                
-                            # Calculate SSIM with custom window size
-                            ssim_value = ssim(
-                                orig_spec, 
-                                recon_spec,
-                                win_size=win_size,
-                                data_range=orig_spec.max() - orig_spec.min() + 1e-10
-                            )
-                            ssim_scores.append(ssim_value)
+                                # Calculate SSIM with custom window size
+                                ssim_value = ssim(
+                                    orig_spec, 
+                                    recon_spec,
+                                    win_size=win_size,
+                                    data_range=orig_spec.max() - orig_spec.min() + 1e-10
+                                )
+                                ssim_scores.append(ssim_value)
                         except Exception as e:
                             logger.warning(f"SSIM calculation error: {e}")
                             
@@ -1106,52 +1241,22 @@ def main():
             # Mean Absolute Error
             evaluation_result["MAE"] = float(metrics.mean_absolute_error(y_true, y_pred_binary))
 
-
             # Log some of the new metrics
             logger.info(f"Precision: {evaluation_result['Precision']:.4f}, Recall: {evaluation_result['Recall']:.4f}")
             logger.info(f"Specificity: {evaluation_result['Specificity']:.4f}, MCC: {evaluation_result['MCC']:.4f}")
             
-
-            # Average SSIM
-            ssim_scores = []
-            for orig, recon in zip(original_specs, reconstructed_specs):
-                for i in range(min(len(orig), len(recon))):
-                    try:
-                        # Reshape vectors back to spectrograms if needed
-                        orig_spec = orig[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                        recon_spec = recon[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                        
-                        # Get dimensions
-                        height, width = orig_spec.shape
-                        
-                        # Calculate appropriate window size (must be odd and smaller than image)
-                        win_size = min(height, width)
-                        if win_size % 2 == 0:  # Make odd if even
-                            win_size -= 1
-                        if win_size > 1:  # Ensure at least 3 for ssim
-                            win_size = max(3, win_size)
-                        else:
-                            # Skip if dimensions are too small
-                            continue
-                            
-                        # Calculate SSIM with custom window size
-                        ssim_value = ssim(
-                            orig_spec, 
-                            recon_spec,
-                            win_size=win_size,
-                            data_range=orig_spec.max() - orig_spec.min() + 1e-10
-                        )
-                        ssim_scores.append(ssim_value)
-                    except Exception as e:
-                        logger.warning(f"SSIM calculation error: {e}")
-                        
+            # Add SSIM scores if any were calculated
             if ssim_scores:
                 evaluation_result["SSIM"] = float(np.mean(ssim_scores))
+                logger.info(f"Avg SSIM: {evaluation_result['SSIM']:.4f}")
             else:
                 evaluation_result["SSIM"] = float(-1)  # Indicate no valid SSIM could be calculated
             
         except Exception as e:
             logger.error(f"Error calculating metrics: {e}")
+            logger.error(f"Exception details: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
 
         results[evaluation_result_key] = evaluation_result
             

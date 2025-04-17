@@ -1,4 +1,5 @@
 perform_tuning: false
+force_retrain: true
 
 # Dataset selection parameters
 dataset:

@@ -14,7 +14,6 @@ import os
 import sys
 import glob
 import logging
-from pathlib import Path
 ########################################################################
 
 
@@ -27,14 +26,18 @@ import librosa.core
 import librosa.feature
 import yaml
 import time
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
 # from import
+from pathlib import Path
 from tqdm import tqdm
 from sklearn import metrics
-import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense
-import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim
+from tensorflow.keras.layers import Input, Dense, BatchNormalization, Dropout, Activation, Add
+from tensorflow.keras.regularizers import l2
 ########################################################################
 
 
@@ -204,16 +207,11 @@ def file_to_vector_array(file_name,
                          frames=5,
                          n_fft=1024,
                          hop_length=512,
-                         power=2.0):
+                         power=2.0,
+                         params=None):  # Add params parameter
     """
     convert file_name to a vector array.
-
-    file_name : str
-        target .wav file
-
-    return : numpy.array( numpy.array( float ) )
-        vector array
-        * dataset.shape = (dataset_size, fearture_vector_length)
+    ...
     """
     # 01 calculate the number of dimensions
     dims = n_mels * frames
@@ -241,11 +239,59 @@ def file_to_vector_array(file_name,
         return np.empty((0, dims), float)
 
     # 06 generate feature vectors by concatenating multi_frames
-    vectorarray = np.zeros((vectorarray_size, dims), float)
-    for t in range(frames):
-        vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
+    if params and params.get("use_patches", False):  # Use passed params here
+        # Reshape for patch extraction
+        log_mel_reshaped = log_mel_spectrogram.reshape(n_mels, -1)
+        vectorarray = extract_patches(log_mel_reshaped, 
+                                    patch_size=params["feature"].get("patch_size", 16),
+                                    stride=params["feature"].get("stride", 8))
+    else:
+        # Original method
+        vectorarray = np.zeros((vectorarray_size, dims), float)
+        for t in range(frames):
+            vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
 
     return vectorarray
+
+
+def extract_patches(spectrogram, patch_size=16, stride=8):
+    """
+    Extract overlapping patches from mel-spectrogram.
+    
+    spectrogram : numpy.array(shape=(n_mels, time))
+        The mel-spectrogram to extract patches from
+    patch_size : int
+        Size of patches to extract
+    stride : int
+        Stride between patches
+    
+    return : numpy.array(shape=(num_patches, patch_size*patch_size))
+        Extracted patches flattened to vectors
+    """
+    n_mels, time_length = spectrogram.shape
+    patches = []
+    
+    # Check if spectrogram is large enough for patching
+    if n_mels < patch_size or time_length < patch_size:
+        logger.warning(f"Spectrogram too small for patching: {n_mels}x{time_length}, patch size: {patch_size}")
+        # Return original spectrogram flattened if too small for patching
+        return np.array([spectrogram.flatten()])
+    
+    for i in range(0, n_mels - patch_size + 1, stride):
+        for j in range(0, time_length - patch_size + 1, stride):
+            patch = spectrogram[i:i+patch_size, j:j+patch_size]
+            # Verify patch shape before adding
+            if patch.shape == (patch_size, patch_size):
+                patches.append(patch.flatten())
+            else:
+                logger.warning(f"Invalid patch shape: {patch.shape}, expected: ({patch_size}, {patch_size})")
+    
+    # If no valid patches were extracted, return original flattened
+    if len(patches) == 0:
+        logger.warning("No valid patches extracted, returning original spectrogram")
+        return np.array([spectrogram.flatten()])
+        
+    return np.array(patches)
 
 
 def list_to_vector_array(file_list,
@@ -278,11 +324,12 @@ def list_to_vector_array(file_list,
     # 02 loop of file_to_vectorarray
     for idx in tqdm(range(len(file_list)), desc=msg):
         vector_array = file_to_vector_array(file_list[idx],
-                                           n_mels=n_mels,
-                                           frames=frames,
-                                           n_fft=n_fft,
-                                           hop_length=hop_length,
-                                           power=power)
+                                   n_mels=n_mels,
+                                   frames=frames,
+                                   n_fft=n_fft,
+                                   hop_length=hop_length,
+                                   power=power,
+                                   params=param)
         
         if vector_array.shape[0] == 0:
             continue
@@ -299,6 +346,76 @@ def list_to_vector_array(file_list,
         
     # Return only the filled part of the dataset
     return dataset[:total_size, :]
+
+
+def augment_data(data_array, augmentation_factor=2, params=None):
+    """
+    Enhanced data augmentation with more techniques.
+    
+    data_array : numpy.array
+        Input feature vectors
+    augmentation_factor : int
+        How many augmented samples to create per original
+    params : dict
+        Configuration parameters
+        
+    return : numpy.array
+        Augmented dataset
+    """
+    original_size = data_array.shape[0]
+    feature_dim = data_array.shape[1]
+    augmented_data = np.zeros((original_size * (augmentation_factor + 1), feature_dim))
+    
+    # Copy original data
+    augmented_data[:original_size] = data_array
+    
+    for i in range(augmentation_factor):
+        offset = (i + 1) * original_size
+        
+        # Copy original data
+        augmented_data[offset:offset + original_size] = data_array.copy()
+        
+        # Apply different augmentation techniques for each copy
+        if i % 3 == 0:
+            # Add random noise
+            noise_level = np.random.uniform(0.001, 0.02)
+            augmented_data[offset:offset + original_size] += np.random.normal(
+                0, noise_level, size=augmented_data[offset:offset + original_size].shape
+            )
+        elif i % 3 == 1:
+            # Add frequency masking (zero out random frequency bands)
+            if params and "n_mels" in params["feature"] and "frames" in params["feature"]:
+                n_mels = params["feature"]["n_mels"]
+                frames = params["feature"]["frames"]
+                
+                # Reshape to apply frequency masking
+                for j in range(original_size):
+                    sample = augmented_data[offset + j].reshape(frames, n_mels)
+                    
+                    # Frequency mask
+                    mask_size = np.random.randint(1, n_mels // 4)
+                    mask_start = np.random.randint(0, n_mels - mask_size)
+                    sample[:, mask_start:mask_start + mask_size] = 0
+                    
+                    augmented_data[offset + j] = sample.flatten()
+        else:
+            # Add time masking or slight shifts
+            if params and "n_mels" in params["feature"] and "frames" in params["feature"]:
+                n_mels = params["feature"]["n_mels"]
+                frames = params["feature"]["frames"]
+                
+                # Reshape to apply time masking
+                for j in range(original_size):
+                    sample = augmented_data[offset + j].reshape(frames, n_mels)
+                    
+                    # Time mask
+                    mask_size = np.random.randint(1, frames // 4)
+                    mask_start = np.random.randint(0, frames - mask_size)
+                    sample[mask_start:mask_start + mask_size, :] = 0
+                    
+                    augmented_data[offset + j] = sample.flatten()
+    
+    return augmented_data
 
 
 def dataset_generator(target_dir,
@@ -370,20 +487,224 @@ def dataset_generator(target_dir,
 ########################################################################
 # keras model
 ########################################################################
-def keras_model(input_dim):
+def keras_model(input_dim, **params):
     """
-    define the keras model
-    the model based on the simple dense auto encoder (64*64*8*64*64)
+    Enhanced model with configurable parameters.
     """
+    # Default values that can be overridden by params
+    layer_size = params.get("layer_size", 64)
+    bottleneck_size = params.get("bottleneck_size", 8)
+    dropout_rate = params.get("dropout_rate", 0.2)
+    activation = params.get("activation", "relu")
+    use_residual = params.get("use_residual", True)
+    depth = params.get("depth", 2)  # Number of encoding layers
+    weight_decay = params.get("weight_decay", None)
+    
+    # Weight regularizer based on weight_decay parameter
+    regularizer = l2(weight_decay) if weight_decay else None
+    
+    # Input layer
     inputLayer = Input(shape=(input_dim,))
-    h = Dense(64, activation="relu")(inputLayer)
-    h = Dense(64, activation="relu")(h)
-    h = Dense(8, activation="relu")(h)
-    h = Dense(64, activation="relu")(h)
-    h = Dense(64, activation="relu")(h)
-    h = Dense(input_dim, activation=None)(h)
+    h = inputLayer
+    
+    # Encoder
+    skip_connections = []
+    for i in range(depth):
+        if i > 0 and use_residual:
+            skip_connections.append(h)
+            
+        h = Dense(layer_size, kernel_regularizer=regularizer)(h)
+        h = BatchNormalization()(h)
+        h = Activation(activation)(h)
+        h = Dropout(dropout_rate)(h)
+    
+    # Bottleneck
+    h = Dense(bottleneck_size, kernel_regularizer=regularizer)(h)
+    h = BatchNormalization()(h)
+    h = Activation(activation)(h)
+    
+    # Decoder
+    for i in range(depth):
+        h = Dense(layer_size, kernel_regularizer=regularizer)(h)
+        h = BatchNormalization()(h)
+        h = Activation(activation)(h)
+        h = Dropout(dropout_rate)(h)
+        
+        # Add residual connection if available and enabled
+        if use_residual and i < len(skip_connections):
+            h = Add()([h, skip_connections[-(i+1)]])  # Connect to corresponding encoder layer
+    
+    # Output
+    output = Dense(input_dim, activation=None)(h)
 
-    return Model(inputs=inputLayer, outputs=h)
+    return Model(inputs=inputLayer, outputs=output)
+
+
+def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
+    """
+    Combines MSE and SSIM loss with proper handling of non-square data.
+    """
+    # MSE component
+    mse = tf.reduce_mean(tf.square(y_true - y_pred))
+    
+    # For SSIM, we need to ensure dimensions make sense
+    # Instead of forcing a square, reshape to a more natural spectrogram shape
+    batch_size = tf.shape(y_true)[0]
+    
+    if feature_params:
+        n_mels = feature_params.get("n_mels", 64)
+        frames = feature_params.get("frames", 5)
+    else:
+        # Fallback to default values if no params provided
+        n_mels = 64
+        frames = 5
+    
+    y_true_reshaped = tf.reshape(y_true, [batch_size, frames, n_mels, 1])
+    y_pred_reshaped = tf.reshape(y_pred, [batch_size, frames, n_mels, 1])
+    
+    ssim_value = tf.image.ssim(y_true_reshaped, y_pred_reshaped, max_val=1.0)
+    ssim_loss = 1.0 - tf.reduce_mean(ssim_value)
+    
+    return alpha * mse + (1 - alpha) * ssim_loss
+Change 4: Update model compilation to pass parameters to loss function
+python# Around line 789, update model compilation:
+# Create a custom loss function that includes feature parameters
+def get_loss_function():
+    feature_params = param["feature"]
+    alpha = param["fit"].get("loss_alpha", 0.7)
+    def custom_hybrid_loss(y_true, y_pred):
+        return hybrid_loss(y_true, y_pred, alpha=alpha, feature_params=feature_params)
+    return custom_hybrid_loss
+
+if compile_params.get("loss") == "hybrid_loss":
+    loss_function = get_loss_function()
+else:
+    loss_function = compile_params.get("loss")
+
+model.compile(optimizer=compile_params.get("optimizer"), loss=loss_function)
+
+
+def get_optimizer_with_scheduler(optimizer_name="adam", lr=0.001):
+    """
+    Create optimizer with configurable learning rate scheduling.
+    """
+    if optimizer_name.lower() == "adam":
+        # Get schedule parameters from config or use defaults
+        first_decay_steps = param["fit"].get("lr_first_decay_steps", 20)
+        t_mul = param["fit"].get("lr_t_mul", 2.0)
+        m_mul = param["fit"].get("lr_m_mul", 0.9)
+        alpha = param["fit"].get("lr_min_factor", 0.1)
+        
+        # Create learning rate schedule
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+            initial_learning_rate=lr,
+            first_decay_steps=first_decay_steps,
+            t_mul=t_mul,
+            m_mul=m_mul,
+            alpha=alpha
+        )
+        return tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+    return optimizer_name
+
+
+
+def tune_hyperparameters(train_data, machine_type, machine_id, db):
+    """
+    Perform hyperparameter tuning using a simple grid search.
+    """
+    logger.info("Starting hyperparameter tuning...")
+    
+    # Define parameter grid
+    param_grid = {
+        "batch_size": [128, 256, 512],
+        "learning_rate": [0.01, 0.001, 0.0001],
+        "dropout_rate": [0.1, 0.2, 0.3],
+        "bottleneck_size": [8, 16, 32]
+    }
+    
+    best_val_loss = float('inf')
+    best_params = {}
+    
+    # Split data for validation
+    val_split = 0.2
+    split_idx = int(train_data.shape[0] * (1 - val_split))
+    train_subset = train_data[:split_idx]
+    val_subset = train_data[split_idx:]
+    
+    # Create results storage
+    tuning_results = []
+    
+    # Simple grid search
+    for batch_size in param_grid["batch_size"]:
+        for lr in param_grid["learning_rate"]:
+            for dropout_rate in param_grid["dropout_rate"]:
+                for bottleneck_size in param_grid["bottleneck_size"]:
+                    logger.info(f"Testing: batch_size={batch_size}, lr={lr}, dropout={dropout_rate}, bottleneck={bottleneck_size}")
+                    
+                    # Create model with current parameters
+                    def create_tuning_model(input_dim, dropout_rate, bottleneck_size):
+                        inputLayer = Input(shape=(input_dim,))
+                        h = Dense(64)(inputLayer)
+                        h = BatchNormalization()(h)
+                        h = Activation("relu")(h)
+                        h = Dropout(dropout_rate)(h)
+                        h = Dense(64)(h)
+                        h = BatchNormalization()(h)
+                        h = Activation("relu")(h)
+                        h = Dropout(dropout_rate)(h)
+                        h = Dense(bottleneck_size)(h)
+                        h = BatchNormalization()(h)
+                        h = Activation("relu")(h)
+                        h = Dense(64)(h)
+                        h = BatchNormalization()(h)
+                        h = Activation("relu")(h)
+                        h = Dropout(dropout_rate)(h)
+                        h = Dense(input_dim, activation=None)(h)
+                        return Model(inputs=inputLayer, outputs=h)
+                    
+                    input_dim = train_data.shape[1]
+                    model = create_tuning_model(input_dim, dropout_rate, bottleneck_size)
+                    
+                    # Setup optimizer
+                    optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
+                    model.compile(optimizer=optimizer, loss="mean_squared_error")
+                    
+                    # Train for a few epochs
+                    history = model.fit(
+                        train_subset, train_subset,
+                        validation_data=(val_subset, val_subset),
+                        epochs=20,
+                        batch_size=batch_size,
+                        verbose=0
+                    )
+                    
+                    # Get final validation loss
+                    val_loss = min(history.history["val_loss"])
+                    
+                    # Store results
+                    result = {
+                        "batch_size": batch_size,
+                        "learning_rate": lr,
+                        "dropout_rate": dropout_rate,
+                        "bottleneck_size": bottleneck_size,
+                        "val_loss": val_loss
+                    }
+                    tuning_results.append(result)
+                    
+                    # Update best parameters
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_params = result.copy()
+                    
+                    # Clean up
+                    tf.keras.backend.clear_session()
+    
+    # Save tuning results
+    with open(f"{param['result_directory']}/tuning_{machine_type}_{machine_id}_{db}.yaml", "w") as f:
+        yaml.dump(tuning_results, f, default_flow_style=False)
+    
+    logger.info(f"Best parameters: {best_params}")
+    return best_params
 
 
 ########################################################################
@@ -398,8 +719,19 @@ def main():
     start_time = time.time()
 
     # load parameter yaml
+    global param  # Explicitly declare param as global
     with open("baseline.yaml", "r") as stream:
         param = yaml.safe_load(stream)
+
+    # Ensure all required sections exist
+    if "feature" not in param:
+        param["feature"] = {}
+    if "fit" not in param:
+        param["fit"] = {}
+    if "compile" not in param["fit"]:
+        param["fit"]["compile"] = {}
+    if "dataset" not in param:
+        param["dataset"] = {}
 
     # make output directory
     os.makedirs(param["pickle_directory"], exist_ok=True)
@@ -413,6 +745,33 @@ def main():
     base_path = Path(param["base_directory"])
     dirs = sorted(list(base_path.glob("*/*/*")))
     dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
+
+    # Filter directories based on YAML configuration
+    if "dataset" in param and param["dataset"]:
+        filtered_dirs = []
+        db_levels = param["dataset"].get("db_levels", [])
+        machine_types = param["dataset"].get("machine_types", [])
+        
+        for dir_path in dirs:
+            parts = Path(dir_path).parts
+            include = True
+            
+            # Filter by db_level if specified
+            if db_levels and not any(level in parts for level in db_levels):
+                include = False
+                
+            # Filter by machine_type if specified
+            if machine_types and not any(m_type in parts for m_type in machine_types):
+                include = False
+                
+            if include:
+                filtered_dirs.append(dir_path)
+                
+        # Replace dirs with filtered list if any filters were applied
+        if db_levels or machine_types:
+            dirs = filtered_dirs
+            logger.info(f"Filtering applied: db_levels={db_levels}, machine_types={machine_types}")
+
 
     # Print dirs for debugging
     logger.info(f"Found {len(dirs)} directories to process:")
@@ -457,7 +816,7 @@ def main():
         history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
-        # dataset generator
+       # dataset generator
         print("============== DATASET_GENERATOR ==============")
         if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
             train_data = load_pickle(train_pickle)
@@ -488,9 +847,37 @@ def main():
             save_pickle(eval_files_pickle, eval_files)
             save_pickle(eval_labels_pickle, eval_labels)
 
+
+        if param.get("perform_tuning", False):
+            best_params = tune_hyperparameters(train_data, machine_type, machine_id, db)
+            # Store best params for model creation
+            model_params = {
+                "layer_size": param["fit"].get("layer_size", 64),
+                "bottleneck_size": param["fit"].get("bottleneck_size", 8),
+                "dropout_rate": param["fit"].get("dropout_rate", 0.2),
+                "activation": param["fit"].get("activation", "relu"),
+                "use_residual": param["fit"].get("use_residual", True),
+                "depth": param["fit"].get("depth", 2),
+                "weight_decay": param["fit"].get("weight_decay", None)
+            }
+        else:
+            model_params = {
+                "layer_size": param["fit"].get("layer_size", 64),
+                "bottleneck_size": param["fit"].get("bottleneck_size", 8),
+                "dropout_rate": param["fit"].get("dropout_rate", 0.2),
+                "activation": param["fit"].get("activation", "relu"),
+                "use_residual": param["fit"].get("use_residual", True),
+                "depth": param["fit"].get("depth", 2),
+                "weight_decay": param["fit"].get("weight_decay", None)
+            }
+
         # model training
         print("============== MODEL TRAINING ==============")
-        model = keras_model(param["feature"]["n_mels"] * param["feature"]["frames"])
+        # Create model with proper parameters - only create it once
+        model = keras_model(
+            param["feature"]["n_mels"] * param["feature"]["frames"],
+            **model_params
+        )
         model.summary()
 
         # training
@@ -498,22 +885,51 @@ def main():
             model.load_weights(model_file)
             logger.info("Model loaded from file, no training performed")
         else:
-
             # Update compile parameters for TensorFlow 2.x
             compile_params = param["fit"]["compile"].copy()
             if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-                compile_params["optimizer"] = tf.keras.optimizers.Adam()
+                compile_params["optimizer"] = get_optimizer_with_scheduler(
+                    "adam", 
+                    lr=param["fit"].get("learning_rate", 0.001)
+                )
                 
-            model.compile(**compile_params)
+            model.compile(optimizer=compile_params.get("optimizer"), 
+              loss=hybrid_loss if compile_params.get("loss") == "hybrid_loss" else compile_params.get("loss"))
             
             # Use TensorFlow callbacks
             callbacks = []
-            if param["fit"].get("early_stopping", False):
-                callbacks.append(tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=10,
-                    restore_best_weights=True
-                ))
+            if param["fit"].get("use_augmentation", False):
+                train_data = augment_data(
+                    train_data, 
+                    augmentation_factor=param["fit"].get("augmentation_factor", 2),
+                    params=param  # Pass parameters for better augmentation
+                )
+                logger.info(f"Data augmented: {train_data.shape[0]} samples")
+
+            # Model checkpoint
+            callbacks.append(tf.keras.callbacks.ModelCheckpoint(
+                filepath=model_file,
+                save_best_only=True,
+                monitor='val_loss',
+                verbose=1
+            ))
+
+            # Add TensorBoard logging
+            log_dir = f"{param['result_directory']}/logs/{machine_type}_{machine_id}_{db}_{time.strftime('%Y%m%d-%H%M%S')}"
+            callbacks.append(tf.keras.callbacks.TensorBoard(
+                log_dir=log_dir,
+                histogram_freq=1,
+                write_graph=True
+            ))
+
+            # Add ReduceLROnPlateau
+            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6,
+                verbose=1
+            ))
                 
             history = model.fit(
                 train_data,
@@ -534,30 +950,66 @@ def main():
         print("============== EVALUATION ==============")
         y_pred = [0. for _ in eval_labels]
         y_true = eval_labels
-        original_specs = []
-        reconstructed_specs = []
 
+        # Instead of storing all spectrograms, calculate SSIM on the fly
+        ssim_scores = []
+        batch_size = 32  # Process files in batches to save memory
 
-        for num, file_name in tqdm(enumerate(eval_files), total=len(eval_files)):
-            try:
-                data = file_to_vector_array(file_name,
-                                           n_mels=param["feature"]["n_mels"],
-                                           frames=param["feature"]["frames"],
-                                           n_fft=param["feature"]["n_fft"],
-                                           hop_length=param["feature"]["hop_length"],
-                                           power=param["feature"]["power"])
-                                           
-                if data.shape[0] == 0:
-                    logger.warning(f"No valid features extracted from file: {file_name}")
-                    continue
+        for i in range(0, len(eval_files), batch_size):
+            batch_files = eval_files[i:i+batch_size]
+            
+            for num, file_name in tqdm(enumerate(batch_files), total=len(batch_files)):
+                try:
+                    file_index = i + num
+                    data = file_to_vector_array(file_name,
+                                            n_mels=param["feature"]["n_mels"],
+                                            frames=param["feature"]["frames"],
+                                            n_fft=param["feature"]["n_fft"],
+                                            hop_length=param["feature"]["hop_length"],
+                                            power=param["feature"]["power"],
+                                            params=param)
+                                            
+                    if data.shape[0] == 0:
+                        logger.warning(f"No valid features extracted from file: {file_name}")
+                        continue
+                        
+                    pred = model.predict(data, verbose=0)
+                    error = np.mean(np.square(data - pred), axis=1)
+                    y_pred[file_index] = np.mean(error)
                     
-                pred = model.predict(data, verbose=0)
-                error = np.mean(np.square(data - pred), axis=1)
-                y_pred[num] = np.mean(error)
-                original_specs.append(data)
-                reconstructed_specs.append(pred)
-            except Exception as e:
-                logger.warning(f"Error processing file: {file_name}, error: {e}")
+                    # Calculate SSIM for this batch on the fly
+                    for j in range(min(len(data), len(pred))):
+                        try:
+                            # Reshape vectors back to spectrograms if needed
+                            orig_spec = data[j].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
+                            recon_spec = pred[j].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
+                            
+                            # Get dimensions
+                            height, width = orig_spec.shape
+                            
+                            # Calculate appropriate window size (must be odd and smaller than image)
+                            win_size = min(height, width)
+                            if win_size % 2 == 0:  # Make odd if even
+                                win_size -= 1
+                            if win_size > 1:  # Ensure at least 3 for ssim
+                                win_size = max(3, win_size)
+                            else:
+                                # Skip if dimensions are too small
+                                continue
+                                
+                            # Calculate SSIM with custom window size
+                            ssim_value = ssim(
+                                orig_spec, 
+                                recon_spec,
+                                win_size=win_size,
+                                data_range=orig_spec.max() - orig_spec.min() + 1e-10
+                            )
+                            ssim_scores.append(ssim_value)
+                        except Exception as e:
+                            logger.warning(f"SSIM calculation error: {e}")
+                            
+                except Exception as e:
+                    logger.warning(f"Error processing file: {file_name}, error: {e}")
 
         # Calculate AUC score
         try:

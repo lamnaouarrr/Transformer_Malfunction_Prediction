@@ -1,3 +1,10 @@
+perform_tuning: false
+
+# Dataset selection parameters
+dataset:
+  db_levels: ["0dB"]  # List of dB levels to include: ["0dB", "6dB", "min6dB"] for all
+  machine_types: ["fan"]  # List of machine types to include: ["fan", "pump", "slider", "valve"] for all
+
 # Feature extraction parameters
 feature:
   n_mels: 64
@@ -5,18 +12,32 @@ feature:
   n_fft: 1024
   hop_length: 512
   power: 2.0
+  use_patches: true
+  patch_size: 16
+  stride: 8
 
 # Fit algorithm parameters
 fit:
   compile:
     optimizer: "adam"
-    loss: "mean_squared_error"
+    loss: "hybrid_loss"
   epochs: 100
   batch_size: 512
   shuffle: True
   validation_split: 0.1
   verbose: 1
   early_stopping: True
+  learning_rate: 0.001
+  use_augmentation: true
+  augmentation_factor: 2
+  layer_size: 64
+  bottleneck_size: 8
+  dropout_rate: 0.2
+  loss_alpha: 0.7
+  lr_first_decay_steps: 20
+  lr_t_mul: 2.0
+  lr_m_mul: 0.9
+  lr_min_factor: 0.1
 
 # Directory paths
 base_directory: "./dataset"

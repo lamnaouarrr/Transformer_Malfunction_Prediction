@@ -566,9 +566,8 @@ def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
     ssim_loss = 1.0 - tf.reduce_mean(ssim_value)
     
     return alpha * mse + (1 - alpha) * ssim_loss
-Change 4: Update model compilation to pass parameters to loss function
-python# Around line 789, update model compilation:
-# Create a custom loss function that includes feature parameters
+
+#custom loss function that includes feature parameters
 def get_loss_function():
     feature_params = param["feature"]
     alpha = param["fit"].get("loss_alpha", 0.7)

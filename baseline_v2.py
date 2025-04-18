@@ -385,8 +385,8 @@ def augment_data(data_array, augmentation_factor=2, params=None):
         
         # Apply different augmentation techniques for each copy
         if i % 4 == 0:
-            # Add random noise
-            noise_level = np.random.uniform(0.0005, 0.01)  # Reduced noise range
+            # Add random noise with reduced intensity
+            noise_level = np.random.uniform(0.0002, 0.005)  # Reduced from 0.0005-0.01
             augmented_data[offset:offset + original_size] += np.random.normal(
                 0, noise_level, size=augmented_data[offset:offset + original_size].shape
             )
@@ -420,6 +420,30 @@ def augment_data(data_array, augmentation_factor=2, params=None):
             augmented_data[offset:offset + original_size] *= scale_factor
     
     return augmented_data
+
+def get_sample_weights(train_data, params):
+    """
+    Generate sample weights to focus learning on challenging examples.
+    """
+    # Create a temporary model to evaluate reconstruction difficulty
+    input_dim = train_data.shape[1]
+    temp_model = keras_model(input_dim, **{
+        "layer_size": 64,
+        "bottleneck_size": 16,
+        "dropout_rate": 0.1
+    })
+    temp_model.compile(optimizer="adam", loss="mse")
+    
+    # Get initial predictions
+    preds = temp_model.predict(train_data, verbose=0, batch_size=512)
+    errors = np.mean(np.square(train_data - preds), axis=1)
+    
+    # Generate weights that focus on harder-to-reconstruct samples
+    # but avoid excessive focus on outliers
+    median_error = np.median(errors)
+    weights = np.clip(errors / (median_error + 1e-10), 0.5, 2.0)
+    
+    return weights
 
 
 def dataset_generator(target_dir,
@@ -554,7 +578,7 @@ def keras_model(input_dim, **params):
     return Model(inputs=inputLayer, outputs=output)
 
 
-def hybrid_loss(y_true, y_pred, alpha=0.6, feature_params=None):
+def hybrid_loss(y_true, y_pred, alpha=0.5, feature_params=None):
     """
     Combines MSE and SSIM loss with proper handling of small dimensions.
     Falls back to MSE only when dimensions are too small for SSIM.
@@ -563,7 +587,15 @@ def hybrid_loss(y_true, y_pred, alpha=0.6, feature_params=None):
     squared_diff = tf.square(y_true - y_pred)
     # Apply emphasis on larger errors
     emphasized_diff = tf.where(squared_diff > 0.1, squared_diff * 1.2, squared_diff)
+
+    margin = 0.1
     mse = tf.reduce_mean(emphasized_diff)
+
+    # Incorporate margin-based loss to improve separation between normal/abnormal
+    if tf.rank(y_true) > 1:  # Only apply to batches
+        norm_diff = tf.norm(y_true - y_pred, axis=1)
+        margin_loss = tf.maximum(0.0, margin - norm_diff)
+        mse = mse + 0.2 * tf.reduce_mean(margin_loss)
     
     # For SSIM, we need to ensure dimensions make sense
     batch_size = tf.shape(y_true)[0]
@@ -993,12 +1025,14 @@ def main():
                 logger.warning(f"Not enough training data samples ({train_data.shape[0]}), disabling validation")
                 validation_split = 0
 
+            sample_weights = get_sample_weights(train_data, param)
             # Fit the model
             try:
                 logger.info(f"Starting training with {train_data.shape[0]} samples, validation_split={validation_split}")
                 history = model.fit(
                     train_data,
                     train_data,
+                    sample_weight=sample_weights,
                     epochs=param["fit"]["epochs"],
                     batch_size=param["fit"]["batch_size"],
                     shuffle=param["fit"]["shuffle"],
@@ -1069,6 +1103,59 @@ def main():
 
         # evaluation
         print("============== EVALUATION ==============")
+
+        # Add to baseline_v2.py in evaluation section
+
+        def select_optimal_threshold(y_true, y_pred):
+            """
+            Selects optimal threshold using a combination of metrics to balance
+            performance across different machine types and conditions.
+            """
+            precision, recall, thresholds = metrics.precision_recall_curve(y_true, y_pred)
+            
+            # Calculate F1 scores
+            f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
+            
+            # Calculate balance point between precision and recall
+            balance_idx = np.argmin(np.abs(precision - recall))
+            balance_threshold = thresholds[balance_idx] if balance_idx < len(thresholds) else thresholds[-1]
+            
+            # Calculate optimal F1 point
+            f1_idx = np.argmax(f1_scores)
+            f1_threshold = thresholds[f1_idx] if f1_idx < len(thresholds) else thresholds[-1]
+            
+            # Calculate specificity (true negative rate) at different thresholds
+            specificities = []
+            for threshold in thresholds:
+                y_pred_binary = (np.array(y_pred) >= threshold).astype(int)
+                tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred_binary).ravel()
+                specificities.append(tn / (tn + fp + 1e-10))
+            
+            # Find threshold with specificity at least 0.9
+            high_spec_indices = [i for i, s in enumerate(specificities) if s >= 0.9]
+            if high_spec_indices:
+                # Among high specificity thresholds, find one with best F1
+                high_spec_f1_scores = [f1_scores[i] for i in high_spec_indices]
+                best_high_spec_idx = high_spec_indices[np.argmax(high_spec_f1_scores)]
+                spec_threshold = thresholds[best_high_spec_idx]
+            else:
+                # Fallback if no threshold reaches 0.9 specificity
+                spec_threshold = thresholds[np.argmax(specificities)]
+            
+            # Combine thresholds using a weighted approach
+            # Give more weight to F1-optimal threshold for normal cases,
+            # but consider balance and specificity for edge cases
+            combined_threshold = 0.5 * f1_threshold + 0.3 * balance_threshold + 0.2 * spec_threshold
+            
+            # Return both combined and individual thresholds for logging
+            return {
+                "threshold": combined_threshold,
+                "f1_threshold": f1_threshold,
+                "balance_threshold": balance_threshold,
+                "specificity_threshold": spec_threshold
+            }
+
+
         y_pred = [0. for _ in eval_labels]
         y_true = eval_labels
 
@@ -1140,6 +1227,19 @@ def main():
             
             # Find optimal F1 score
             f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
+            precision_recall_balanced_idx = np.argmin(np.abs(precision - recall))
+            specificity_balanced_threshold = thresholds[precision_recall_balanced_idx]
+
+            threshold_info = select_optimal_threshold(y_true, y_pred)
+            best_threshold = threshold_info["threshold"]
+
+            # Log the threshold information
+            for key, value in threshold_info.items():
+                evaluation_result[key] = float(value)
+                
+            # Apply combined threshold to get binary predictions
+            y_pred_binary = (np.array(y_pred) >= best_threshold).astype(int)
+
             best_threshold_idx = np.argmax(f1_scores)
             evaluation_result["Best F1"] = float(f1_scores[best_threshold_idx])
             best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]

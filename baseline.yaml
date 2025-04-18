@@ -23,16 +23,22 @@ fit:
   epochs: 100
   batch_size: 512
   shuffle: True
-  validation_split: 0.2
+  validation_split: 0.15
   verbose: 1
   early_stopping: True
   learning_rate: 0.001
+  lr_first_decay_steps: 15
+  lr_t_mul: 2.0
+  lr_m_mul: 0.85
+  lr_min_factor: 0.1
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0005
   use_augmentation: true
   augmentation_factor: 3
   layer_size: 96
   bottleneck_size: 16
-  dropout_rate: 0.2
-  loss_alpha: 0.6
+  dropout_rate: 0.25
+  loss_alpha: 0.5
   depth: 2
   activation: "elu"
   weight_decay: 0.0001

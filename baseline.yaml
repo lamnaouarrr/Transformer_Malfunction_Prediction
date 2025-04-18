@@ -47,7 +47,7 @@ fit:
 
 # Directory paths
 base_directory: "./dataset"
-pickle_directory: "./pickle_fnn"
-model_directory: "./model_fnn"
-result_directory: "./result_fnn"
-result_file: "result_fnn.yaml"
+pickle_directory: "./pickle"
+model_directory: "./model"
+result_directory: "./result"
+result_file: "result.yaml"

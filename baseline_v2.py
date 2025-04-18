@@ -505,7 +505,7 @@ def keras_model(input_dim, **params):
     weight_decay = params.get("weight_decay", 1e-5)  # Added mild regularization
     
     # Weight regularizer based on weight_decay parameter
-    regularizer = l2(weight_decay) if weight_decay else None
+    regularizer = l2(float(weight_decay)) if weight_decay else None
     
     # Input layer
     inputLayer = Input(shape=(input_dim,))

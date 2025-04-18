@@ -35,7 +35,7 @@ fit:
   loss_alpha: 0.3  # Changed to prioritize SSIM more
   depth: 3  # Added depth parameter for the model
   activation: "elu"  # Added activation parameter
-  weight_decay: 1e-5  # Added weight decay for regularization
+  weight_decay: 0.00001  # Added weight decay for regularization
 
 # Directory paths
 base_directory: "./dataset"

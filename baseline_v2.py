@@ -413,27 +413,9 @@ def augment_data(data_array, augmentation_factor=2, params=None):
 
 def get_sample_weights(train_data, params):
     """
-    Generate sample weights to focus learning on challenging examples.
+    Generate equal sample weights initially.
     """
-    # Create a temporary model to evaluate reconstruction difficulty
-    input_dim = train_data.shape[1]
-    temp_model = keras_model(input_dim, **{
-        "layer_size": 64,
-        "bottleneck_size": 16,
-        "dropout_rate": 0.1
-    })
-    temp_model.compile(optimizer="adam", loss="mse")
-    
-    # Get initial predictions
-    preds = temp_model.predict(train_data, verbose=0, batch_size=512)
-    errors = np.mean(np.square(train_data - preds), axis=1)
-    
-    # Generate weights that focus on harder-to-reconstruct samples
-    # but avoid excessive focus on outliers
-    median_error = np.median(errors)
-    weights = np.clip(errors / (median_error + 1e-10), 0.5, 2.0)
-    
-    return weights
+    return np.ones(train_data.shape[0])
 
 
 def dataset_generator(target_dir,
@@ -941,8 +923,11 @@ def main():
             def get_loss_function():
                 feature_params = param["feature"]
                 alpha = param["fit"].get("loss_alpha", 0.7)
+                
+                @tf.function
                 def custom_hybrid_loss(y_true, y_pred):
                     return hybrid_loss(y_true, y_pred, alpha=alpha, feature_params=feature_params)
+                
                 return custom_hybrid_loss
 
             if compile_params.get("loss") == "hybrid_loss":
@@ -964,6 +949,17 @@ def main():
                 verbose=1
             ))
 
+            def get_learning_rate(epoch, initial_lr=0.001, warmup_epochs=5, decay_epochs=20):
+                """
+                Create a learning rate schedule with warmup and decay.
+                """
+                if epoch < warmup_epochs:
+                    return initial_lr * ((epoch + 1) / warmup_epochs)
+                else:
+                    # Cosine decay after warmup
+                    decay_progress = (epoch - warmup_epochs) / decay_epochs
+                    return initial_lr * (0.1 + 0.9 * (1 + np.cos(np.pi * decay_progress)) / 2)
+
             # Learning rate scheduler
             if param["fit"].get("use_lr_schedule", True):
                 lr_scheduler = tf.keras.callbacks.LearningRateScheduler(
@@ -983,15 +979,6 @@ def main():
                 )
                 logger.info(f"Data augmented: {train_data.shape[0]} samples")
 
-            # Early stopping
-            if param["fit"].get("early_stopping", True):
-                callbacks.append(tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=15,
-                    restore_best_weights=True,
-                    min_delta=0.001,
-                    verbose=1
-                ))
 
             # Model checkpoint - ensure directory exists
             model_dir = os.path.dirname(model_file)

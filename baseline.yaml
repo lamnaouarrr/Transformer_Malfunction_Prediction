@@ -9,36 +9,33 @@ dataset:
 # Feature extraction parameters
 feature:
   n_mels: 64
-  frames: 5
+  frames: 5  # Keep at 5 to match previous model for comparison
   n_fft: 1024
   hop_length: 512
   power: 2.0
-  use_patches: true
-  patch_size: 16
-  stride: 8
+  use_patches: false  # Change to false - patches are causing worse reconstruction
 
 # Fit algorithm parameters
 fit:
   compile:
     optimizer: "adam"
     loss: "hybrid_loss"
-  epochs: 100
-  batch_size: 512
+  epochs: 150  # Increase from 100 to 150 for better convergence
+  batch_size: 256  # Reduced from 512 to 256 for better gradient updates
   shuffle: True
-  validation_split: 0.1
+  validation_split: 0.15  # Increased slightly
   verbose: 1
   early_stopping: True
   learning_rate: 0.001
   use_augmentation: true
-  augmentation_factor: 2
-  layer_size: 64
-  bottleneck_size: 8
-  dropout_rate: 0.2
-  loss_alpha: 0.7
-  lr_first_decay_steps: 20
-  lr_t_mul: 2.0
-  lr_m_mul: 0.9
-  lr_min_factor: 0.1
+  augmentation_factor: 3  # Increased from 2 to 3 for more data diversity
+  layer_size: 128  # Increased from 64 to 128
+  bottleneck_size: 32  # Increased from 8 to 32
+  dropout_rate: 0.15  # Slightly reduced
+  loss_alpha: 0.3  # Changed to prioritize SSIM more
+  depth: 3  # Added depth parameter for the model
+  activation: "elu"  # Added activation parameter
+  weight_decay: 1e-5  # Added weight decay for regularization
 
 # Directory paths
 base_directory: "./dataset"

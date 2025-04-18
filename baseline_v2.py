@@ -358,19 +358,9 @@ def list_to_vector_array(file_list,
     return dataset[:total_size, :]
 
 
-def augment_data(data_array, augmentation_factor=2, params=None):
+def augment_data(data_array, augmentation_factor=3, params=None):
     """
     Enhanced data augmentation with more techniques.
-    
-    data_array : numpy.array
-        Input feature vectors
-    augmentation_factor : int
-        How many augmented samples to create per original
-    params : dict
-        Configuration parameters
-        
-    return : numpy.array
-        Augmented dataset
     """
     original_size = data_array.shape[0]
     feature_dim = data_array.shape[1]
@@ -379,6 +369,14 @@ def augment_data(data_array, augmentation_factor=2, params=None):
     # Copy original data
     augmented_data[:original_size] = data_array
     
+    if params and "n_mels" in params["feature"] and "frames" in params["feature"]:
+        n_mels = params["feature"]["n_mels"]
+        frames = params["feature"]["frames"]
+    else:
+        # Fallback to default values if no params provided
+        n_mels = 64
+        frames = 5
+    
     for i in range(augmentation_factor):
         offset = (i + 1) * original_size
         
@@ -386,44 +384,40 @@ def augment_data(data_array, augmentation_factor=2, params=None):
         augmented_data[offset:offset + original_size] = data_array.copy()
         
         # Apply different augmentation techniques for each copy
-        if i % 3 == 0:
+        if i % 4 == 0:
             # Add random noise
-            noise_level = np.random.uniform(0.001, 0.02)
+            noise_level = np.random.uniform(0.001, 0.015)  # Reduced max noise
             augmented_data[offset:offset + original_size] += np.random.normal(
                 0, noise_level, size=augmented_data[offset:offset + original_size].shape
             )
-        elif i % 3 == 1:
+        elif i % 4 == 1:
             # Add frequency masking (zero out random frequency bands)
-            if params and "n_mels" in params["feature"] and "frames" in params["feature"]:
-                n_mels = params["feature"]["n_mels"]
-                frames = params["feature"]["frames"]
-                
-                # Reshape to apply frequency masking
+            if n_mels >= 8:  # Only if enough mels
                 for j in range(original_size):
                     sample = augmented_data[offset + j].reshape(frames, n_mels)
                     
                     # Frequency mask
-                    mask_size = np.random.randint(1, n_mels // 4)
+                    mask_size = np.random.randint(1, max(2, n_mels // 6))  # Smaller mask
                     mask_start = np.random.randint(0, n_mels - mask_size)
-                    sample[:, mask_start:mask_start + mask_size] = 0
+                    sample[:, mask_start:mask_start + mask_size] = np.mean(sample)  # Use mean instead of 0
                     
                     augmented_data[offset + j] = sample.flatten()
-        else:
+        elif i % 4 == 2:
             # Add time masking or slight shifts
-            if params and "n_mels" in params["feature"] and "frames" in params["feature"]:
-                n_mels = params["feature"]["n_mels"]
-                frames = params["feature"]["frames"]
-                
-                # Reshape to apply time masking
+            if frames >= 3:  # Only if enough frames
                 for j in range(original_size):
                     sample = augmented_data[offset + j].reshape(frames, n_mels)
                     
                     # Time mask
-                    mask_size = np.random.randint(1, frames // 4)
+                    mask_size = np.random.randint(1, max(2, frames // 6))  # Smaller mask
                     mask_start = np.random.randint(0, frames - mask_size)
-                    sample[mask_start:mask_start + mask_size, :] = 0
+                    sample[mask_start:mask_start + mask_size, :] = np.mean(sample)  # Use mean instead of 0
                     
                     augmented_data[offset + j] = sample.flatten()
+        else:
+            # Add mild amplitude scaling
+            scale_factor = np.random.uniform(0.9, 1.1)  # Scale between 90% and 110%
+            augmented_data[offset:offset + original_size] *= scale_factor
     
     return augmented_data
 
@@ -502,13 +496,13 @@ def keras_model(input_dim, **params):
     Enhanced model with configurable parameters.
     """
     # Default values that can be overridden by params
-    layer_size = params.get("layer_size", 64)
-    bottleneck_size = params.get("bottleneck_size", 8)
-    dropout_rate = params.get("dropout_rate", 0.2)
-    activation = params.get("activation", "relu")
+    layer_size = params.get("layer_size", 128)  # Increased from 64 to 128
+    bottleneck_size = params.get("bottleneck_size", 32)  # Increased from 8 to 32
+    dropout_rate = params.get("dropout_rate", 0.15)  # Decreased from 0.2 to 0.15
+    activation = params.get("activation", "elu")  # Changed from relu to elu
     use_residual = params.get("use_residual", True)
-    depth = params.get("depth", 2)  # Number of encoding layers
-    weight_decay = params.get("weight_decay", None)
+    depth = params.get("depth", 3)  # Increased from 2 to 3 for better representation
+    weight_decay = params.get("weight_decay", 1e-5)  # Added mild regularization
     
     # Weight regularizer based on weight_decay parameter
     regularizer = l2(weight_decay) if weight_decay else None
@@ -527,6 +521,16 @@ def keras_model(input_dim, **params):
         h = BatchNormalization()(h)
         h = Activation(activation)(h)
         h = Dropout(dropout_rate)(h)
+        
+        # Add an additional layer with half the size for better feature extraction
+        if i == 0:  # Add this only in the first encoding block
+            h_refine = Dense(layer_size // 2, kernel_regularizer=regularizer)(h)
+            h_refine = BatchNormalization()(h_refine)
+            h_refine = Activation(activation)(h_refine)
+            h_refine = Dense(layer_size, kernel_regularizer=regularizer)(h_refine)
+            h_refine = BatchNormalization()(h_refine)
+            h_refine = Activation(activation)(h_refine)
+            h = Add()([h, h_refine])  # Residual refining block
     
     # Bottleneck
     h = Dense(bottleneck_size, kernel_regularizer=regularizer)(h)
@@ -545,12 +549,12 @@ def keras_model(input_dim, **params):
             h = Add()([h, skip_connections[-(i+1)]])  # Connect to corresponding encoder layer
     
     # Output
-    output = Dense(input_dim, activation=None)(h)
+    output = Dense(input_dim, activation="linear")(h)  # Changed from None to linear
 
     return Model(inputs=inputLayer, outputs=output)
 
 
-def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
+def hybrid_loss(y_true, y_pred, alpha=0.3, feature_params=None):
     """
     Combines MSE and SSIM loss with proper handling of small dimensions.
     Falls back to MSE only when dimensions are too small for SSIM.
@@ -870,136 +874,6 @@ def main():
                 "weight_decay": param["fit"].get("weight_decay", None)
             }
 
-###############################################################################
-#debug
-        def diagnose_directories():
-            """
-            Check directory structure and file existence to diagnose setup issues.
-            """
-            # Check main directories
-            directories = [
-                param["base_directory"],
-                param["pickle_directory"],
-                param["model_directory"],
-                param["result_directory"]
-            ]
-            
-            for directory in directories:
-                if os.path.exists(directory):
-                    logger.info(f"Directory exists: {directory}")
-                    # List a few files in each directory
-                    try:
-                        files = os.listdir(directory)[:5]  # Show first 5 files only
-                        logger.info(f"Files in {directory}: {files}")
-                    except Exception as e:
-                        logger.error(f"Error listing files in {directory}: {e}")
-                else:
-                    logger.error(f"Directory missing: {directory}")
-            
-            # Check for specific files
-            logger.info("Checking for configuration file...")
-            if os.path.exists("baseline.yaml"):
-                logger.info("baseline.yaml found")
-            else:
-                logger.error("baseline.yaml not found")
-            
-            # Print environment info
-            import platform
-            logger.info(f"Python version: {platform.python_version()}")
-            logger.info(f"TensorFlow version: {tf.__version__}")
-            logger.info(f"NumPy version: {np.__version__}")
-            logger.info(f"Librosa version: {librosa.__version__}")
-            
-            # Check GPU availability
-            gpus = tf.config.experimental.list_physical_devices('GPU')
-            if gpus:
-                logger.info(f"GPUs available: {len(gpus)}")
-                for gpu in gpus:
-                    logger.info(f"  {gpu}")
-            else:
-                logger.info("No GPUs available, using CPU")
-            
-            return True
-
-
-        def debug_data_load(train_files, eval_files):
-            """
-            Debug data loading by checking a few sample files.
-            """
-            logger.info("Debugging data loading...")
-            
-            # Check a few training files
-            for i, file in enumerate(train_files[:3]):
-                logger.info(f"Training file {i}: {file}")
-                try:
-                    sr, y = demux_wav(file)
-                    if y is None:
-                        logger.warning(f"  Failed to load file: {file}")
-                    else:
-                        logger.info(f"  Successfully loaded file: {file}")
-                        logger.info(f"  Sample rate: {sr}, Duration: {len(y)/sr:.2f}s, Shape: {y.shape}")
-                except Exception as e:
-                    logger.error(f"  Error loading file {file}: {e}")
-            
-            # Check a few evaluation files
-            for i, file in enumerate(eval_files[:3]):
-                logger.info(f"Evaluation file {i}: {file}")
-                try:
-                    sr, y = demux_wav(file)
-                    if y is None:
-                        logger.warning(f"  Failed to load file: {file}")
-                    else:
-                        logger.info(f"  Successfully loaded file: {file}")
-                        logger.info(f"  Sample rate: {sr}, Duration: {len(y)/sr:.2f}s, Shape: {y.shape}")
-                except Exception as e:
-                    logger.error(f"  Error loading file {file}: {e}")
-            
-            return True
-
-
-        def debug_feature_extraction(file_path, params):
-            """
-            Debug feature extraction for a single file.
-            """
-            logger.info(f"Debugging feature extraction for file: {file_path}")
-            
-            try:
-                # Load audio
-                sr, y = demux_wav(file_path)
-                if y is None:
-                    logger.error("Failed to load audio")
-                    return False
-                    
-                logger.info(f"Audio loaded: sr={sr}, length={len(y)}, duration={len(y)/sr:.2f}s")
-                
-                # Extract features
-                vector_array = file_to_vector_array(
-                    file_path,
-                    n_mels=params["feature"]["n_mels"],
-                    frames=params["feature"]["frames"],
-                    n_fft=params["feature"]["n_fft"],
-                    hop_length=params["feature"]["hop_length"],
-                    power=params["feature"]["power"],
-                    params=params
-                )
-                
-                logger.info(f"Feature extraction result: shape={vector_array.shape}")
-                
-                if vector_array.shape[0] == 0:
-                    logger.error("Feature extraction returned empty array")
-                    return False
-                    
-                # Additional info
-                logger.info(f"Feature stats: min={vector_array.min():.4f}, max={vector_array.max():.4f}, mean={vector_array.mean():.4f}")
-                
-                return True
-            except Exception as e:
-                logger.error(f"Error in feature extraction: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                return False
-###############################################################################
-
         # model training
         print("============== MODEL TRAINING ==============")
         # Create model with proper parameters - only create it once
@@ -1128,6 +1002,53 @@ def main():
                     verbose=param["fit"]["verbose"],
                     callbacks=callbacks
                 )
+
+                class DynamicThresholdCallback(tf.keras.callbacks.Callback):
+                    def __init__(self, validation_data, validation_labels, interval=5):
+                        super(DynamicThresholdCallback, self).__init__()
+                        self.validation_data = validation_data
+                        self.validation_labels = validation_labels
+                        self.interval = interval
+                        self.best_threshold = 0.0
+                        self.best_f1 = 0.0
+                        
+                    def on_epoch_end(self, epoch, logs=None):
+                        if (epoch + 1) % self.interval == 0:
+                            # Get reconstruction errors
+                            preds = self.model.predict(self.validation_data)
+                            errors = np.mean(np.square(self.validation_data - preds), axis=1)
+                            
+                            # Calculate precision-recall curve
+                            precision, recall, thresholds = metrics.precision_recall_curve(
+                                self.validation_labels, errors)
+                            
+                            # Find best F1 score
+                            f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
+                            best_idx = np.argmax(f1_scores)
+                            
+                            if best_idx < len(thresholds):
+                                current_threshold = thresholds[best_idx]
+                                current_f1 = f1_scores[best_idx]
+                                
+                                if current_f1 > self.best_f1:
+                                    self.best_f1 = current_f1
+                                    self.best_threshold = current_threshold
+                                    
+                                logger.info(f"Epoch {epoch+1}: Best threshold = {self.best_threshold:.4f}, F1 = {self.best_f1:.4f}")
+
+
+                if validation_split > 0:
+                    split_idx = int(train_data.shape[0] * (1 - validation_split))
+                    val_data = train_data[split_idx:]
+                    # Create dummy labels for validation (all normal)
+                    val_labels = np.zeros(val_data.shape[0])  
+                    
+                    dynamic_threshold_callback = DynamicThresholdCallback(
+                        validation_data=val_data,
+                        validation_labels=val_labels,
+                        interval=5
+                    )
+                    callbacks.append(dynamic_threshold_callback)
 
                 # Always save the visualization
                 visualizer.loss_plot(history.history["loss"], history.history["val_loss"])

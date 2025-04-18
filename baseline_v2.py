@@ -358,7 +358,7 @@ def list_to_vector_array(file_list,
     return dataset[:total_size, :]
 
 
-def augment_data(data_array, augmentation_factor=3, params=None):
+def augment_data(data_array, augmentation_factor=2, params=None):
     """
     Enhanced data augmentation with more techniques.
     """
@@ -386,7 +386,7 @@ def augment_data(data_array, augmentation_factor=3, params=None):
         # Apply different augmentation techniques for each copy
         if i % 4 == 0:
             # Add random noise
-            noise_level = np.random.uniform(0.001, 0.015)  # Reduced max noise
+            noise_level = np.random.uniform(0.0005, 0.01)  # Reduced noise range
             augmented_data[offset:offset + original_size] += np.random.normal(
                 0, noise_level, size=augmented_data[offset:offset + original_size].shape
             )
@@ -397,7 +397,7 @@ def augment_data(data_array, augmentation_factor=3, params=None):
                     sample = augmented_data[offset + j].reshape(frames, n_mels)
                     
                     # Frequency mask
-                    mask_size = np.random.randint(1, max(2, n_mels // 6))  # Smaller mask
+                    mask_size = np.random.randint(1, max(2, n_mels // 8))  # Smaller mask
                     mask_start = np.random.randint(0, n_mels - mask_size)
                     sample[:, mask_start:mask_start + mask_size] = np.mean(sample)  # Use mean instead of 0
                     
@@ -416,7 +416,7 @@ def augment_data(data_array, augmentation_factor=3, params=None):
                     augmented_data[offset + j] = sample.flatten()
         else:
             # Add mild amplitude scaling
-            scale_factor = np.random.uniform(0.9, 1.1)  # Scale between 90% and 110%
+            scale_factor = np.random.uniform(0.95, 1.05)  # Scale between 90% and 110%
             augmented_data[offset:offset + original_size] *= scale_factor
     
     return augmented_data
@@ -554,13 +554,16 @@ def keras_model(input_dim, **params):
     return Model(inputs=inputLayer, outputs=output)
 
 
-def hybrid_loss(y_true, y_pred, alpha=0.3, feature_params=None):
+def hybrid_loss(y_true, y_pred, alpha=0.6, feature_params=None):
     """
     Combines MSE and SSIM loss with proper handling of small dimensions.
     Falls back to MSE only when dimensions are too small for SSIM.
     """
-    # MSE component
-    mse = tf.reduce_mean(tf.square(y_true - y_pred))
+    # MSE component with emphasis on larger errors (reduces false positives)
+    squared_diff = tf.square(y_true - y_pred)
+    # Apply emphasis on larger errors
+    emphasized_diff = tf.where(squared_diff > 0.1, squared_diff * 1.2, squared_diff)
+    mse = tf.reduce_mean(emphasized_diff)
     
     # For SSIM, we need to ensure dimensions make sense
     batch_size = tf.shape(y_true)[0]
@@ -945,8 +948,9 @@ def main():
             if param["fit"].get("early_stopping", True):
                 callbacks.append(tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss',
-                    patience=10,
+                    patience=15,
                     restore_best_weights=True,
+                    min_delta=0.001,
                     verbose=1
                 ))
 

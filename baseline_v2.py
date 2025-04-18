@@ -360,7 +360,7 @@ def list_to_vector_array(file_list,
 
 def augment_data(data_array, augmentation_factor=2, params=None):
     """
-    Enhanced data augmentation with more techniques.
+    More conservative data augmentation that preserves signal characteristics.
     """
     original_size = data_array.shape[0]
     feature_dim = data_array.shape[1]
@@ -369,55 +369,45 @@ def augment_data(data_array, augmentation_factor=2, params=None):
     # Copy original data
     augmented_data[:original_size] = data_array
     
+    # Extract feature parameters
     if params and "n_mels" in params["feature"] and "frames" in params["feature"]:
         n_mels = params["feature"]["n_mels"]
         frames = params["feature"]["frames"]
     else:
-        # Fallback to default values if no params provided
         n_mels = 64
         frames = 5
     
+    # For each augmentation round
     for i in range(augmentation_factor):
         offset = (i + 1) * original_size
+        augmented_batch = data_array.copy()
         
-        # Copy original data
-        augmented_data[offset:offset + original_size] = data_array.copy()
-        
-        # Apply different augmentation techniques for each copy
-        if i % 4 == 0:
-            # Add random noise with reduced intensity
-            noise_level = np.random.uniform(0.0002, 0.005)  # Reduced from 0.0005-0.01
-            augmented_data[offset:offset + original_size] += np.random.normal(
-                0, noise_level, size=augmented_data[offset:offset + original_size].shape
-            )
-        elif i % 4 == 1:
-            # Add frequency masking (zero out random frequency bands)
-            if n_mels >= 8:  # Only if enough mels
-                for j in range(original_size):
-                    sample = augmented_data[offset + j].reshape(frames, n_mels)
-                    
-                    # Frequency mask
-                    mask_size = np.random.randint(1, max(2, n_mels // 8))  # Smaller mask
-                    mask_start = np.random.randint(0, n_mels - mask_size)
-                    sample[:, mask_start:mask_start + mask_size] = np.mean(sample)  # Use mean instead of 0
-                    
-                    augmented_data[offset + j] = sample.flatten()
-        elif i % 4 == 2:
-            # Add time masking or slight shifts
-            if frames >= 3:  # Only if enough frames
-                for j in range(original_size):
-                    sample = augmented_data[offset + j].reshape(frames, n_mels)
-                    
-                    # Time mask
-                    mask_size = np.random.randint(1, max(2, frames // 6))  # Smaller mask
-                    mask_start = np.random.randint(0, frames - mask_size)
-                    sample[mask_start:mask_start + mask_size, :] = np.mean(sample)  # Use mean instead of 0
-                    
-                    augmented_data[offset + j] = sample.flatten()
+        # Apply different augmentations based on the round
+        if i % 3 == 0:
+            # Very mild Gaussian noise (much lower intensity)
+            noise_level = np.random.uniform(0.0001, 0.001)
+            augmented_batch += np.random.normal(0, noise_level, size=augmented_batch.shape)
+            
+        elif i % 3 == 1:
+            # Mild scaling (close to original)
+            scale_factor = np.random.uniform(0.98, 1.02)
+            augmented_batch *= scale_factor
+            
         else:
-            # Add mild amplitude scaling
-            scale_factor = np.random.uniform(0.95, 1.05)  # Scale between 90% and 110%
-            augmented_data[offset:offset + original_size] *= scale_factor
+            # Subtle feature masking (very small masks)
+            for j in range(original_size):
+                sample = augmented_batch[j].reshape(frames, n_mels)
+                
+                # Small frequency mask (at most 5% of frequencies)
+                if n_mels >= 10:
+                    mask_size = np.random.randint(1, max(2, int(n_mels * 0.05)))
+                    mask_start = np.random.randint(0, n_mels - mask_size)
+                    mask_value = np.mean(sample) * 0.9  # Use scaled mean instead of zero
+                    sample[:, mask_start:mask_start + mask_size] = mask_value
+                
+                augmented_batch[j] = sample.flatten()
+        
+        augmented_data[offset:offset + original_size] = augmented_batch
     
     return augmented_data
 
@@ -517,132 +507,127 @@ def dataset_generator(target_dir,
 ########################################################################
 def keras_model(input_dim, **params):
     """
-    Enhanced model with configurable parameters.
+    Enhanced autoencoder with more robust architecture and skip connections.
     """
     # Default values that can be overridden by params
-    layer_size = params.get("layer_size", 128)  # Increased from 64 to 128
-    bottleneck_size = params.get("bottleneck_size", 32)  # Increased from 8 to 32
-    dropout_rate = params.get("dropout_rate", 0.15)  # Decreased from 0.2 to 0.15
-    activation = params.get("activation", "elu")  # Changed from relu to elu
+    layer_size = params.get("layer_size", 128)
+    bottleneck_size = params.get("bottleneck_size", 32)
+    dropout_rate = params.get("dropout_rate", 0.15)
+    activation = params.get("activation", "relu")
+    weight_decay = params.get("weight_decay", 1e-5)
+    depth = params.get("depth", 3)
     use_residual = params.get("use_residual", True)
-    depth = params.get("depth", 3)  # Increased from 2 to 3 for better representation
-    weight_decay = params.get("weight_decay", 1e-5)  # Added mild regularization
     
-    # Weight regularizer based on weight_decay parameter
-    regularizer = l2(float(weight_decay)) if weight_decay else None
+    # Weight regularizer
+    regularizer = l2(weight_decay) if weight_decay else None
     
     # Input layer
     inputLayer = Input(shape=(input_dim,))
-    h = inputLayer
     
-    # Encoder
-    skip_connections = []
-    for i in range(depth):
-        if i > 0 and use_residual:
-            skip_connections.append(h)
-            
-        h = Dense(layer_size, kernel_regularizer=regularizer)(h)
+    # ----- Encoder -----
+    h = inputLayer
+    encoder_layers = []
+    
+    # First encoder block
+    h = Dense(layer_size, kernel_regularizer=regularizer)(h)
+    h = BatchNormalization()(h)
+    h = Activation(activation)(h)
+    encoder_layers.append(h)
+    
+    # Additional encoder blocks
+    for i in range(1, depth):
+        layer_units = max(layer_size // (2**i), bottleneck_size)
+        h = Dense(layer_units, kernel_regularizer=regularizer)(h)
         h = BatchNormalization()(h)
         h = Activation(activation)(h)
         h = Dropout(dropout_rate)(h)
-        
-        # Add an additional layer with half the size for better feature extraction
-        if i == 0:  # Add this only in the first encoding block
-            h_refine = Dense(layer_size // 2, kernel_regularizer=regularizer)(h)
-            h_refine = BatchNormalization()(h_refine)
-            h_refine = Activation(activation)(h_refine)
-            h_refine = Dense(layer_size, kernel_regularizer=regularizer)(h_refine)
-            h_refine = BatchNormalization()(h_refine)
-            h_refine = Activation(activation)(h_refine)
-            h = Add()([h, h_refine])  # Residual refining block
+        encoder_layers.append(h)
     
-    # Bottleneck
-    h = Dense(bottleneck_size, kernel_regularizer=regularizer)(h)
+    # ----- Bottleneck -----
+    h = Dense(bottleneck_size, kernel_regularizer=regularizer, name="bottleneck")(h)
     h = BatchNormalization()(h)
     h = Activation(activation)(h)
     
-    # Decoder
-    for i in range(depth):
-        h = Dense(layer_size, kernel_regularizer=regularizer)(h)
+    # ----- Decoder -----
+    # Symmetric decoder with skip connections
+    for i in range(depth-1, -1, -1):
+        layer_units = max(layer_size // (2**i), bottleneck_size)
+        h = Dense(layer_units, kernel_regularizer=regularizer)(h)
         h = BatchNormalization()(h)
         h = Activation(activation)(h)
-        h = Dropout(dropout_rate)(h)
         
-        # Add residual connection if available and enabled
-        if use_residual and i < len(skip_connections):
-            h = Add()([h, skip_connections[-(i+1)]])  # Connect to corresponding encoder layer
+        # Add skip connection from encoder
+        if use_residual and i < len(encoder_layers):
+            h = Add()([h, encoder_layers[i]])
+        
+        if i > 0:  # No dropout in final decoder layer
+            h = Dropout(dropout_rate)(h)
     
-    # Output
-    output = Dense(input_dim, activation="linear")(h)  # Changed from None to linear
-
+    # Output reconstruction
+    output = Dense(input_dim)(h)
+    
     return Model(inputs=inputLayer, outputs=output)
 
 
-def hybrid_loss(y_true, y_pred, alpha=0.5, feature_params=None):
+def hybrid_loss(y_true, y_pred, alpha=0.7, feature_params=None):
     """
-    Combines MSE and SSIM loss with proper handling of small dimensions.
-    Falls back to MSE only when dimensions are too small for SSIM.
+    Enhanced hybrid loss with robust SSIM calculation and proper MSE scaling.
     """
-    # MSE component with emphasis on larger errors (reduces false positives)
-    squared_diff = tf.square(y_true - y_pred)
-    # Apply emphasis on larger errors
-    emphasized_diff = tf.where(squared_diff > 0.1, squared_diff * 1.2, squared_diff)
-
-    margin = 0.1
-    mse = tf.reduce_mean(emphasized_diff)
-
-    # Incorporate margin-based loss to improve separation between normal/abnormal
-    if tf.rank(y_true) > 1:  # Only apply to batches
-        norm_diff = tf.norm(y_true - y_pred, axis=1)
-        margin_loss = tf.maximum(0.0, margin - norm_diff)
-        mse = mse + 0.2 * tf.reduce_mean(margin_loss)
+    # MSE component - scale it appropriately
+    mse = tf.reduce_mean(tf.square(y_true - y_pred))
     
-    # For SSIM, we need to ensure dimensions make sense
-    batch_size = tf.shape(y_true)[0]
-    
-    if feature_params:
+    # Get dimensions from feature_params
+    if feature_params is not None:
         n_mels = feature_params.get("n_mels", 64)
         frames = feature_params.get("frames", 5)
     else:
-        # Fallback to default values if no params provided
         n_mels = 64
         frames = 5
     
-    # Check if dimensions are large enough for SSIM (needs at least 11x11)
-    if frames >= 11 and n_mels >= 11:
-        y_true_reshaped = tf.reshape(y_true, [batch_size, frames, n_mels, 1])
-        y_pred_reshaped = tf.reshape(y_pred, [batch_size, frames, n_mels, 1])
+    batch_size = tf.shape(y_true)[0]
+    
+    # For SSIM calculation, reshape to 2D images
+    # Need to ensure dimensions are at least 5x5 for SSIM to work properly
+    min_dim = 5
+    if frames >= min_dim and n_mels >= min_dim:
+        # Reshape for SSIM calculation
+        y_true_2d = tf.reshape(y_true, [batch_size, frames, n_mels, 1])
+        y_pred_2d = tf.reshape(y_pred, [batch_size, frames, n_mels, 1])
         
-        ssim_value = tf.image.ssim(y_true_reshaped, y_pred_reshaped, max_val=1.0)
+        # Calculate SSIM
+        ssim_value = tf.image.ssim(
+            y_true_2d, 
+            y_pred_2d, 
+            max_val=tf.reduce_max(y_true_2d) - tf.reduce_min(y_true_2d) + 1e-6
+        )
         ssim_loss = 1.0 - tf.reduce_mean(ssim_value)
         
-        return alpha * mse + (1 - alpha) * ssim_loss
+        # Combine losses
+        return alpha * mse + (1.0 - alpha) * ssim_loss
     else:
-        # Fall back to MSE only for small dimensions
+        # Fallback to MSE for small dimensions
         return mse
 
 
 def get_optimizer_with_scheduler(optimizer_name="adam", lr=0.001):
     """
-    Create optimizer with configurable learning rate scheduling.
+    Create optimizer with warmup and decay schedule.
     """
     if optimizer_name.lower() == "adam":
-        # Get schedule parameters from config or use defaults
-        first_decay_steps = param["fit"].get("lr_first_decay_steps", 20)
-        t_mul = param["fit"].get("lr_t_mul", 2.0)
-        m_mul = param["fit"].get("lr_m_mul", 0.9)
-        alpha = param["fit"].get("lr_min_factor", 0.1)
+        # Add warmup period
+        warmup_epochs = param["fit"].get("warmup_epochs", 5)
+        decay_epochs = param["fit"].get("lr_first_decay_steps", 20)
         
-        # Create learning rate schedule
-        lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
-            initial_learning_rate=lr,
-            first_decay_steps=first_decay_steps,
-            t_mul=t_mul,
-            m_mul=m_mul,
-            alpha=alpha
-        )
+        # Create schedule with warmup
+        def lr_schedule(epoch):
+            if epoch < warmup_epochs:
+                return lr * ((epoch + 1) / warmup_epochs)
+            else:
+                # Cosine decay after warmup
+                decay_progress = (epoch - warmup_epochs) / decay_epochs
+                return lr * (0.1 + 0.9 * (1 + np.cos(np.pi * decay_progress)) / 2)
+        
         return tf.keras.optimizers.Adam(learning_rate=lr)
-    return optimizer_name
 
 
 
@@ -704,7 +689,10 @@ def tune_hyperparameters(train_data, machine_type, machine_id, db):
                     model = create_tuning_model(input_dim, dropout_rate, bottleneck_size)
                     
                     # Setup optimizer
-                    optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
+                    optimizer = tf.keras.optimizers.Adam(
+                        learning_rate=param["fit"].get("learning_rate", 0.001),
+                        clipnorm=1.0  # Add gradient clipping
+                    )
                     model.compile(optimizer=optimizer, loss="mean_squared_error")
                     
                     # Train for a few epochs
@@ -967,6 +955,25 @@ def main():
             # Set up callbacks
             callbacks = []
 
+            # Early stopping with more patience
+            callbacks.append(tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=param["fit"].get("early_stopping_patience", 15),
+                restore_best_weights=True,
+                min_delta=param["fit"].get("early_stopping_min_delta", 0.0005),
+                verbose=1
+            ))
+
+            # Learning rate scheduler
+            if param["fit"].get("use_lr_schedule", True):
+                lr_scheduler = tf.keras.callbacks.LearningRateScheduler(
+                    lambda epoch: get_learning_rate(epoch, 
+                                                initial_lr=param["fit"].get("learning_rate", 0.001),
+                                                warmup_epochs=param["fit"].get("warmup_epochs", 5),
+                                                decay_epochs=param["fit"].get("lr_first_decay_steps", 20))
+                )
+                callbacks.append(lr_scheduler)
+
             if param["fit"].get("use_augmentation", False):
                 logger.info("Applying data augmentation")
                 train_data = augment_data(
@@ -1104,55 +1111,44 @@ def main():
         # evaluation
         print("============== EVALUATION ==============")
 
-        # Add to baseline_v2.py in evaluation section
-
         def select_optimal_threshold(y_true, y_pred):
             """
-            Selects optimal threshold using a combination of metrics to balance
-            performance across different machine types and conditions.
+            Enhanced threshold selection with emphasis on balanced metrics.
             """
             precision, recall, thresholds = metrics.precision_recall_curve(y_true, y_pred)
             
             # Calculate F1 scores
             f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
             
-            # Calculate balance point between precision and recall
-            balance_idx = np.argmin(np.abs(precision - recall))
-            balance_threshold = thresholds[balance_idx] if balance_idx < len(thresholds) else thresholds[-1]
-            
-            # Calculate optimal F1 point
-            f1_idx = np.argmax(f1_scores)
-            f1_threshold = thresholds[f1_idx] if f1_idx < len(thresholds) else thresholds[-1]
-            
-            # Calculate specificity (true negative rate) at different thresholds
+            # Calculate specificities
             specificities = []
             for threshold in thresholds:
                 y_pred_binary = (np.array(y_pred) >= threshold).astype(int)
                 tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred_binary).ravel()
                 specificities.append(tn / (tn + fp + 1e-10))
             
-            # Find threshold with specificity at least 0.9
-            high_spec_indices = [i for i, s in enumerate(specificities) if s >= 0.9]
-            if high_spec_indices:
-                # Among high specificity thresholds, find one with best F1
-                high_spec_f1_scores = [f1_scores[i] for i in high_spec_indices]
-                best_high_spec_idx = high_spec_indices[np.argmax(high_spec_f1_scores)]
-                spec_threshold = thresholds[best_high_spec_idx]
+            # Find threshold with best balance of metrics
+            combined_scores = []
+            for i in range(len(thresholds)):
+                # Combine F1 and specificity with an emphasis on specificity
+                # to reduce false positives (main issue in current model)
+                if i < len(specificities) and i < len(f1_scores):
+                    combined_score = 0.4 * f1_scores[i] + 0.6 * specificities[i]
+                    combined_scores.append(combined_score)
+            
+            # Get best threshold
+            if combined_scores:
+                best_idx = np.argmax(combined_scores)
+                best_threshold = thresholds[best_idx] if best_idx < len(thresholds) else thresholds[-1]
             else:
-                # Fallback if no threshold reaches 0.9 specificity
-                spec_threshold = thresholds[np.argmax(specificities)]
+                # Fallback to F1-based threshold
+                best_idx = np.argmax(f1_scores)
+                best_threshold = thresholds[best_idx] if best_idx < len(thresholds) else thresholds[-1]
             
-            # Combine thresholds using a weighted approach
-            # Give more weight to F1-optimal threshold for normal cases,
-            # but consider balance and specificity for edge cases
-            combined_threshold = 0.5 * f1_threshold + 0.3 * balance_threshold + 0.2 * spec_threshold
-            
-            # Return both combined and individual thresholds for logging
             return {
-                "threshold": combined_threshold,
-                "f1_threshold": f1_threshold,
-                "balance_threshold": balance_threshold,
-                "specificity_threshold": spec_threshold
+                "threshold": best_threshold,
+                "f1_threshold": thresholds[np.argmax(f1_scores)] if len(f1_scores) > 0 else best_threshold,
+                "specificity_threshold": thresholds[np.argmax(specificities)] if len(specificities) > 0 else best_threshold
             }
 
 

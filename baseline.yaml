@@ -23,7 +23,7 @@ filter:
   enabled: true
   db_level: "0dB"
   machine_type: "fan"
-  machine_id: null  # set to specific ID or null for all
+  machine_id: null  # null means all IDs
 
 # Model architecture parameters
 model:
@@ -36,8 +36,8 @@ model:
     batch_norm: true
     residual: true
   loss: "hybrid"
-  hybrid_loss_alpha: 0.6  # Slightly prioritize anomaly detection
-  margin: 1.0  # For margin term in hybrid loss
+  hybrid_loss_alpha: 0.6
+  margin: 1.0
 
 # Directory paths
 base_directory: "./dataset"

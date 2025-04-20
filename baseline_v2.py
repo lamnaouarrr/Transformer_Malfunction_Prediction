@@ -480,10 +480,16 @@ def main():
                     restore_best_weights=True
                 ))
 
-            data_variance = np.var(train_data, axis=1)
-            if np.mean(data_variance) > some_threshold:  # Define threshold based on your data
-                # Apply higher weights to data with higher variance
-                sample_weights = 1.0 + 0.5 * (data_variance / np.max(data_variance))
+            
+            sample_weights = np.ones(len(train_data))
+
+            if param.get("fit", {}).get("apply_sample_weights", False):
+                # Apply weights based on configuration rather than hard-coded IDs
+                weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
+                weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
+                
+                if machine_id in weighted_machine_ids:
+                    sample_weights *= weight_factor
 
             history = model.fit(
                 train_data,
@@ -496,10 +502,6 @@ def main():
                 callbacks=callbacks,
                 sample_weight=sample_weights
             )
-
-            visualizer.loss_plot(history.history["loss"], history.history["val_loss"])
-            visualizer.save_figure(history_img)
-            model.save_weights(model_file)
 
         print("============== EVALUATION ==============")
         y_pred_global = [0. for _ in eval_labels]

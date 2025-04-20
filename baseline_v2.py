@@ -14,7 +14,6 @@ import os
 import sys
 import glob
 import logging
-from pathlib import Path
 ########################################################################
 
 
@@ -27,14 +26,19 @@ import librosa.core
 import librosa.feature
 import yaml
 import time
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import tensorflow.keras.backend as K
+
 # from import
 from tqdm import tqdm
 from sklearn import metrics
-import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense
-import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim
+from pathlib import Path
+from tensorflow.keras.layers import BatchNormalization, Activation, Dropout, Add
+from tensorflow.keras.losses import mean_squared_error
 ########################################################################
 
 
@@ -43,6 +47,26 @@ from skimage.metrics import structural_similarity as ssim
 ########################################################################
 __versions__ = "2.0.0"
 ########################################################################
+
+
+def ssim_loss(y_true, y_pred):
+    """
+    Structural Similarity Index (SSIM) loss
+    """
+    # Reshape for SSIM calculation if needed
+    return 1 - tf.reduce_mean(tf.image.ssim(
+        tf.reshape(y_true, [-1, 64, 5, 1]),  # Assumes n_mels=64, frames=5
+        tf.reshape(y_pred, [-1, 64, 5, 1]), 
+        max_val=K.max(y_true) - K.min(y_true) + K.epsilon()
+    ))
+
+def hybrid_loss(y_true, y_pred, alpha=0.5):
+    """
+    Combination of MSE and SSIM loss
+    """
+    mse = mean_squared_error(y_true, y_pred)
+    ssim = ssim_loss(y_true, y_pred)
+    return alpha * mse + (1 - alpha) * ssim
 
 
 ########################################################################
@@ -370,20 +394,85 @@ def dataset_generator(target_dir,
 ########################################################################
 # keras model
 ########################################################################
-def keras_model(input_dim):
+def keras_model(input_dim, config=None):
     """
-    define the keras model
-    the model based on the simple dense auto encoder (64*64*8*64*64)
+    Define an enhanced keras model with various architectural improvements
+    based on the configuration in the YAML file
     """
+    if config is None:
+        config = {}
+    
+    # Extract architecture parameters from config
+    depth = config.get("depth", 3)  # Default 3 layers
+    width = config.get("width", 64)  # Default 64 neurons
+    bottleneck = config.get("bottleneck", 8)  # Default bottleneck size
+    dropout_rate = config.get("dropout", 0.2)  # Default dropout rate
+    use_batch_norm = config.get("batch_norm", False)
+    use_residual = config.get("residual", False)
+    activation = config.get("activation", "relu")
+    
+    # Define input layer
     inputLayer = Input(shape=(input_dim,))
-    h = Dense(64, activation="relu")(inputLayer)
-    h = Dense(64, activation="relu")(h)
-    h = Dense(8, activation="relu")(h)
-    h = Dense(64, activation="relu")(h)
-    h = Dense(64, activation="relu")(h)
-    h = Dense(input_dim, activation=None)(h)
+    
+    # First layer is always the same size as input for potential residual connections
+    x = Dense(width, activation=None)(inputLayer)
+    if use_batch_norm:
+        x = BatchNormalization()(x)
+    x = Activation(activation)(x)
+    if dropout_rate > 0:
+        x = Dropout(dropout_rate)(x)
+    
+    # Store the output of first layer for potential residual connection
+    first_layer_output = x
+    
+    # Encoder
+    for i in range(depth - 1):
+        # Gradually decrease width toward bottleneck
+        layer_width = max(width // (2 ** (i + 1)), bottleneck)
+        layer_input = x
+        
+        x = Dense(layer_width, activation=None)(x)
+        if use_batch_norm:
+            x = BatchNormalization()(x)
+        x = Activation(activation)(x)
+        if dropout_rate > 0:
+            x = Dropout(dropout_rate)(x)
+        
+        # Add residual connection if enabled and dimensions match
+        if use_residual and layer_input.shape[-1] == layer_width:
+            x = Add()([x, layer_input])
+    
+    # Bottleneck layer
+    bottleneck_output = Dense(bottleneck, activation=activation, name="bottleneck")(x)
+    
+    x = bottleneck_output
+    
+    # Decoder
+    for i in range(depth - 1):
+        # Gradually increase width from bottleneck
+        layer_width = max(bottleneck * (2 ** (i + 1)), width // (2 ** (depth - i - 2)))
+        layer_input = x
+        
+        x = Dense(layer_width, activation=None)(x)
+        if use_batch_norm:
+            x = BatchNormalization()(x)
+        x = Activation(activation)(x)
+        if dropout_rate > 0:
+            x = Dropout(dropout_rate)(x)
+        
+        # Add residual connection if enabled and dimensions match
+        if use_residual and layer_input.shape[-1] == layer_width:
+            x = Add()([x, layer_input])
+    
+    # Output layer
+    if use_residual and first_layer_output.shape[-1] == input_dim:
+        # Final layer with residual connection to input
+        x = Dense(input_dim, activation=None)(x)
+        output = Add()([x, inputLayer])
+    else:
+        output = Dense(input_dim, activation=None)(x)
 
-    return Model(inputs=inputLayer, outputs=h)
+    return Model(inputs=inputLayer, outputs=output)
 
 
 ########################################################################
@@ -411,7 +500,31 @@ def main():
 
     # load base_directory list using pathlib for better path handling
     base_path = Path(param["base_directory"])
-    dirs = sorted(list(base_path.glob("*/*/*")))
+    dirs = []
+
+    # Apply filtering if enabled
+    if param.get("filter", {}).get("enabled", False):
+        filter_db = param["filter"].get("db_level")
+        filter_machine = param["filter"].get("machine_type")
+        filter_id = param["filter"].get("machine_id")
+        
+        # Construct path pattern based on filters
+        pattern = "*"  # Default: all
+        if filter_db:
+            pattern = f"{filter_db}/*"
+        if filter_machine:
+            pattern += f"{filter_machine}/*"
+        if filter_id:
+            pattern += f"{filter_id}"
+        else:
+            pattern += "*"
+            
+        logger.info(f"Filtering with pattern: {pattern}")
+        dirs = sorted(list(base_path.glob(pattern)))
+    else:
+        # Original behavior - get all directories
+        dirs = sorted(list(base_path.glob("*/*/*")))
+
     dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
 
     # Print dirs for debugging
@@ -490,7 +603,11 @@ def main():
 
         # model training
         print("============== MODEL TRAINING ==============")
-        model = keras_model(param["feature"]["n_mels"] * param["feature"]["frames"])
+        model_config = param.get("model", {}).get("architecture", {})
+        model = keras_model(
+            param["feature"]["n_mels"] * param["feature"]["frames"],
+            config=model_config
+        )
         model.summary()
 
         # training
@@ -501,6 +618,15 @@ def main():
 
             # Update compile parameters for TensorFlow 2.x
             compile_params = param["fit"]["compile"].copy()
+            loss_type = param.get("model", {}).get("loss", "mse")
+
+            if loss_type == "ssim":
+                compile_params["loss"] = ssim_loss
+            elif loss_type == "hybrid":
+                alpha = param.get("model", {}).get("hybrid_loss_alpha", 0.5)
+                compile_params["loss"] = lambda y_true, y_pred: hybrid_loss(y_true, y_pred, alpha)
+            # If "mse" or not specified, use the default loss from YAML
+
             if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
                 compile_params["optimizer"] = tf.keras.optimizers.Adam()
                 

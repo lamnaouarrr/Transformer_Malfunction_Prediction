@@ -18,6 +18,26 @@ fit:
   verbose: 1
   early_stopping: True
 
+# Filter to focus on specific dataset parts
+filter:
+  enabled: true
+  db_level: "0dB"
+  machine_type: "fan"
+  machine_id: null  # set to specific ID or null for all
+
+# Model architecture parameters
+model:
+  architecture:
+    depth: 3
+    width: 64
+    bottleneck: 8
+    activation: "relu"  # Try "relu", "leaky_relu", "elu"
+    dropout: 0.2
+    batch_norm: true
+    residual: true
+  loss: "mse"  # Options: "mse", "ssim", "hybrid"
+  hybrid_loss_alpha: 0.5  # Balance between MSE and SSIM when using hybrid loss
+
 # Directory paths
 base_directory: "./dataset"
 pickle_directory: "./pickle_fnn"

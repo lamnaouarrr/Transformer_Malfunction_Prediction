@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
- @file   baseline.py
- @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025.
- @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr)
+ @file   baseline_v2.py
+ @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025 with enhancements.
+ @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr), further modified by Grok
  Copyright (C) 2019 Hitachi, Ltd. All right reserved.
  [1] Harsh Purohit, Ryo Tanabe, Kenji Ichige, Takashi Endo, Yuki Nikaido, Kaori Suefusa, and Yohei Kawaguchi, "MIMII Dataset: Sound Dataset for Malfunctioning Industrial Machine Investigation and Inspection," arXiv preprint arXiv:1909.09347, 2019.
 """
@@ -14,12 +14,6 @@ import os
 import sys
 import glob
 import logging
-########################################################################
-
-
-########################################################################
-# import additional python-library
-########################################################################
 import numpy as np
 import librosa
 import librosa.core
@@ -29,52 +23,46 @@ import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
-
-# from import
 from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention
+from tensorflow.keras.losses import mean_squared_error
+from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from pathlib import Path
-from tensorflow.keras.layers import BatchNormalization, Activation, Dropout, Add
-from tensorflow.keras.losses import mean_squared_error
 ########################################################################
-
 
 ########################################################################
 # version
 ########################################################################
-__versions__ = "2.0.0"
+__versions__ = "2.1.0"
 ########################################################################
-
 
 def ssim_loss(y_true, y_pred):
     """
     Structural Similarity Index (SSIM) loss
     """
-    # Reshape for SSIM calculation if needed
     return 1 - tf.reduce_mean(tf.image.ssim(
-        tf.reshape(y_true, [-1, 64, 5, 1]),  # Assumes n_mels=64, frames=5
+        tf.reshape(y_true, [-1, 64, 5, 1]),
         tf.reshape(y_pred, [-1, 64, 5, 1]), 
         max_val=K.max(y_true) - K.min(y_true) + K.epsilon()
     ))
 
-def hybrid_loss(y_true, y_pred, alpha=0.5):
+def hybrid_loss_with_margin(y_true, y_pred, alpha=0.5, margin=1.0):
     """
-    Combination of MSE and SSIM loss
+    Combination of MSE, SSIM loss, and a margin term to improve Specificity
     """
     mse = mean_squared_error(y_true, y_pred)
     ssim = ssim_loss(y_true, y_pred)
-    return alpha * mse + (1 - alpha) * ssim
-
+    error = K.mean(K.square(y_true - y_pred), axis=1)
+    normal_mask = K.cast(K.less(error, margin), K.floatx())
+    margin_loss = K.mean(normal_mask * error)
+    return alpha * mse + (1 - alpha) * ssim + 0.2 * margin_loss
 
 ########################################################################
 # setup STD I/O
 ########################################################################
-"""
-Standard output is logged in "baseline.log".
-"""
 def setup_logging():
     logging.basicConfig(level=logging.DEBUG, filename="baseline.log")
     logger = logging.getLogger(' ')
@@ -87,27 +75,14 @@ def setup_logging():
 logger = setup_logging()
 ########################################################################
 
-
 ########################################################################
 # visualizer
 ########################################################################
-# Replace the current Visualizer class (around line 86) with this updated version:
 class Visualizer:
     def __init__(self):
-        pass  # No pre-created figure
+        pass
 
     def loss_plot(self, loss, val_loss):
-        """
-        Plot loss curve.
-
-        loss : list [ float ]
-            training loss time series.
-        val_loss : list [ float ]
-            validation loss time series.
-
-        return   : None
-        """
-        # Create a new figure for each plot
         plt.figure(figsize=(30, 10))
         plt.plot(loss)
         plt.plot(val_loss)
@@ -117,132 +92,80 @@ class Visualizer:
         plt.legend(["Train", "Test"], loc="upper right")
 
     def save_figure(self, name):
-        """
-        Save figure.
-
-        name : str
-            save .png file path.
-
-        return : None
-        """
         plt.savefig(name)
-        plt.close()  # Close the figure to free up memory
-
-
-########################################################################
-
+        plt.close()
 
 ########################################################################
 # file I/O
 ########################################################################
-# pickle I/O
 def save_pickle(filename, save_data):
-    """
-    picklenize the data.
-
-    filename : str
-        pickle filename
-    data : free datatype
-        some data will be picklenized
-
-    return : None
-    """
     logger.info(f"save_pickle -> {filename}")
     with open(filename, 'wb') as sf:
         pickle.dump(save_data, sf)
 
-
 def load_pickle(filename):
-    """
-    unpicklenize the data.
-
-    filename : str
-        pickle filename
-
-    return : data
-    """
     logger.info(f"load_pickle <- {filename}")
     with open(filename, 'rb') as lf:
         load_data = pickle.load(lf)
     return load_data
 
-
-# wav file Input
 def file_load(wav_name, mono=False):
-    """
-    load .wav file.
-
-    wav_name : str
-        target .wav file
-    mono : boolean
-        When load a multi channels file and this param True, the returned data will be merged for mono data
-
-    return : numpy.array( float )
-    """
     try:
         return librosa.load(wav_name, sr=None, mono=mono)
     except Exception as e:
         logger.error(f"file_broken or not exists!! : {wav_name}, error: {e}")
         return None
 
-
 def demux_wav(wav_name, channel=0):
-    """
-    demux .wav file.
-
-    wav_name : str
-        target .wav file
-    channel : int
-        target channel number
-
-    return : numpy.array( float )
-        demuxed mono data
-
-    Enabled to read multiple sampling rates.
-
-    Enabled even one channel.
-    """
     try:
         multi_channel_data, sr = file_load(wav_name)
         if multi_channel_data is None:
             return None, None
-            
         if multi_channel_data.ndim <= 1:
             return sr, multi_channel_data
-
         return sr, np.array(multi_channel_data)[channel, :]
-
     except ValueError as msg:
         logger.warning(f'{msg}')
         return None, None
 
-
-########################################################################
-
-
 ########################################################################
 # feature extractor
 ########################################################################
+def augment_spectrogram(spectrogram, max_mask_freq=10, max_mask_time=10, n_freq_masks=2, n_time_masks=2, noise_level=0.01):
+    """
+    Apply subtle augmentations to spectrograms: frequency/time masking and noise injection.
+    """
+    # Frequency masking
+    freq_mask_param = np.random.randint(0, max_mask_freq)
+    for _ in range(n_freq_masks):
+        freq_start = np.random.randint(0, spectrogram.shape[0])
+        freq_end = min(spectrogram.shape[0], freq_start + freq_mask_param)
+        spectrogram[freq_start:freq_end, :] *= 0.5  # Reduce amplitude instead of zeroing
+
+    # Time masking
+    time_mask_param = np.random.randint(0, max_mask_time)
+    for _ in range(n_time_masks):
+        time_start = np.random.randint(0, spectrogram.shape[1])
+        time_end = min(spectrogram.shape[1], time_start + time_mask_param)
+        spectrogram[:, time_start:time_end] *= 0.5
+
+    # Add subtle noise
+    noise = np.random.normal(0, noise_level, spectrogram.shape)
+    spectrogram += noise
+
+    return spectrogram
+
 def file_to_vector_array(file_name,
                          n_mels=64,
                          frames=5,
                          n_fft=1024,
                          hop_length=512,
-                         power=2.0):
+                         power=2.0,
+                         augment=False):
     """
-    convert file_name to a vector array.
-
-    file_name : str
-        target .wav file
-
-    return : numpy.array( numpy.array( float ) )
-        vector array
-        * dataset.shape = (dataset_size, fearture_vector_length)
+    Convert file_name to a vector array with optional augmentation for normal data.
     """
-    # 01 calculate the number of dimensions
     dims = n_mels * frames
-
-    # 02 generate melspectrogram using librosa (**kwargs == param["librosa"])
     sr, y = demux_wav(file_name)
     if y is None:
         return np.empty((0, dims), float)
@@ -253,24 +176,20 @@ def file_to_vector_array(file_name,
                                                     hop_length=hop_length,
                                                     n_mels=n_mels,
                                                     power=power)
-
-    # 03 convert melspectrogram to log mel energy
     log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
-
-    # 04 calculate total vector size
+    
+    if augment:
+        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram)
+    
     vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
-
-    # 05 skip too short clips
     if vectorarray_size < 1:
         return np.empty((0, dims), float)
 
-    # 06 generate feature vectors by concatenating multi_frames
     vectorarray = np.zeros((vectorarray_size, dims), float)
     for t in range(frames):
         vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
 
     return vectorarray
-
 
 def list_to_vector_array(file_list,
                          msg="calc...",
@@ -278,35 +197,20 @@ def list_to_vector_array(file_list,
                          frames=5,
                          n_fft=1024,
                          hop_length=512,
-                         power=2.0):
-    """
-    convert the file_list to a vector array.
-    file_to_vector_array() is iterated, and the output vector array is concatenated.
-
-    file_list : list [ str ]
-        .wav filename list of dataset
-    msg : str ( default = "calc..." )
-        description for tqdm.
-        this parameter will be input into "desc" param at tqdm.
-
-    return : numpy.array( numpy.array( float ) )
-        training dataset (when generate the validation data, this function is not used.)
-        * dataset.shape = (total_dataset_size, feature_vector_length)
-    """
-    # 01 calculate the number of dimensions
+                         power=2.0,
+                         augment=False):
     dims = n_mels * frames
-
     dataset = None
     total_size = 0
 
-    # 02 loop of file_to_vectorarray
     for idx in tqdm(range(len(file_list)), desc=msg):
         vector_array = file_to_vector_array(file_list[idx],
                                            n_mels=n_mels,
                                            frames=frames,
                                            n_fft=n_fft,
                                            hop_length=hop_length,
-                                           power=power)
+                                           power=power,
+                                           augment=augment)
         
         if vector_array.shape[0] == 0:
             continue
@@ -321,62 +225,31 @@ def list_to_vector_array(file_list,
         logger.warning("No valid data was found in the file list.")
         return np.empty((0, dims), float)
         
-    # Return only the filled part of the dataset
     return dataset[:total_size, :]
-
 
 def dataset_generator(target_dir,
                       normal_dir_name="normal",
                       abnormal_dir_name="abnormal",
                       ext="wav"):
-    """
-    target_dir : str
-        base directory path of the dataset
-    normal_dir_name : str (default="normal")
-        directory name the normal data located in
-    abnormal_dir_name : str (default="abnormal")
-        directory name the abnormal data located in
-    ext : str (default="wav")
-        filename extension of audio files 
-
-    return : 
-        train_data : numpy.array( numpy.array( float ) )
-            training dataset
-            * dataset.shape = (total_dataset_size, feature_vector_length)
-        train_files : list [ str ]
-            file list for training
-        train_labels : list [ boolean ] 
-            label info. list for training
-            * normal/abnormal = 0/1
-        eval_files : list [ str ]
-            file list for evaluation
-        eval_labels : list [ boolean ] 
-            label info. list for evaluation
-            * normal/abnormal = 0/1
-    """
     logger.info(f"target_dir : {target_dir}")
-
     target_dir_path = Path(target_dir)
 
-    # 01 normal list generate
     normal_files = sorted(list(target_dir_path.joinpath(normal_dir_name).glob(f"*.{ext}")))
-    normal_files = [str(file_path) for file_path in normal_files]  # Convert Path to string
+    normal_files = [str(file_path) for file_path in normal_files]
     normal_labels = np.zeros(len(normal_files))
     
     if len(normal_files) == 0:
         logger.exception(f"No {ext} files found in {normal_dir_name} directory!")
         return [], [], [], []
 
-    # 02 abnormal list generate
     abnormal_files = sorted(list(target_dir_path.joinpath(abnormal_dir_name).glob(f"*.{ext}")))
-    abnormal_files = [str(file_path) for file_path in abnormal_files]  # Convert Path to string
+    abnormal_files = [str(file_path) for file_path in abnormal_files]
     abnormal_labels = np.ones(len(abnormal_files))
     
     if len(abnormal_files) == 0:
         logger.exception(f"No {ext} files found in {abnormal_dir_name} directory!")
         return [], [], [], []
 
-    # 03 separate train & eval
     train_files = normal_files[len(abnormal_files):]
     train_labels = normal_labels[len(abnormal_files):]
     eval_files = np.concatenate((normal_files[:len(abnormal_files)], abnormal_files), axis=0)
@@ -387,166 +260,133 @@ def dataset_generator(target_dir,
 
     return train_files, train_labels, eval_files, eval_labels
 
-
-########################################################################
-
-
 ########################################################################
 # keras model
 ########################################################################
 def keras_model(input_dim, config=None):
     """
-    Define an enhanced keras model with various architectural improvements
-    based on the configuration in the YAML file
+    Define an enhanced keras model with attention in the bottleneck and weight decay.
     """
     if config is None:
         config = {}
     
-    # Extract architecture parameters from config
-    depth = config.get("depth", 3)  # Default 3 layers
-    width = config.get("width", 64)  # Default 64 neurons
-    bottleneck = config.get("bottleneck", 8)  # Default bottleneck size
-    dropout_rate = config.get("dropout", 0.2)  # Default dropout rate
+    depth = config.get("depth", 3)
+    width = config.get("width", 64)
+    bottleneck = config.get("bottleneck", 8)
+    dropout_rate = config.get("dropout", 0.2)
     use_batch_norm = config.get("batch_norm", False)
     use_residual = config.get("residual", False)
     activation = config.get("activation", "relu")
+    weight_decay = 1e-4  # Add weight decay
     
-    # Define input layer
     inputLayer = Input(shape=(input_dim,))
     
-    # First layer is always the same size as input for potential residual connections
-    x = Dense(width, activation=None)(inputLayer)
+    x = Dense(width, activation=None, kernel_regularizer=l2(weight_decay))(inputLayer)
     if use_batch_norm:
         x = BatchNormalization()(x)
     x = Activation(activation)(x)
     if dropout_rate > 0:
         x = Dropout(dropout_rate)(x)
     
-    # Store the output of first layer for potential residual connection
     first_layer_output = x
     
     # Encoder
     for i in range(depth - 1):
-        # Gradually decrease width toward bottleneck
         layer_width = max(width // (2 ** (i + 1)), bottleneck)
         layer_input = x
         
-        x = Dense(layer_width, activation=None)(x)
+        x = Dense(layer_width, activation=None, kernel_regularizer=l2(weight_decay))(x)
         if use_batch_norm:
             x = BatchNormalization()(x)
         x = Activation(activation)(x)
         if dropout_rate > 0:
             x = Dropout(dropout_rate)(x)
         
-        # Add residual connection if enabled and dimensions match
         if use_residual and layer_input.shape[-1] == layer_width:
             x = Add()([x, layer_input])
     
-    # Bottleneck layer
+    # Bottleneck layer with attention
     bottleneck_output = Dense(bottleneck, activation=activation, name="bottleneck")(x)
-    
-    x = bottleneck_output
+    # Reshape for attention: (batch_size, 1, bottleneck)
+    attn_input = tf.expand_dims(bottleneck_output, axis=1)
+    attn_output = MultiHeadAttention(num_heads=4, key_dim=bottleneck // 4)(attn_input, attn_input)
+    attn_output = tf.squeeze(attn_output, axis=1)  # (batch_size, bottleneck)
+    x = Add()([bottleneck_output, attn_output])  # Residual connection
     
     # Decoder
     for i in range(depth - 1):
-        # Gradually increase width from bottleneck
         layer_width = max(bottleneck * (2 ** (i + 1)), width // (2 ** (depth - i - 2)))
         layer_input = x
         
-        x = Dense(layer_width, activation=None)(x)
+        x = Dense(layer_width, activation=None, kernel_regularizer=l2(weight_decay))(x)
         if use_batch_norm:
             x = BatchNormalization()(x)
         x = Activation(activation)(x)
         if dropout_rate > 0:
             x = Dropout(dropout_rate)(x)
         
-        # Add residual connection if enabled and dimensions match
         if use_residual and layer_input.shape[-1] == layer_width:
             x = Add()([x, layer_input])
     
-    # Output layer
     if use_residual and first_layer_output.shape[-1] == input_dim:
-        # Final layer with residual connection to input
-        x = Dense(input_dim, activation=None)(x)
+        x = Dense(input_dim, activation=None, kernel_regularizer=l2(weight_decay))(x)
         output = Add()([x, inputLayer])
     else:
-        output = Dense(input_dim, activation=None)(x)
+        output = Dense(input_dim, activation=None, kernel_regularizer=l2(weight_decay))(x)
 
     return Model(inputs=inputLayer, outputs=output)
-
-
-########################################################################
-
 
 ########################################################################
 # main
 ########################################################################
 def main():
-    
-    # Record the start time
     start_time = time.time()
 
-    # load parameter yaml
     with open("baseline.yaml", "r") as stream:
         param = yaml.safe_load(stream)
 
-    # make output directory
     os.makedirs(param["pickle_directory"], exist_ok=True)
     os.makedirs(param["model_directory"], exist_ok=True)
     os.makedirs(param["result_directory"], exist_ok=True)
 
-    # initialize the visualizer
     visualizer = Visualizer()
 
-    # load base_directory list using pathlib for better path handling
     base_path = Path(param["base_directory"])
     dirs = []
 
-    # Apply filtering if enabled
     if param.get("filter", {}).get("enabled", False):
         filter_db = param["filter"].get("db_level")
         filter_machine = param["filter"].get("machine_type")
         filter_id = param["filter"].get("machine_id")
         
-        # Construct pattern based on directory structure: db/machine_type/machine_id
         pattern = ""
         if filter_db:
             pattern += f"{filter_db}/"
         else:
             pattern += "*/"
-            
         if filter_machine:
             pattern += f"{filter_machine}/"
         else:
             pattern += "*/"
-            
         if filter_id:
             pattern += f"{filter_id}"
         else:
             pattern += "*"
-            
         full_pattern = str(base_path / pattern)
         logger.info(f"Filtering with pattern: {full_pattern}")
-        
-        # Use glob directly with the pattern to get proper directories
         dirs = sorted(glob.glob(full_pattern))
     else:
-        # Original behavior - get all directories with proper structure
         dirs = sorted(glob.glob(str(base_path / "*/*/*")))
-        
-    # Convert to string paths and filter out any that aren't proper machine ID dirs
+
     dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
 
-    # Print dirs for debugging
     logger.info(f"Found {len(dirs)} directories to process:")
     for dir_path in dirs:
         logger.info(f"  - {dir_path}")
 
-    # setup the result
     result_file = f"{param['result_directory']}/resultv2.yaml"
     results = {}
 
-    # GPU memory growth to avoid allocating all GPU memory at once
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -556,22 +396,17 @@ def main():
         except RuntimeError as e:
             logger.warning(f"Memory growth setting failed: {e}")
 
-    # loop of the base directory
     for dir_idx, target_dir in enumerate(dirs):
         print("\n===========================")
         print(f"[{dir_idx + 1}/{len(dirs)}] {target_dir}")
 
-        # dataset param
-        # Extract components from path
         parts = Path(target_dir).parts
-        # This assumes paths like "dataset/0dB/fan/id_00"
         db = parts[-3]
         machine_type = parts[-2]
         machine_id = parts[-1]
 
         logger.info(f"Processing: db={db}, machine_type={machine_type}, machine_id={machine_id}")
 
-        # setup path
         evaluation_result = {}
         train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
         eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
@@ -580,7 +415,6 @@ def main():
         history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
-        # dataset generator
         print("============== DATASET_GENERATOR ==============")
         if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
             train_data = load_pickle(train_pickle)
@@ -588,8 +422,6 @@ def main():
             eval_labels = load_pickle(eval_labels_pickle)
         else:
             train_files, train_labels, eval_files, eval_labels = dataset_generator(target_dir)
-            
-            # Check if any files were found
             if len(train_files) == 0 or len(eval_files) == 0:
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue
@@ -600,9 +432,9 @@ def main():
                                             frames=param["feature"]["frames"],
                                             n_fft=param["feature"]["n_fft"],
                                             hop_length=param["feature"]["hop_length"],
-                                            power=param["feature"]["power"])
+                                            power=param["feature"]["power"],
+                                            augment=True)  # Apply augmentation to normal data
             
-            # Check if any valid training data was found
             if train_data.shape[0] == 0:
                 logger.error(f"No valid training data for {evaluation_result_key}, skipping...")
                 continue
@@ -611,7 +443,6 @@ def main():
             save_pickle(eval_files_pickle, eval_files)
             save_pickle(eval_labels_pickle, eval_labels)
 
-        # model training
         print("============== MODEL TRAINING ==============")
         model_config = param.get("model", {}).get("architecture", {})
         model = keras_model(
@@ -620,13 +451,10 @@ def main():
         )
         model.summary()
 
-        # training
         if os.path.exists(model_file):
             model.load_weights(model_file)
             logger.info("Model loaded from file, no training performed")
         else:
-
-            # Update compile parameters for TensorFlow 2.x
             compile_params = param["fit"]["compile"].copy()
             loss_type = param.get("model", {}).get("loss", "mse")
 
@@ -634,23 +462,28 @@ def main():
                 compile_params["loss"] = ssim_loss
             elif loss_type == "hybrid":
                 alpha = param.get("model", {}).get("hybrid_loss_alpha", 0.5)
-                compile_params["loss"] = lambda y_true, y_pred: hybrid_loss(y_true, y_pred, alpha)
-            # If "mse" or not specified, use the default loss from YAML
-
+                margin = param.get("model", {}).get("margin", 1.0)
+                compile_params["loss"] = lambda y_true, y_pred: hybrid_loss_with_margin(y_true, y_pred, alpha, margin)
+            
             if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
                 compile_params["optimizer"] = tf.keras.optimizers.Adam()
-                
+
             model.compile(**compile_params)
             
-            # Use TensorFlow callbacks
             callbacks = []
             if param["fit"].get("early_stopping", False):
                 callbacks.append(tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss',
                     patience=10,
+                    min_delta=0.001,
                     restore_best_weights=True
                 ))
-                
+
+            # Apply sample weights for problematic fan IDs
+            sample_weights = np.ones(len(train_data))
+            if machine_id in ["id_00", "id_04"]:
+                sample_weights *= 1.5  # Increase weight for fan_id_00 and fan_id_04
+
             history = model.fit(
                 train_data,
                 train_data,
@@ -659,20 +492,20 @@ def main():
                 shuffle=param["fit"]["shuffle"],
                 validation_split=param["fit"]["validation_split"],
                 verbose=param["fit"]["verbose"],
-                callbacks=callbacks
+                callbacks=callbacks,
+                sample_weight=sample_weights
             )
 
             visualizer.loss_plot(history.history["loss"], history.history["val_loss"])
             visualizer.save_figure(history_img)
             model.save_weights(model_file)
 
-        # evaluation
         print("============== EVALUATION ==============")
-        y_pred = [0. for _ in eval_labels]
+        y_pred_global = [0. for _ in eval_labels]
+        y_pred_feature = [0. for _ in eval_labels]
         y_true = eval_labels
         original_specs = []
         reconstructed_specs = []
-
 
         for num, file_name in tqdm(enumerate(eval_files), total=len(eval_files)):
             try:
@@ -681,87 +514,97 @@ def main():
                                            frames=param["feature"]["frames"],
                                            n_fft=param["feature"]["n_fft"],
                                            hop_length=param["feature"]["hop_length"],
-                                           power=param["feature"]["power"])
+                                           power=param["feature"]["power"],
+                                           augment=False)  # No augmentation during eval
                                            
                 if data.shape[0] == 0:
                     logger.warning(f"No valid features extracted from file: {file_name}")
                     continue
                     
                 pred = model.predict(data, verbose=0)
-                error = np.mean(np.square(data - pred), axis=1)
-                y_pred[num] = np.mean(error)
+                # Global reconstruction error
+                global_error = np.mean(np.square(data - pred), axis=1)
+                y_pred_global[num] = np.mean(global_error)
+                # Feature-level error (per mel-frequency bin)
+                feature_error = np.mean(np.square(data - pred), axis=0)  # Shape: (n_mels * frames,)
+                y_pred_feature[num] = np.mean(feature_error)
                 original_specs.append(data)
                 reconstructed_specs.append(pred)
             except Exception as e:
                 logger.warning(f"Error processing file: {file_name}, error: {e}")
 
-        # Calculate AUC score
+        # Combine global and feature-level scores
+        y_pred_combined = [0.5 * g + 0.5 * f for g, f in zip(y_pred_global, y_pred_feature)]
+
+        # Statistical thresholding: mean + k*std on normal samples
+        normal_indices = [i for i, label in enumerate(y_true) if label == 0]
+        normal_scores = [y_pred_combined[i] for i in normal_indices]
+        if normal_scores:
+            mean_normal = np.mean(normal_scores)
+            std_normal = np.std(normal_scores)
+            stat_threshold = mean_normal + 2 * std_normal  # k=2
+            evaluation_result["Statistical Threshold"] = float(stat_threshold)
+        else:
+            stat_threshold = np.mean(y_pred_combined)  # Fallback
+            evaluation_result["Statistical Threshold"] = float(stat_threshold)
+
+        # Optimize threshold using ROC and Precision-Recall curves
+        fpr, tpr, roc_thresholds = metrics.roc_curve(y_true, y_pred_combined)
+        precision, recall, pr_thresholds = metrics.precision_recall_curve(y_true, y_pred_combined)
+        # Prioritize Specificity (low FPR) while maintaining decent TPR
+        best_threshold = None
+        best_score = -float('inf')
+        for i, thresh in enumerate(roc_thresholds):
+            if i >= len(fpr) or i >= len(tpr):
+                continue
+            # Score balances TPR (Recall) and FPR (1-Specificity)
+            score = tpr[i] - 2 * fpr[i]  # Weight FPR more to improve Specificity
+            if score > best_score:
+                best_score = score
+                best_threshold = thresh
+        
+        if best_threshold is None:
+            best_threshold = stat_threshold  # Fallback to statistical threshold
+
+        # Apply best threshold
+        y_pred_binary = (np.array(y_pred_combined) >= best_threshold).astype(int)
+
+        # Calculate metrics
         try:
-            score = metrics.roc_auc_score(y_true, y_pred)
+            score = metrics.roc_auc_score(y_true, y_pred_combined)
             logger.info(f"AUC : {score}")
             evaluation_result["AUC"] = float(score)
             
-            # Additional metrics
-            precision, recall, thresholds = metrics.precision_recall_curve(y_true, y_pred)
-            evaluation_result["Average Precision"] = float(metrics.average_precision_score(y_true, y_pred))
+            evaluation_result["Average Precision"] = float(metrics.average_precision_score(y_true, y_pred_combined))
             
-            # Find optimal F1 score
-            f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
-            best_threshold_idx = np.argmax(f1_scores)
-            evaluation_result["Best F1"] = float(f1_scores[best_threshold_idx])
-            best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
-            evaluation_result["Best Threshold"] = float(thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1])
-            
-            # Apply best threshold to get binary predictions
-            y_pred_binary = (np.array(y_pred) >= best_threshold).astype(int)
-
-            # Calculate additional metrics at the best threshold
             tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred_binary).ravel()
             
-            # Precision and Recall at best threshold
             evaluation_result["Precision"] = float(tp / (tp + fp + 1e-10))
             evaluation_result["Recall"] = float(tp / (tp + fn + 1e-10))
-            
-            # Specificity (True Negative Rate)
             evaluation_result["Specificity"] = float(tn / (tn + fp + 1e-10))
             
-            # Matthews Correlation Coefficient (MCC)
             mcc_numerator = (tp * tn) - (fp * fn)
             mcc_denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-10)
             evaluation_result["MCC"] = float(mcc_numerator / mcc_denominator)
             
-            # Mean Absolute Error
             evaluation_result["MAE"] = float(metrics.mean_absolute_error(y_true, y_pred_binary))
+            evaluation_result["Best Threshold"] = float(best_threshold)
 
-
-            # Log some of the new metrics
             logger.info(f"Precision: {evaluation_result['Precision']:.4f}, Recall: {evaluation_result['Recall']:.4f}")
             logger.info(f"Specificity: {evaluation_result['Specificity']:.4f}, MCC: {evaluation_result['MCC']:.4f}")
-            
 
             # Average SSIM
             ssim_scores = []
             for orig, recon in zip(original_specs, reconstructed_specs):
                 for i in range(min(len(orig), len(recon))):
                     try:
-                        # Reshape vectors back to spectrograms if needed
                         orig_spec = orig[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
                         recon_spec = recon[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                        
-                        # Get dimensions
                         height, width = orig_spec.shape
-                        
-                        # Calculate appropriate window size (must be odd and smaller than image)
                         win_size = min(height, width)
-                        if win_size % 2 == 0:  # Make odd if even
+                        if win_size % 2 == 0:
                             win_size -= 1
-                        if win_size > 1:  # Ensure at least 3 for ssim
-                            win_size = max(3, win_size)
-                        else:
-                            # Skip if dimensions are too small
-                            continue
-                            
-                        # Calculate SSIM with custom window size
+                        win_size = max(3, win_size)
                         ssim_value = ssim(
                             orig_spec, 
                             recon_spec,
@@ -775,26 +618,19 @@ def main():
             if ssim_scores:
                 evaluation_result["SSIM"] = float(np.mean(ssim_scores))
             else:
-                evaluation_result["SSIM"] = float(-1)  # Indicate no valid SSIM could be calculated
+                evaluation_result["SSIM"] = float(-1)
             
         except Exception as e:
             logger.error(f"Error calculating metrics: {e}")
 
         results[evaluation_result_key] = evaluation_result
-            
         print("===========================")
 
-    # Recording the end time
     end_time = time.time()
-
-    # Calculating total execution time
     total_time = end_time - start_time
     logger.info(f"Total execution time: {total_time:.2f} seconds")
-
-    # saving the execution time to the results file
     results["execution_time_seconds"] = float(total_time)
 
-    # output results
     print("\n===========================")
     logger.info(f"all results -> {result_file}")
     with open(result_file, "w") as f:

@@ -11,12 +11,12 @@ fit:
   compile:
     optimizer: "adam"
     loss: "mean_squared_error"
-  epochs: 100
+  epochs: 150
   batch_size: 512
   shuffle: True
   validation_split: 0.1
   verbose: 1
-  early_stopping: false
+  early_stopping: true
 
 # Filter to focus on specific dataset parts
 filter:
@@ -28,15 +28,16 @@ filter:
 # Model architecture parameters
 model:
   architecture:
-    depth: 3
-    width: 64
-    bottleneck: 8
-    activation: "relu"  # Try "relu", "leaky_relu", "elu"
+    depth: 4
+    width: 128
+    bottleneck: 32
+    activation: "relu"
     dropout: 0.2
     batch_norm: true
     residual: true
-  loss: "mse"  # Options: "mse", "ssim", "hybrid"
-  hybrid_loss_alpha: 0.5  # Balance between MSE and SSIM when using hybrid loss
+  loss: "hybrid"
+  hybrid_loss_alpha: 0.6  # Slightly prioritize anomaly detection
+  margin: 1.0  # For margin term in hybrid loss
 
 # Directory paths
 base_directory: "./dataset"

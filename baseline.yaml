@@ -1,53 +1,26 @@
-perform_tuning: false
-force_retrain: true
-
-# Dataset selection parameters
-dataset:
-  db_levels: ["0dB"] # List of dB levels to include: ["0dB", "6dB", "min6dB"] for all
-  machine_types: ["fan"] # List of machine types to include: ["fan", "pump", "slider", "valve"] for all
-
 # Feature extraction parameters
 feature:
   n_mels: 64
-  frames: 5  # Keep at 5 for compatibility
+  frames: 5
   n_fft: 1024
   hop_length: 512
   power: 2.0
-  use_patches: false
 
 # Fit algorithm parameters
 fit:
   compile:
     optimizer: "adam"
-    loss: "hybrid_loss"
-  epochs: 150  # Increase epochs
-  batch_size: 256  # Smaller batch for better gradient estimates
+    loss: "mean_squared_error"
+  epochs: 100
+  batch_size: 512
   shuffle: True
-  validation_split: 0.2  # Larger validation split
+  validation_split: 0.1
   verbose: 1
   early_stopping: True
-  learning_rate: 0.001
-  lr_first_decay_steps: 20
-  lr_t_mul: 2.0
-  lr_m_mul: 0.9
-  lr_min_factor: 0.1
-  early_stopping_patience: 15  # More patience
-  early_stopping_min_delta: 0.0005
-  use_augmentation: true
-  augmentation_factor: 2  # More conservative
-  layer_size: 128  # Larger layers
-  bottleneck_size: 32  # Larger bottleneck
-  dropout_rate: 0.15  # Less aggressive dropout
-  loss_alpha: 0.7  # More emphasis on MSE
-  depth: 3  # Deeper network
-  activation: "relu"  # Back to standard relu
-  weight_decay: 0.00001  # Very mild regularization
-  mixed_precision: true
-  cache_dataset: true
 
 # Directory paths
 base_directory: "./dataset"
-pickle_directory: "./pickle"
-model_directory: "./model"
-result_directory: "./result"
-result_file: "result.yaml"
+pickle_directory: "./pickle_fnn"
+model_directory: "./model_fnn"
+result_directory: "./result_fnn"
+result_file: "result_fnn.yaml"

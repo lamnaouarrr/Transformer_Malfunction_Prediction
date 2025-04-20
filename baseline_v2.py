@@ -357,31 +357,10 @@ def main():
 
     base_path = Path(param["base_directory"])
     dirs = []
-
-    if param.get("filter", {}).get("enabled", False):
-        filter_db = param["filter"].get("db_level")
-        filter_machine = param["filter"].get("machine_type")
-        filter_id = param["filter"].get("machine_id")
-        
-        pattern = ""
-        if filter_db:
-            pattern += f"{filter_db}/"
-        else:
-            pattern += "*/"
-        if filter_machine:
-            pattern += f"{filter_machine}/"
-        else:
-            pattern += "*/"
-        if filter_id:
-            pattern += f"{filter_id}"
-        else:
-            pattern += "*"
-        full_pattern = str(base_path / pattern)
-        logger.info(f"Filtering with pattern: {full_pattern}")
-        dirs = sorted(glob.glob(full_pattern))
-    else:
-        dirs = sorted(glob.glob(str(base_path / "*/*/*")))
-
+    # Remove the specific filtering and use a more flexible approach
+    dirs = sorted(glob.glob(str(base_path / "*/*/*")))
+    
+    # Still filter to include only directories that contain machine IDs
     dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
 
     logger.info(f"Found {len(dirs)} directories to process:")
@@ -484,9 +463,8 @@ def main():
                 ))
 
             # Apply sample weights for problematic fan IDs
+            # Apply uniform sample weights instead of targeting specific IDs
             sample_weights = np.ones(len(train_data))
-            if machine_id in ["id_00", "id_04"]:
-                sample_weights *= 1.5  # Increase weight for fan_id_00 and fan_id_04
 
             history = model.fit(
                 train_data,
@@ -497,7 +475,7 @@ def main():
                 validation_split=param["fit"]["validation_split"],
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
-                sample_weight=sample_weights
+                sample_weight=sample_weights  # Use uniform weights
             )
 
             visualizer.loss_plot(history.history["loss"], history.history["val_loss"])

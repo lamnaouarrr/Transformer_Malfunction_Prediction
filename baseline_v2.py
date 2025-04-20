@@ -41,12 +41,16 @@ __versions__ = "2.1.0"
 
 def ssim_loss(y_true, y_pred):
     """
-    Structural Similarity Index (SSIM) loss
+    Structural Similarity Index (SSIM) loss with appropriate window size
     """
+    # Use a smaller window size (must be odd and <= smallest dimension)
+    window_size = 3  # Smallest odd number that will work with your dimensions
+    
     return 1 - tf.reduce_mean(tf.image.ssim(
         tf.reshape(y_true, [-1, 64, 5, 1]),
         tf.reshape(y_pred, [-1, 64, 5, 1]), 
-        max_val=K.max(y_true) - K.min(y_true) + K.epsilon()
+        max_val=K.max(y_true) - K.min(y_true) + K.epsilon(),
+        filter_size=window_size
     ))
 
 def hybrid_loss_with_margin(y_true, y_pred, alpha=0.5, margin=1.0):
@@ -600,11 +604,8 @@ def main():
                     try:
                         orig_spec = orig[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
                         recon_spec = recon[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                        height, width = orig_spec.shape
-                        win_size = min(height, width)
-                        if win_size % 2 == 0:
-                            win_size -= 1
-                        win_size = max(3, win_size)
+                        # Use a small window size - must be odd and <= smallest dimension
+                        win_size = 3
                         ssim_value = ssim(
                             orig_spec, 
                             recon_spec,

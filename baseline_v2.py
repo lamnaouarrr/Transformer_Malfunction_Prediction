@@ -508,24 +508,34 @@ def main():
         filter_machine = param["filter"].get("machine_type")
         filter_id = param["filter"].get("machine_id")
         
-        # Construct path pattern based on filters
-        pattern = "*"  # Default: all
+        # Construct pattern based on directory structure: db/machine_type/machine_id
+        pattern = ""
         if filter_db:
-            pattern = f"{filter_db}/*"
+            pattern += f"{filter_db}/"
+        else:
+            pattern += "*/"
+            
         if filter_machine:
-            pattern += f"{filter_machine}/*"
+            pattern += f"{filter_machine}/"
+        else:
+            pattern += "*/"
+            
         if filter_id:
             pattern += f"{filter_id}"
         else:
             pattern += "*"
             
-        logger.info(f"Filtering with pattern: {pattern}")
-        dirs = sorted(list(base_path.glob(pattern)))
+        full_pattern = str(base_path / pattern)
+        logger.info(f"Filtering with pattern: {full_pattern}")
+        
+        # Use glob directly with the pattern to get proper directories
+        dirs = sorted(glob.glob(full_pattern))
     else:
-        # Original behavior - get all directories
-        dirs = sorted(list(base_path.glob("*/*/*")))
-
-    dirs = [str(dir_path) for dir_path in dirs]  # Convert Path to string
+        # Original behavior - get all directories with proper structure
+        dirs = sorted(glob.glob(str(base_path / "*/*/*")))
+        
+    # Convert to string paths and filter out any that aren't proper machine ID dirs
+    dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
 
     # Print dirs for debugging
     logger.info(f"Found {len(dirs)} directories to process:")

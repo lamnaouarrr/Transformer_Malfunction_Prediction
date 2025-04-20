@@ -357,15 +357,33 @@ def main():
 
     base_path = Path(param["base_directory"])
     dirs = []
-    # Remove the specific filtering and use a more flexible approach
-    dirs = sorted(glob.glob(str(base_path / "*/*/*")))
-    
-    # Still filter to include only directories that contain machine IDs
-    dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
 
-    logger.info(f"Found {len(dirs)} directories to process:")
-    for dir_path in dirs:
-        logger.info(f"  - {dir_path}")
+    # Keep the filtering mechanism based on YAML config
+    if param.get("filter", {}).get("enabled", False):
+        filter_db = param["filter"].get("db_level")
+        filter_machine = param["filter"].get("machine_type")
+        filter_id = param["filter"].get("machine_id")
+        
+        pattern = ""
+        if filter_db:
+            pattern += f"{filter_db}/"
+        else:
+            pattern += "*/"
+        if filter_machine:
+            pattern += f"{filter_machine}/"
+        else:
+            pattern += "*/"
+        if filter_id:
+            pattern += f"{filter_id}"
+        else:
+            pattern += "*"
+        full_pattern = str(base_path / pattern)
+        logger.info(f"Filtering with pattern: {full_pattern}")
+        dirs = sorted(glob.glob(full_pattern))
+    else:
+        dirs = sorted(glob.glob(str(base_path / "*/*/*")))
+
+    dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
 
     result_file = f"{param['result_directory']}/resultv2.yaml"
     results = {}
@@ -462,9 +480,10 @@ def main():
                     restore_best_weights=True
                 ))
 
-            # Apply sample weights for problematic fan IDs
-            # Apply uniform sample weights instead of targeting specific IDs
-            sample_weights = np.ones(len(train_data))
+            data_variance = np.var(train_data, axis=1)
+            if np.mean(data_variance) > some_threshold:  # Define threshold based on your data
+                # Apply higher weights to data with higher variance
+                sample_weights = 1.0 + 0.5 * (data_variance / np.max(data_variance))
 
             history = model.fit(
                 train_data,
@@ -475,7 +494,7 @@ def main():
                 validation_split=param["fit"]["validation_split"],
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
-                sample_weight=sample_weights  # Use uniform weights
+                sample_weight=sample_weights
             )
 
             visualizer.loss_plot(history.history["loss"], history.history["val_loss"])

@@ -91,10 +91,10 @@ logger = setup_logging()
 ########################################################################
 # visualizer
 ########################################################################
+# Replace the current Visualizer class (around line 86) with this updated version:
 class Visualizer:
     def __init__(self):
-        self.fig = plt.figure(figsize=(30, 10))
-        plt.subplots_adjust(wspace=0.3, hspace=0.3)
+        pass  # No pre-created figure
 
     def loss_plot(self, loss, val_loss):
         """
@@ -107,14 +107,14 @@ class Visualizer:
 
         return   : None
         """
-        ax = self.fig.add_subplot(1, 1, 1)
-        ax.cla()
-        ax.plot(loss)
-        ax.plot(val_loss)
-        ax.set_title("Model loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.legend(["Train", "Test"], loc="upper right")
+        # Create a new figure for each plot
+        plt.figure(figsize=(30, 10))
+        plt.plot(loss)
+        plt.plot(val_loss)
+        plt.title("Model loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend(["Train", "Test"], loc="upper right")
 
     def save_figure(self, name):
         """
@@ -126,7 +126,7 @@ class Visualizer:
         return : None
         """
         plt.savefig(name)
-        plt.close()
+        plt.close()  # Close the figure to free up memory
 
 
 ########################################################################

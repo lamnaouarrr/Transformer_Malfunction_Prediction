@@ -16,7 +16,7 @@ fit:
   shuffle: True
   validation_split: 0.1
   verbose: 1
-  early_stopping: True
+  early_stopping: false
 
 # Filter to focus on specific dataset parts
 filter:

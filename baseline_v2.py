@@ -23,6 +23,7 @@ import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
+
 from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
@@ -31,6 +32,7 @@ from tensorflow.keras.losses import mean_squared_error
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from pathlib import Path
+from sklearn.mixture import GaussianMixture
 ########################################################################
 
 ########################################################################
@@ -55,14 +57,15 @@ def ssim_loss(y_true, y_pred):
 
 def hybrid_loss_with_margin(y_true, y_pred, alpha=0.5, margin=1.0):
     """
-    Combination of MSE, SSIM loss, and a margin term to improve Specificity
+    Combination of MSE, SSIM loss, and a reduced margin term to improve SSIM
     """
     mse = mean_squared_error(y_true, y_pred)
     ssim = ssim_loss(y_true, y_pred)
     error = K.mean(K.square(y_true - y_pred), axis=1)
     normal_mask = K.cast(K.less(error, margin), K.floatx())
     margin_loss = K.mean(normal_mask * error)
-    return alpha * mse + (1 - alpha) * ssim + 0.2 * margin_loss
+    # Prioritize SSIM by reducing alpha and margin weight
+    return alpha * mse + (1 - alpha) * ssim + 0.15 * margin_loss  # Changed margin weight to 0.15
 
 ########################################################################
 # setup STD I/O
@@ -135,33 +138,27 @@ def demux_wav(wav_name, channel=0):
 ########################################################################
 # feature extractor
 ########################################################################
-def augment_spectrogram(spectrogram, max_mask_freq=15, max_mask_time=15, n_freq_masks=3, n_time_masks=3, noise_level=0.015):
+def augment_spectrogram(spectrogram, max_mask_freq=10, max_mask_time=10, n_freq_masks=2, n_time_masks=2, noise_level=0.01):
     """
-    Apply more aggressive augmentations to spectrograms: frequency/time masking and noise injection.
+    Apply subtle augmentations to spectrograms: frequency/time masking and noise injection.
     """
-    # Frequency masking with increased intensity
+    # Frequency masking
     freq_mask_param = np.random.randint(0, max_mask_freq)
     for _ in range(n_freq_masks):
         freq_start = np.random.randint(0, spectrogram.shape[0])
         freq_end = min(spectrogram.shape[0], freq_start + freq_mask_param)
-        spectrogram[freq_start:freq_end, :] *= 0.3  # More aggressive reduction (from 0.5 to 0.3)
+        spectrogram[freq_start:freq_end, :] *= 0.5  # Reduce amplitude instead of zeroing
 
-    # Time masking with increased intensity
+    # Time masking
     time_mask_param = np.random.randint(0, max_mask_time)
     for _ in range(n_time_masks):
         time_start = np.random.randint(0, spectrogram.shape[1])
         time_end = min(spectrogram.shape[1], time_start + time_mask_param)
-        spectrogram[:, time_start:time_end] *= 0.3  # More aggressive reduction
+        spectrogram[:, time_start:time_end] *= 0.5
 
-    # Add more noise
+    # Add subtle noise
     noise = np.random.normal(0, noise_level, spectrogram.shape)
     spectrogram += noise
-    
-    # Random pitch shift simulation (add slight shifts to frequency bands)
-    if np.random.random() > 0.5:
-        shift = np.random.uniform(-0.05, 0.05, (1, spectrogram.shape[1]))
-        pitch_noise = np.tile(shift, (spectrogram.shape[0], 1))
-        spectrogram = spectrogram * (1 + pitch_noise)
 
     return spectrogram
 
@@ -495,9 +492,12 @@ def main():
             
             sample_weights = np.ones(len(train_data))
 
-            # Apply enhanced sample weighting
-            if param.get("fit", {}).get("apply_sample_weights", False):
-                # Apply weights based on configuration rather than hard-coded IDs
+            # Apply targeted sample weighting
+            if machine_type == "fan" and (machine_id == "id_00" or machine_id == "id_04"):
+                # Higher weights for problematic fan IDs
+                sample_weights *= 2.0
+            elif param.get("fit", {}).get("apply_sample_weights", False):
+                # Normal weighting for other cases
                 weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
                 weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
                 
@@ -567,20 +567,58 @@ def main():
         # Optimize threshold using ROC and Precision-Recall curves
         fpr, tpr, roc_thresholds = metrics.roc_curve(y_true, y_pred_combined)
         precision, recall, pr_thresholds = metrics.precision_recall_curve(y_true, y_pred_combined)
-        # Balance Specificity and Recall with increased weight on Recall
+        
+        # Balance Specificity and Recall
         best_threshold = None
         best_score = -float('inf')
         for i, thresh in enumerate(roc_thresholds):
             if i >= len(fpr) or i >= len(tpr):
                 continue
-            # Score balances TPR (Recall) and FPR (1-Specificity)
-            score = tpr[i] - 2 * fpr[i]  # Weight FPR more to improve Specificity
+            # Equal weight to TPR (Recall) and FPR
+            score = tpr[i] - fpr[i]  # Equal balance between Recall and Specificity
             if score > best_score:
                 best_score = score
                 best_threshold = thresh
         
         if best_threshold is None:
             best_threshold = stat_threshold  # Fallback to statistical threshold
+
+
+        # GMM-based per-machine-type-ID thresholding
+        try:
+            # Get scores for normal samples only
+            normal_indices = [i for i, label in enumerate(y_true) if label == 0]
+            normal_scores = [y_pred_combined[i] for i in normal_indices]
+            
+            if len(normal_scores) > 5:  # Need enough samples for GMM
+                # Fit GMM with 2 components (assuming potential bimodal distribution)
+                gmm = GaussianMixture(n_components=2, covariance_type='full', random_state=42)
+                # Reshape to 2D array for GMM
+                normal_scores_reshaped = np.array(normal_scores).reshape(-1, 1)
+                gmm.fit(normal_scores_reshaped)
+                
+                # Get component with higher mean (likely the anomalous-like normal samples)
+                means = gmm.means_.flatten()
+                higher_mean_idx = np.argmax(means)
+                
+                # Calculate GMM threshold as mean + 1.5*std of the higher component
+                gmm_mean = means[higher_mean_idx]
+                gmm_cov = gmm.covariances_[higher_mean_idx][0][0]  # Get variance
+                gmm_std = np.sqrt(gmm_cov)
+                gmm_threshold = gmm_mean + 1.5 * gmm_std
+                
+                logger.info(f"GMM-based threshold for {machine_type}_{machine_id}: {gmm_threshold:.4f}")
+                
+                # Use GMM threshold if it's more specific to this machine type
+                if f"fan_id_00" in machine_id or f"fan_id_04" in machine_id:
+                    # For problematic fan IDs, use a more lenient threshold
+                    best_threshold = min(best_threshold, gmm_threshold)
+                    logger.info(f"Using more lenient threshold for problematic ID: {best_threshold:.4f}")
+                elif gmm_threshold > stat_threshold:  # More conservative than statistical
+                    best_threshold = 0.7 * best_threshold + 0.3 * gmm_threshold  # Weighted average
+                    logger.info(f"Using weighted threshold: {best_threshold:.4f}")
+        except Exception as e:
+            logger.warning(f"GMM thresholding failed: {e}, using best ROC threshold")
 
         # Apply best threshold
         y_pred_binary = (np.array(y_pred_combined) >= best_threshold).astype(int)

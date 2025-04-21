@@ -18,7 +18,8 @@ fit:
   validation_split: 0.1
   verbose: 1
   early_stopping: true
-  weight_factor: 1.8  # Enhanced general weight factor
+  weight_factor: 1.5  # For non-problematic IDs
+  weighted_machine_ids: []  # Will handle id_00 and id_04 explicitly in code
   apply_sample_weights: true  # Enable sample weighting
 
 # Filter to focus on specific dataset parts
@@ -31,16 +32,16 @@ filter:
 # Model architecture parameters
 model:
   architecture:
-    depth: 3  # Slightly reduced from 4
-    width: 96  # Slightly reduced from 128
-    bottleneck: 24  # Slightly reduced from 32
+    depth: 4  # Keep original depth
+    width: 128  # Keep original width
+    bottleneck: 32  # Keep original bottleneck
     activation: "relu"
-    dropout: 0.15  # Slightly reduced from 0.2
+    dropout: 0.2  # Keep original dropout
     batch_norm: true
     residual: true
   loss: "hybrid"
-  hybrid_loss_alpha: 0.6
-  margin: 0.8  # Reduced from 1.0
+  hybrid_loss_alpha: 0.4  # Reduced from 0.6 to prioritize SSIM
+  margin: 1.0  # Keep original margin value
 
 # Directory paths
 base_directory: "./dataset"

@@ -26,7 +26,7 @@ fit:
 filter:
   enabled: false
   db_level: "0dB"
-  machine_type: "fan"
+  machine_type: "fan" #...
   machine_id: null  # null means all IDs
 
 # Model architecture parameters

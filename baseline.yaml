@@ -40,8 +40,8 @@ model:
     batch_norm: true
     residual: true
   loss: "hybrid"
-  hybrid_loss_alpha: 0.4  # Reduced from 0.6 to prioritize SSIM
-  margin: 1.0  # Keep original margin value
+  hybrid_loss_alpha: 0.3  # Reduced from 0.6 to prioritize SSIM
+  margin: 0.8  # Keep original margin value
 
 # Directory paths
 base_directory: "./dataset"

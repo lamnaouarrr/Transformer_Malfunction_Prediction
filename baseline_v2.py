@@ -495,18 +495,14 @@ def main():
             
             sample_weights = np.ones(len(train_data))
 
-            # Apply enhanced sample weighting for all datasets
+            # Apply enhanced sample weighting
             if param.get("fit", {}).get("apply_sample_weights", False):
-                # Get weight factor from config with enhanced default
-                weight_factor = param.get("fit", {}).get("weight_factor", 1.8)
+                # Apply weights based on configuration rather than hard-coded IDs
+                weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
+                weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
                 
-                # Apply weights more intelligently based on data variance
-                data_variance = np.var(train_data, axis=0).mean()
-                variance_norm = min(max(data_variance / 0.01, 0.8), 1.5)  # Normalize between 0.8 and 1.5
-                
-                # Apply adaptive weight factor based on data characteristics
-                effective_weight = weight_factor * variance_norm
-                sample_weights *= effective_weight
+                if machine_id in weighted_machine_ids:
+                    sample_weights *= weight_factor
                 
                 logger.info(f"Applied adaptive sample weight of {effective_weight:.3f} for {machine_type}_{machine_id}")
 

@@ -55,15 +55,14 @@ def ssim_loss(y_true, y_pred):
 
 def hybrid_loss_with_margin(y_true, y_pred, alpha=0.5, margin=1.0):
     """
-    Combination of MSE, SSIM loss, and a reduced margin term to improve SSIM
+    Combination of MSE, SSIM loss, and a margin term to improve Specificity
     """
     mse = mean_squared_error(y_true, y_pred)
     ssim = ssim_loss(y_true, y_pred)
     error = K.mean(K.square(y_true - y_pred), axis=1)
     normal_mask = K.cast(K.less(error, margin), K.floatx())
     margin_loss = K.mean(normal_mask * error)
-    # Prioritize SSIM by reducing alpha and margin weight
-    return alpha * mse + (1 - alpha) * ssim + 0.1 * margin_loss  # Reduced margin weight from 0.2 to 0.1
+    return alpha * mse + (1 - alpha) * ssim + 0.2 * margin_loss
 
 ########################################################################
 # setup STD I/O
@@ -565,7 +564,7 @@ def main():
         if normal_scores:
             mean_normal = np.mean(normal_scores)
             std_normal = np.std(normal_scores)
-            stat_threshold = mean_normal + 1.5 * std_normal  # k=1.5 (less conservative)
+            stat_threshold = mean_normal + 2 * std_normal  # k=2
             evaluation_result["Statistical Threshold"] = float(stat_threshold)
         else:
             stat_threshold = np.mean(y_pred_combined)  # Fallback
@@ -580,8 +579,8 @@ def main():
         for i, thresh in enumerate(roc_thresholds):
             if i >= len(fpr) or i >= len(tpr):
                 continue
-            # Give more weight to TPR (Recall) relative to FPR
-            score = 2 * tpr[i] - fpr[i]  # Prioritize Recall while still considering Specificity
+            # Score balances TPR (Recall) and FPR (1-Specificity)
+            score = tpr[i] - 2 * fpr[i]  # Weight FPR more to improve Specificity
             if score > best_score:
                 best_score = score
                 best_threshold = thresh

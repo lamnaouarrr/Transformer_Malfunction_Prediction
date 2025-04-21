@@ -11,12 +11,15 @@ fit:
   compile:
     optimizer: "adam"
     loss: "mean_squared_error"
+    weighted_metrics: []  # Add this to fix the warning
   epochs: 150
   batch_size: 512
   shuffle: True
   validation_split: 0.1
   verbose: 1
   early_stopping: true
+  weight_factor: 1.8  # Enhanced general weight factor
+  apply_sample_weights: true  # Enable sample weighting
 
 # Filter to focus on specific dataset parts
 filter:
@@ -28,16 +31,16 @@ filter:
 # Model architecture parameters
 model:
   architecture:
-    depth: 4
-    width: 128
-    bottleneck: 32
+    depth: 3  # Slightly reduced from 4
+    width: 96  # Slightly reduced from 128
+    bottleneck: 24  # Slightly reduced from 32
     activation: "relu"
-    dropout: 0.2
+    dropout: 0.15  # Slightly reduced from 0.2
     batch_norm: true
     residual: true
   loss: "hybrid"
-  hybrid_loss_alpha: 0.6
-  margin: 1.0
+  hybrid_loss_alpha: 0.4  # Reduced from 0.6 to prioritize SSIM
+  margin: 0.8  # Reduced from 1.0
 
 # Directory paths
 base_directory: "./dataset"

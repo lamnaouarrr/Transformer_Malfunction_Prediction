@@ -503,8 +503,6 @@ def main():
                 
                 if machine_id in weighted_machine_ids:
                     sample_weights *= weight_factor
-                
-                logger.info(f"Applied adaptive sample weight of {effective_weight:.3f} for {machine_type}_{machine_id}")
 
             history = model.fit(
                 train_data,

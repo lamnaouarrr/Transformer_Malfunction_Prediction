@@ -64,7 +64,8 @@ def hybrid_loss_with_margin(y_true, y_pred, alpha=0.5, margin=1.0):
     error = K.mean(K.square(y_true - y_pred), axis=1)
     normal_mask = K.cast(K.less(error, margin), K.floatx())
     margin_loss = K.mean(normal_mask * error)
-    return 0.3 * mse + 0.7 * ssim + 0.2 * margin_loss  # Further prioritize SSIM
+    # Prioritize SSIM by reducing alpha and margin weight
+    return alpha * mse + (1 - alpha) * ssim + 0.15 * margin_loss  # Changed margin weight to 0.15
 
 ########################################################################
 # setup STD I/O
@@ -492,15 +493,14 @@ def main():
             sample_weights = np.ones(len(train_data))
 
             # Apply targeted sample weighting
-            problematic_fan_ids = ["id_00", "id_04"]
-            if machine_type == "fan" and machine_id in problematic_fan_ids:
-                if machine_id == "id_00":
-                    sample_weights *= 2.5  # Increased weight for id_00
-                else:
-                    sample_weights *= 2.0  # Keep id_04 at 2.0
+            if machine_type == "fan" and (machine_id == "id_00" or machine_id == "id_04"):
+                # Higher weights for problematic fan IDs
+                sample_weights *= 2.0
             elif param.get("fit", {}).get("apply_sample_weights", False):
+                # Normal weighting for other cases
                 weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
                 weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
+                
                 if machine_id in weighted_machine_ids:
                     sample_weights *= weight_factor
 
@@ -565,9 +565,9 @@ def main():
             evaluation_result["Statistical Threshold"] = float(stat_threshold)
 
         # Optimize threshold using ROC and Precision-Recall curves
-        #fpr, tpr, roc_thresholds = metrics.roc_curve(y_true, y_pred_combined)
-        #precision, recall, pr_thresholds = metrics.precision_recall_curve(y_true, y_pred_combined)
-        fpr, tpr, roc_thresholds = metrics.roc_curve(y_true_val, y_pred_val_combined)
+        fpr, tpr, roc_thresholds = metrics.roc_curve(y_true, y_pred_combined)
+        precision, recall, pr_thresholds = metrics.precision_recall_curve(y_true, y_pred_combined)
+        
         # Balance Specificity and Recall
         best_threshold = None
         best_score = -float('inf')
@@ -575,7 +575,7 @@ def main():
             if i >= len(fpr) or i >= len(tpr):
                 continue
             # Equal weight to TPR (Recall) and FPR
-            score = 1.5 * tpr[i] - fpr[i]  # Equal balance between Recall and Specificity
+            score = tpr[i] - fpr[i]  # Equal balance between Recall and Specificity
             if score > best_score:
                 best_score = score
                 best_threshold = thresh

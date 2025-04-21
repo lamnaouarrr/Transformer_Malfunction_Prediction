@@ -24,7 +24,7 @@ fit:
 
 # Filter to focus on specific dataset parts
 filter:
-  enabled: false
+  enabled: true
   db_level: "0dB"
   machine_type: "fan"
   machine_id: null  # null means all IDs

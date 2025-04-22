@@ -333,13 +333,6 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
     abnormal_files = []
     
 
-    # debug
-    print(f"DEBUG - Breakdown for {machine_id}:")
-    print(f"  Normal files found: {len(normal_files)}")
-    print(f"  Abnormal files found: {len(abnormal_files)}")
-    print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
-    print(f"  Abnormal train: {len(abnormal_train_files)}, Abnormal val: {len(abnormal_val_files)}, Abnormal test: {len(abnormal_test_files)}")
-
     if is_normal:
         normal_files = [str(f) for f in files_in_dir]
         # Try to find matching abnormal directory
@@ -443,6 +436,13 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
     print(f"Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
 
+
+    # debug
+    print(f"DEBUG - Breakdown for {machine_id}:")
+    print(f"  Normal files found: {len(normal_files)}")
+    print(f"  Abnormal files found: {len(abnormal_files)}")
+    print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
+    print(f"  Abnormal train: {len(abnormal_train_files)}, Abnormal val: {len(abnormal_val_files)}, Abnormal test: {len(abnormal_test_files)}")
 
 
 

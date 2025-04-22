@@ -251,6 +251,16 @@ def dataset_generator(target_dir,
     abnormal_files = sorted(list(target_dir_path.joinpath(abnormal_dir_name).glob(f"*.{ext}")))
     abnormal_files = [str(file_path) for file_path in abnormal_files]
     abnormal_labels = np.ones(len(abnormal_files))
+
+    # Print the number of files
+    num_normal = len(normal_files)
+    num_abnormal = len(abnormal_files)
+    print(f"Number of normal samples: {num_normal}")
+    print(f"Number of abnormal samples: {num_abnormal}")
+    print(f"Total samples: {num_normal + num_abnormal}")
+    logger.info(f"Number of normal samples: {num_normal}")
+    logger.info(f"Number of abnormal samples: {num_abnormal}")
+    logger.info(f"Total samples: {num_normal + num_abnormal}")
     
     if len(abnormal_files) == 0:
         logger.exception(f"No {ext} files found in {abnormal_dir_name} directory!")

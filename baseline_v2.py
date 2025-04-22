@@ -255,9 +255,6 @@ def dataset_generator(target_dir,
     # Print the number of files
     num_normal = len(normal_files)
     num_abnormal = len(abnormal_files)
-    print(f"Number of normal samples: {num_normal}")
-    print(f"Number of abnormal samples: {num_abnormal}")
-    print(f"Total samples: {num_normal + num_abnormal}")
     logger.info(f"Number of normal samples: {num_normal}")
     logger.info(f"Number of abnormal samples: {num_abnormal}")
     logger.info(f"Total samples: {num_normal + num_abnormal}")

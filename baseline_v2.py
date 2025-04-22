@@ -434,6 +434,25 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
 
     print(f"Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
+
+    #debug
+    if machine_id == "id_00":
+        print(f"Debug ID 00 - Found normal files: {len(normal_files)}")
+        if len(normal_files) > 0:
+            print(f"Sample path: {normal_files[0]}")
+        print(f"Debug ID 00 - Found abnormal files: {len(abnormal_files)}")
+        if len(abnormal_files) > 0:
+            print(f"Sample path: {abnormal_files[0]}")
+    #debug
+    test_path = Path(param["base_directory"]) / "normal" / "0dB" / "fan" / "id_00"
+    print(f"Path exists: {test_path.exists()}")
+    if test_path.exists():
+        print(f"Files in directory: {list(test_path.glob('*.wav'))}")
+    #debug
+    print(f"Data split info for {machine_id}:")
+    print(f"Normal files: {len(normal_files)}")
+    print(f"Abnormal files: {len(abnormal_files)}")
+
     
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
@@ -811,11 +830,11 @@ def main():
             print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
             history = model.fit(
                 train_data,
-                train_labels_expanded,  # CHANGE THIS LINE - use the expanded labels
+                train_labels_expanded,
                 epochs=param["fit"]["epochs"],
                 batch_size=param["fit"]["batch_size"],
                 shuffle=param["fit"]["shuffle"],
-                validation_data=(val_data, val_labels_expanded),  # And make sure this is also using the expanded labels
+                validation_data=(val_data, val_labels_expanded),
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
                 sample_weight=sample_weights

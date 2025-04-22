@@ -36,7 +36,7 @@ def reorganize_dataset(source_dir, target_dir):
             # Skip directories that don't match our criteria
             continue
             
-        # Copy all audio files from this directory to the appropriate target directory
+        # Copy all audio files from this directory to the appropriate target directory .
         for file in files:
             if file.endswith('.wav'):
                 source_file = os.path.join(root, file)

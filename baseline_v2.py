@@ -682,6 +682,9 @@ def main():
         test_files_pickle = f"{param['pickle_directory']}/test_files_{machine_type}_{machine_id}_{db}.pickle"
         test_labels_pickle = f"{param['pickle_directory']}/test_labels_{machine_type}_{machine_id}_{db}.pickle"
 
+        # Initialize variables
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+
         if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
             os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
             os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
@@ -693,6 +696,7 @@ def main():
             test_labels = load_pickle(test_labels_pickle)
         else:
             train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
+
             if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue

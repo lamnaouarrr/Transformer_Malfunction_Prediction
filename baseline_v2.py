@@ -173,8 +173,6 @@ def file_to_vector_array(file_name,
     if y is None:
         print(f"Failed to load {file_name}")
         return np.empty((0, dims), float)
-    else:
-        print(f"Successfully loaded {file_name}")
 
         
     mel_spectrogram = librosa.feature.melspectrogram(y=y,
@@ -813,14 +811,14 @@ def main():
             print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
             history = model.fit(
                 train_data,
-                train_labels,  # This should now be expanded labels
+                train_labels,  # This should be train_labels_expanded, not train_labels
                 epochs=param["fit"]["epochs"],
                 batch_size=param["fit"]["batch_size"],
                 shuffle=param["fit"]["shuffle"],
-                validation_data=(val_data, val_labels),  # Both should be expanded
+                validation_data=(val_data, val_labels_expanded),
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
-                sample_weight=sample_weights  # Make sure this is adjusted to match the expanded train_data
+                sample_weight=sample_weights
             )
 
             model.save_weights(model_file)

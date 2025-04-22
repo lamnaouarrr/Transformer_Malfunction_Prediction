@@ -237,7 +237,7 @@ def dataset_generator(target_dir,
                       split_ratio=[0.8, 0.1, 0.1],
                       ext="wav"):
     """
-    Generate training, validation, and testing datasets with the new structure.
+    Generate training, validation, and testing datasets matching the actual directory structure.
     
     target_dir: base directory of the dataset
     split_ratio: train/val/test split ratio as [train, val, test]
@@ -246,29 +246,61 @@ def dataset_generator(target_dir,
     logger.info(f"target_dir : {target_dir}")
     target_dir_path = Path(target_dir)
 
-    # Get all files from normal and abnormal directories
+    # Updated paths to match actual directory structure
     normal_files = []
     abnormal_files = []
     
-    # Path to normal data
+    # Modified paths to match the actual structure
     normal_path = target_dir_path / "normal"
+    abnormal_path = target_dir_path / "abnormal"
+    
+    # Handle filter parameters from baseline.yaml
+    filter_enabled = param.get("filter", {}).get("enabled", False)
+    filter_db = param.get("filter", {}).get("db_level")
+    filter_machine = param.get("filter", {}).get("machine_type")
+    filter_id = param.get("filter", {}).get("machine_id")
+    
+    # Function to apply filters when collecting files
+    def should_include_path(path_parts, is_normal):
+        # Path parts should be like: [dataset, normal/abnormal, dB, machine_type, machine_id]
+        if len(path_parts) < 5:
+            return False
+            
+        db_level = path_parts[-3]
+        machine_type = path_parts[-2]
+        machine_id = path_parts[-1]
+        
+        if filter_enabled:
+            if filter_db and db_level != filter_db:
+                return False
+            if filter_machine and machine_type != filter_machine:
+                return False
+            if filter_id and machine_id != filter_id:
+                return False
+                
+        return True
+    
+    # Walk through normal files with the actual structure
     for db_dir in normal_path.glob("*"):
         if db_dir.is_dir():
             for machine_type_dir in db_dir.glob("*"):
                 if machine_type_dir.is_dir():
                     for machine_id_dir in machine_type_dir.glob("*"):
                         if machine_id_dir.is_dir():
-                            normal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
+                            path_parts = machine_id_dir.parts
+                            if should_include_path(path_parts, True):
+                                normal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
     
-    # Path to abnormal data
-    abnormal_path = target_dir_path / "abnormal"
+    # Walk through abnormal files with the actual structure
     for db_dir in abnormal_path.glob("*"):
         if db_dir.is_dir():
             for machine_type_dir in db_dir.glob("*"):
                 if machine_type_dir.is_dir():
                     for machine_id_dir in machine_type_dir.glob("*"):
                         if machine_id_dir.is_dir():
-                            abnormal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
+                            path_parts = machine_id_dir.parts
+                            if should_include_path(path_parts, False):
+                                abnormal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
     
     # Create labels (0 for normal, 1 for abnormal)
     normal_labels = np.zeros(len(normal_files))
@@ -490,30 +522,31 @@ def main():
     total_normal_files = 0
     total_abnormal_files = 0
     
-    # Get all machine directories
-    all_machine_dirs = []
-    for db_dir in base_path.glob("*"):
+    # Updated to match the actual directory structure
+    normal_path = Path(param["base_directory"]) / "normal"
+    abnormal_path = Path(param["base_directory"]) / "abnormal"
+    
+    # Count normal files
+    for db_dir in normal_path.glob("*"):
         if db_dir.is_dir():
             for machine_type_dir in db_dir.glob("*"):
                 if machine_type_dir.is_dir():
                     for machine_id_dir in machine_type_dir.glob("*"):
-                        if machine_id_dir.is_dir() and "/id_" in str(machine_id_dir):
-                            all_machine_dirs.append(machine_id_dir)
+                        if machine_id_dir.is_dir():
+                            normal_count = len(list(machine_id_dir.glob("*.wav")))
+                            total_normal_files += normal_count
     
-    # Count normal and abnormal files across all machine directories
-    for machine_dir in all_machine_dirs:
-        normal_path = machine_dir / "normal"
-        abnormal_path = machine_dir / "abnormal"
-        
-        if normal_path.exists():
-            normal_count = len(list(normal_path.glob("*.wav")))
-            total_normal_files += normal_count
-        
-        if abnormal_path.exists():
-            abnormal_count = len(list(abnormal_path.glob("*.wav")))
-            total_abnormal_files += abnormal_count
+    # Count abnormal files
+    for db_dir in abnormal_path.glob("*"):
+        if db_dir.is_dir():
+            for machine_type_dir in db_dir.glob("*"):
+                if machine_type_dir.is_dir():
+                    for machine_id_dir in machine_type_dir.glob("*"):
+                        if machine_id_dir.is_dir():
+                            abnormal_count = len(list(machine_id_dir.glob("*.wav")))
+                            total_abnormal_files += abnormal_count
     
-    # log the total counts
+    # Log the total counts
     logger.info(f"Total normal files in dataset: {total_normal_files}")
     logger.info(f"Total abnormal files in dataset: {total_abnormal_files}")
     logger.info(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
@@ -526,25 +559,57 @@ def main():
         filter_machine = param["filter"].get("machine_type")
         filter_id = param["filter"].get("machine_id")
         
-        pattern = ""
-        if filter_db:
-            pattern += f"{filter_db}/"
-        else:
-            pattern += "*/"
-        if filter_machine:
-            pattern += f"{filter_machine}/"
-        else:
-            pattern += "*/"
-        if filter_id:
-            pattern += f"{filter_id}"
-        else:
-            pattern += "*"
-        full_pattern = str(base_path / pattern)
-        logger.info(f"Filtering with pattern: {full_pattern}")
-        dirs = sorted(glob.glob(full_pattern))
+        # Update to handle the new structure with top-level normal/abnormal
+        dirs = []
+        
+        # Process normal directories
+        normal_base = base_path / "normal"
+        if normal_base.exists():
+            pattern_parts = []
+            if filter_db:
+                pattern_parts.append(filter_db)
+            else:
+                pattern_parts.append("*")
+            if filter_machine:
+                pattern_parts.append(filter_machine)
+            else:
+                pattern_parts.append("*")
+            if filter_id:
+                pattern_parts.append(filter_id)
+            else:
+                pattern_parts.append("*")
+            
+            pattern = str(normal_base.joinpath(*pattern_parts))
+            normal_dirs = sorted(glob.glob(pattern))
+            dirs.extend(normal_dirs)
+        
+        # Process abnormal directories
+        abnormal_base = base_path / "abnormal"
+        if abnormal_base.exists():
+            pattern_parts = []
+            if filter_db:
+                pattern_parts.append(filter_db)
+            else:
+                pattern_parts.append("*")
+            if filter_machine:
+                pattern_parts.append(filter_machine)
+            else:
+                pattern_parts.append("*")
+            if filter_id:
+                pattern_parts.append(filter_id)
+            else:
+                pattern_parts.append("*")
+            
+            pattern = str(abnormal_base.joinpath(*pattern_parts))
+            abnormal_dirs = sorted(glob.glob(pattern))
+            dirs.extend(abnormal_dirs)
     else:
-        dirs = sorted(glob.glob(str(base_path / "*/*/*")))
+        # Get all directories with machine IDs
+        normal_dirs = sorted(glob.glob(str(base_path / "normal" / "*" / "*" / "*")))
+        abnormal_dirs = sorted(glob.glob(str(base_path / "abnormal" / "*" / "*" / "*")))
+        dirs = normal_dirs + abnormal_dirs
 
+    # Only include directories that contain machine IDs
     dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
 
     result_file = f"{param['result_directory']}/resultv2.yaml"
@@ -564,11 +629,22 @@ def main():
         print(f"[{dir_idx + 1}/{len(dirs)}] {target_dir}")
 
         parts = Path(target_dir).parts
-        db = parts[-3]
-        machine_type = parts[-2]
-        machine_id = parts[-1]
-
-        logger.info(f"Processing: db={db}, machine_type={machine_type}, machine_id={machine_id}")
+        # Adjust for the new structure (normal/abnormal is at the beginning)
+        # Format will be like: [..., 'normal'/'abnormal', '0dB', 'fan', 'id_00']
+        for i, part in enumerate(parts):
+            if part in ['normal', 'abnormal']:
+                condition = part  # normal or abnormal
+                db = parts[i+1]
+                machine_type = parts[i+2]
+                machine_id = parts[i+3]
+                break
+        else:
+            # If the loop completes without finding normal/abnormal
+            logger.warning(f"Could not parse directory structure properly: {target_dir}")
+            # Default to assuming the last 3 parts are what we need
+            db = parts[-3]
+            machine_type = parts[-2]
+            machine_id = parts[-1]
 
         evaluation_result = {}
         train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"

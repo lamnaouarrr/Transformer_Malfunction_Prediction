@@ -73,14 +73,20 @@ class Visualizer:
     def __init__(self):
         pass
 
-    def loss_plot(self, history):
-        plt.figure(figsize=(30, 20))
+    def loss_plot(self, history, machine_type=None, machine_id=None, db=None):
+        fig_size = param.get("visualization", {}).get("figure_size", [30, 20])
+        plt.figure(figsize=(fig_size[0], fig_size[1]))
+        
+        # Create title with machine information
+        title_info = ""
+        if machine_type and machine_id and db:
+            title_info = f" for {machine_type} {machine_id} {db}"
         
         # Plot loss
         plt.subplot(2, 1, 1)
         plt.plot(history.history['loss'])
         plt.plot(history.history['val_loss'])
-        plt.title("Model loss")
+        plt.title(f"Model loss{title_info}")
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.legend(["Train", "Validation"], loc="upper right")
@@ -89,7 +95,7 @@ class Visualizer:
         plt.subplot(2, 1, 2)
         plt.plot(history.history['accuracy'])
         plt.plot(history.history['val_accuracy'])
-        plt.title("Model accuracy")
+        plt.title(f"Model accuracy{title_info}")
         plt.xlabel("Epoch")
         plt.ylabel("Accuracy")
         plt.legend(["Train", "Validation"], loc="lower right")
@@ -134,10 +140,20 @@ def demux_wav(wav_name, channel=0):
 ########################################################################
 # feature extractor
 ########################################################################
-def augment_spectrogram(spectrogram, max_mask_freq=10, max_mask_time=10, n_freq_masks=2, n_time_masks=2, noise_level=0.01):
+def augment_spectrogram(spectrogram, param=None):
     """
     Apply subtle augmentations to spectrograms: frequency/time masking and noise injection.
     """
+    if param is None:
+        param = {}
+    
+    aug_config = param.get("feature", {}).get("augmentation", {})
+    max_mask_freq = aug_config.get("max_mask_freq", 10)
+    max_mask_time = aug_config.get("max_mask_time", 10)
+    n_freq_masks = aug_config.get("n_freq_masks", 2)
+    n_time_masks = aug_config.get("n_time_masks", 2)
+    noise_level = aug_config.get("noise_level", 0.01)
+
     # Frequency masking
     freq_mask_param = np.random.randint(0, max_mask_freq)
     for _ in range(n_freq_masks):
@@ -174,6 +190,9 @@ def file_to_vector_array(file_name,
         print(f"Failed to load {file_name}")
         return np.empty((0, dims), float)
 
+    if augment and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
+        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
+
         
     mel_spectrogram = librosa.feature.melspectrogram(y=y,
                                                     sr=sr,
@@ -183,8 +202,8 @@ def file_to_vector_array(file_name,
                                                     power=power)
     log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
     
-    if augment:
-        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram)
+    if augment and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
+        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
     
     vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
     if vectorarray_size < 1:
@@ -289,7 +308,7 @@ def list_to_vector_array_with_labels(file_list, labels,
 
 
 
-def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="wav"):
+def dataset_generator(target_dir, param=None):
     """
     Generate training, validation, and testing datasets for the new directory structure.
     
@@ -302,6 +321,9 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
     
     if param is None:
         param = {}
+    
+    split_ratio = param.get("dataset", {}).get("split_ratio", [0.8, 0.1, 0.1])
+    ext = param.get("dataset", {}).get("file_extension", "wav")
     
     # Parse the target directory path to extract db, machine_type, and machine_id
     parts = Path(target_dir).parts
@@ -465,7 +487,15 @@ def keras_model(input_dim, config=None):
     use_batch_norm = config.get("batch_norm", False)
     use_residual = config.get("residual", False)
     activation = config.get("activation", "relu")
-    weight_decay = 1e-4  # Add weight decay
+    weight_decay = config.get("weight_decay", 1e-4)
+    
+    # Get attention parameters
+    attention_config = config.get("attention", {})
+    use_attention = attention_config.get("enabled", True)
+    num_heads = attention_config.get("num_heads", 2)
+    key_dim_factor = attention_config.get("key_dim_factor", 0.5)
+    bottleneck_weight = attention_config.get("bottleneck_weight", 0.7)
+    attention_weight = attention_config.get("attention_weight", 0.3)
     
     inputLayer = Input(shape=(input_dim,))
     
@@ -493,15 +523,19 @@ def keras_model(input_dim, config=None):
         if use_residual and layer_input.shape[-1] == layer_width:
             x = Add()([x, layer_input])
     
-    # Bottleneck layer with reduced attention heads
+    # Bottleneck layer with attention
     bottleneck_output = Dense(bottleneck, activation=activation, name="bottleneck")(x)
-    # Reshape for attention: (batch_size, 1, bottleneck)
-    attn_input = tf.expand_dims(bottleneck_output, axis=1)
-    # Reduce number of attention heads from 4 to 2
-    attn_output = MultiHeadAttention(num_heads=2, key_dim=bottleneck // 2)(attn_input, attn_input)
-    attn_output = tf.squeeze(attn_output, axis=1)  # (batch_size, bottleneck)
-    # Reduce attention influence with lower weighting
-    x = 0.7 * bottleneck_output + 0.3 * attn_output  # Modified residual connection
+    
+    if use_attention:
+        # Reshape for attention: (batch_size, 1, bottleneck)
+        attn_input = tf.expand_dims(bottleneck_output, axis=1)
+        # Apply attention with configurable parameters
+        attn_output = MultiHeadAttention(num_heads=num_heads, key_dim=int(bottleneck * key_dim_factor))(attn_input, attn_input)
+        attn_output = tf.squeeze(attn_output, axis=1)  # (batch_size, bottleneck)
+        # Use configurable weights for attention mix
+        x = bottleneck_weight * bottleneck_output + attention_weight * attn_output
+    else:
+        x = bottleneck_output
     
     # Decoder
     for i in range(depth - 1):
@@ -801,20 +835,24 @@ def main():
             model.compile(**compile_params)
             
             callbacks = []
-            if param["fit"].get("early_stopping", False):
+            early_stopping_config = param.get("fit", {}).get("early_stopping", {})
+            if early_stopping_config.get("enabled", False):
                 callbacks.append(tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=10,
-                    min_delta=0.001,
-                    restore_best_weights=True
+                    monitor=early_stopping_config.get("monitor", "val_loss"),
+                    patience=early_stopping_config.get("patience", 10),
+                    min_delta=early_stopping_config.get("min_delta", 0.001),
+                    restore_best_weights=early_stopping_config.get("restore_best_weights", True)
                 ))
             
             sample_weights = np.ones(len(train_data))
 
             # Apply targeted sample weighting
-            if machine_type == "fan" and (machine_id == "id_00" or machine_id == "id_04"):
-                # Higher weights for problematic fan IDs
-                sample_weights *= 2.0
+            special_case_weights = param.get("fit", {}).get("special_case_weights", {})
+            special_case_key = f"{machine_type}_{machine_id}"
+            
+            if special_case_key in special_case_weights:
+                # Apply special case weight
+                sample_weights *= special_case_weights[special_case_key]
             elif param.get("fit", {}).get("apply_sample_weights", False):
                 # Normal weighting for other cases
                 weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
@@ -838,7 +876,7 @@ def main():
             )
 
             model.save_weights(model_file)
-            visualizer.loss_plot(history)
+            visualizer.loss_plot(history, machine_type, machine_id, db)
             visualizer.save_figure(history_img)
 
 
@@ -868,12 +906,16 @@ def main():
             except Exception as e:
                 logger.warning(f"Error processing file: {file_name}, error: {e}")
                 # If there's an error, use a default value (e.g., 0.5)
-                y_pred.append(0.5)
+                default_prediction = param.get("dataset", {}).get("default_prediction", 0.5)
+                y_pred.append(default_prediction)
 
-        # Optimize threshold using ROC curve
-        fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
-        optimal_idx = np.argmax(tpr - fpr)
-        optimal_threshold = thresholds[optimal_idx]
+        # Optimize threshold using ROC curve if enabled
+        if param.get("model", {}).get("threshold_optimization", True):
+            fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
+            optimal_idx = np.argmax(tpr - fpr)
+            optimal_threshold = thresholds[optimal_idx]
+        else:
+            optimal_threshold = 0.5  # Default threshold
         logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
 
         # Convert predictions to binary using optimal threshold

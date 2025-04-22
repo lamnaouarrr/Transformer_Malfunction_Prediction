@@ -433,6 +433,9 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
     logger.info(f"train_file num : {len(train_files)} (normal: {len(normal_train_files)}, abnormal: {len(abnormal_train_files)})")
     logger.info(f"val_file num : {len(val_files)} (normal: {len(normal_val_files)}, abnormal: {len(abnormal_val_files)})")
     logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
+
+    print(f"Looking for files in: {target_dir}")
+    print(f"Found {len(files_in_dir)} files")
     
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 

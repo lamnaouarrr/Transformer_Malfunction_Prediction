@@ -233,6 +233,57 @@ def list_to_vector_array(file_list,
         
     return dataset[:total_size, :]
 
+def list_to_vector_array_with_labels(file_list, labels,
+                         msg="calc...",
+                         n_mels=64,
+                         frames=5,
+                         n_fft=1024,
+                         hop_length=512,
+                         power=2.0,
+                         augment=False):
+    """Generate vector array and corresponding expanded labels from file list"""
+    dims = n_mels * frames
+    dataset = None
+    expanded_labels = None
+    total_size = 0
+
+    for idx in tqdm(range(len(file_list)), desc=msg):
+        vector_array = file_to_vector_array(file_list[idx],
+                                           n_mels=n_mels,
+                                           frames=frames,
+                                           n_fft=n_fft,
+                                           hop_length=hop_length,
+                                           power=power,
+                                           augment=augment)
+        
+        if vector_array.shape[0] == 0:
+            continue
+
+        # Create labels array for this file
+        file_labels = np.full(vector_array.shape[0], labels[idx])
+        
+        if dataset is None:
+            # Estimate total size to preallocate arrays
+            avg_vectors_per_file = vector_array.shape[0]
+            estimated_total_size = avg_vectors_per_file * len(file_list)
+            dataset = np.zeros((estimated_total_size, dims), float)
+            expanded_labels = np.zeros(estimated_total_size, float)
+        
+        # Make sure we have enough space
+        if total_size + vector_array.shape[0] > dataset.shape[0]:
+            dataset = np.resize(dataset, (dataset.shape[0] * 2, dims))
+            expanded_labels = np.resize(expanded_labels, dataset.shape[0])
+        
+        dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
+        expanded_labels[total_size:total_size + vector_array.shape[0]] = file_labels
+        total_size += vector_array.shape[0]
+
+    if dataset is None:
+        logger.warning("No valid data was found in the file list.")
+        return np.empty((0, dims), float), np.array([])
+        
+    return dataset[:total_size, :], expanded_labels[:total_size]
+
 def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="wav"):
     """
     Generate training, validation, and testing datasets for the new directory structure.
@@ -646,40 +697,47 @@ def main():
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue
 
-            train_data = list_to_vector_array(train_files,
-                                            msg="generate train_dataset",
-                                            n_mels=param["feature"]["n_mels"],
-                                            frames=param["feature"]["frames"],
-                                            n_fft=param["feature"]["n_fft"],
-                                            hop_length=param["feature"]["hop_length"],
-                                            power=param["feature"]["power"],
-                                            augment=True)  # Apply augmentation to normal data
-                                            
-            val_data = list_to_vector_array(val_files,
-                                        msg="generate validation_dataset",
-                                        n_mels=param["feature"]["n_mels"],
-                                        frames=param["feature"]["frames"],
-                                        n_fft=param["feature"]["n_fft"],
-                                        hop_length=param["feature"]["hop_length"],
-                                        power=param["feature"]["power"],
-                                        augment=False)  # No augmentation for validation
-            
-            if train_data.shape[0] == 0 or val_data.shape[0] == 0:
-                logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-                continue
+        train_data, train_labels_expanded = list_to_vector_array_with_labels(
+            train_files,
+            train_labels,
+            msg="generate train_dataset",
+            n_mels=param["feature"]["n_mels"],
+            frames=param["feature"]["frames"],
+            n_fft=param["feature"]["n_fft"],
+            hop_length=param["feature"]["hop_length"],
+            power=param["feature"]["power"],
+            augment=True
+        )
+        print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
 
-            save_pickle(train_pickle, train_data)
-            save_pickle(train_labels_pickle, train_labels)
-            save_pickle(val_pickle, val_data)
-            save_pickle(val_labels_pickle, val_labels)
-            save_pickle(test_files_pickle, test_files)
-            save_pickle(test_labels_pickle, test_labels)
+        val_data, val_labels_expanded = list_to_vector_array_with_labels(
+            val_files,
+            val_labels,
+            msg="generate validation_dataset",
+            n_mels=param["feature"]["n_mels"],
+            frames=param["feature"]["frames"],
+            n_fft=param["feature"]["n_fft"],
+            hop_length=param["feature"]["hop_length"],
+            power=param["feature"]["power"],
+            augment=False
+        )
+
+        if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
+            continue
+
+        save_pickle(train_pickle, train_data)
+        save_pickle(train_labels_pickle, train_labels_expanded)
+        save_pickle(val_pickle, val_data)
+        save_pickle(val_labels_pickle, val_labels_expanded)
+        save_pickle(test_files_pickle, test_files)
+        save_pickle(test_labels_pickle, test_labels)
 
         # Print shapes
         logger.info(f"Training data shape: {train_data.shape}")
-        logger.info(f"Training labels shape: {train_labels.shape}")
+        logger.info(f"Training labels shape: {train_labels_expanded.shape}")
         logger.info(f"Validation data shape: {val_data.shape}")
-        logger.info(f"Validation labels shape: {val_labels.shape}")
+        logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
         logger.info(f"Number of test files: {len(test_files)}")
 
         
@@ -737,16 +795,18 @@ def main():
                 if machine_id in weighted_machine_ids:
                     sample_weights *= weight_factor
 
+            
+            print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
             history = model.fit(
                 train_data,
-                train_labels,  # Changed from train_data to train_labels
+                train_labels,  # This should now be expanded labels
                 epochs=param["fit"]["epochs"],
                 batch_size=param["fit"]["batch_size"],
                 shuffle=param["fit"]["shuffle"],
-                validation_data=(val_data, val_labels),  # Use validation data and labels
+                validation_data=(val_data, val_labels),  # Both should be expanded
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
-                sample_weight=sample_weights
+                sample_weight=sample_weights  # Make sure this is adjusted to match the expanded train_data
             )
 
             model.save_weights(model_file)

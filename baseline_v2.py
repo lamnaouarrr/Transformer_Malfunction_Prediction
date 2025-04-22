@@ -589,11 +589,6 @@ def main():
     # Updated to match the actual directory structure
     normal_path = Path(param["base_directory"]) / "normal"
     abnormal_path = Path(param["base_directory"]) / "abnormal"
-
-    #debug
-    normal_count = sum(1 for label in train_labels_expanded if label == 0)
-    abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
-    print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
     
     # Count normal files
     for db_dir in normal_path.glob("*"):
@@ -767,6 +762,11 @@ def main():
         logger.info(f"Validation data shape: {val_data.shape}")
         logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
         logger.info(f"Number of test files: {len(test_files)}")
+
+        #debug
+        normal_count = sum(1 for label in train_labels_expanded if label == 0)
+        abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
+        print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
 
         
         print("============== MODEL TRAINING ==============")

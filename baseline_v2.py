@@ -234,24 +234,55 @@ def list_to_vector_array(file_list,
     return dataset[:total_size, :]
 
 def dataset_generator(target_dir,
-                      normal_dir_name="normal",
-                      abnormal_dir_name="abnormal",
+                      split_ratio=[0.8, 0.1, 0.1],
                       ext="wav"):
+    """
+    Generate training, validation, and testing datasets with the new structure.
+    
+    target_dir: base directory of the dataset
+    split_ratio: train/val/test split ratio as [train, val, test]
+    ext: file extension for audio files
+    """
     logger.info(f"target_dir : {target_dir}")
     target_dir_path = Path(target_dir)
 
-    normal_files = sorted(list(target_dir_path.joinpath(normal_dir_name).glob(f"*.{ext}")))
-    normal_files = [str(file_path) for file_path in normal_files]
-    normal_labels = np.zeros(len(normal_files))
+    # Get all files from normal and abnormal directories
+    normal_files = []
+    abnormal_files = []
     
-    if len(normal_files) == 0:
-        logger.exception(f"No {ext} files found in {normal_dir_name} directory!")
-        return [], [], [], []
-
-    abnormal_files = sorted(list(target_dir_path.joinpath(abnormal_dir_name).glob(f"*.{ext}")))
-    abnormal_files = [str(file_path) for file_path in abnormal_files]
+    # Path to normal data
+    normal_path = target_dir_path / "normal"
+    for db_dir in normal_path.glob("*"):
+        if db_dir.is_dir():
+            for machine_type_dir in db_dir.glob("*"):
+                if machine_type_dir.is_dir():
+                    for machine_id_dir in machine_type_dir.glob("*"):
+                        if machine_id_dir.is_dir():
+                            normal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
+    
+    # Path to abnormal data
+    abnormal_path = target_dir_path / "abnormal"
+    for db_dir in abnormal_path.glob("*"):
+        if db_dir.is_dir():
+            for machine_type_dir in db_dir.glob("*"):
+                if machine_type_dir.is_dir():
+                    for machine_id_dir in machine_type_dir.glob("*"):
+                        if machine_id_dir.is_dir():
+                            abnormal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
+    
+    # Create labels (0 for normal, 1 for abnormal)
+    normal_labels = np.zeros(len(normal_files))
     abnormal_labels = np.ones(len(abnormal_files))
-
+    
+    # Check if files were found
+    if len(normal_files) == 0:
+        logger.exception(f"No {ext} files found in normal directory!")
+        return [], [], [], [], [], [], [], []
+    
+    if len(abnormal_files) == 0:
+        logger.exception(f"No {ext} files found in abnormal directory!")
+        return [], [], [], [], [], [], [], []
+    
     # Print the number of files
     num_normal = len(normal_files)
     num_abnormal = len(abnormal_files)
@@ -259,19 +290,67 @@ def dataset_generator(target_dir,
     logger.info(f"Number of abnormal samples: {num_abnormal}")
     logger.info(f"Total samples: {num_normal + num_abnormal}")
     
-    if len(abnormal_files) == 0:
-        logger.exception(f"No {ext} files found in {abnormal_dir_name} directory!")
-        return [], [], [], []
-
-    train_files = normal_files[len(abnormal_files):]
-    train_labels = normal_labels[len(abnormal_files):]
-    eval_files = np.concatenate((normal_files[:len(abnormal_files)], abnormal_files), axis=0)
-    eval_labels = np.concatenate((normal_labels[:len(abnormal_files)], abnormal_labels), axis=0)
+    # Shuffle files while keeping labels aligned
+    normal_indices = np.arange(len(normal_files))
+    abnormal_indices = np.arange(len(abnormal_files))
+    np.random.shuffle(normal_indices)
+    np.random.shuffle(abnormal_indices)
     
-    logger.info(f"train_file num : {len(train_files)}")
-    logger.info(f"eval_file  num : {len(eval_files)}")
-
-    return train_files, train_labels, eval_files, eval_labels
+    normal_files = [normal_files[i] for i in normal_indices]
+    normal_labels = normal_labels[normal_indices]
+    abnormal_files = [abnormal_files[i] for i in abnormal_indices]
+    abnormal_labels = abnormal_labels[abnormal_indices]
+    
+    # Calculate split indices
+    n_normal_train = int(num_normal * split_ratio[0])
+    n_normal_val = int(num_normal * split_ratio[1])
+    n_abnormal_train = int(num_abnormal * split_ratio[0])
+    n_abnormal_val = int(num_abnormal * split_ratio[1])
+    
+    # Split normal files
+    normal_train_files = normal_files[:n_normal_train]
+    normal_train_labels = normal_labels[:n_normal_train]
+    normal_val_files = normal_files[n_normal_train:n_normal_train+n_normal_val]
+    normal_val_labels = normal_labels[n_normal_train:n_normal_train+n_normal_val]
+    normal_test_files = normal_files[n_normal_train+n_normal_val:]
+    normal_test_labels = normal_labels[n_normal_train+n_normal_val:]
+    
+    # Split abnormal files
+    abnormal_train_files = abnormal_files[:n_abnormal_train]
+    abnormal_train_labels = abnormal_labels[:n_abnormal_train]
+    abnormal_val_files = abnormal_files[n_abnormal_train:n_abnormal_train+n_abnormal_val]
+    abnormal_val_labels = abnormal_labels[n_abnormal_train:n_abnormal_train+n_abnormal_val]
+    abnormal_test_files = abnormal_files[n_abnormal_train+n_abnormal_val:]
+    abnormal_test_labels = abnormal_labels[n_abnormal_train+n_abnormal_val:]
+    
+    # Combine normal and abnormal datasets
+    train_files = normal_train_files + abnormal_train_files
+    train_labels = np.concatenate((normal_train_labels, abnormal_train_labels))
+    val_files = normal_val_files + abnormal_val_files
+    val_labels = np.concatenate((normal_val_labels, abnormal_val_labels))
+    test_files = normal_test_files + abnormal_test_files
+    test_labels = np.concatenate((normal_test_labels, abnormal_test_labels))
+    
+    # Shuffle the training, validation and test sets
+    train_indices = np.arange(len(train_files))
+    val_indices = np.arange(len(val_files))
+    test_indices = np.arange(len(test_files))
+    np.random.shuffle(train_indices)
+    np.random.shuffle(val_indices)
+    np.random.shuffle(test_indices)
+    
+    train_files = [train_files[i] for i in train_indices]
+    train_labels = train_labels[train_indices]
+    val_files = [val_files[i] for i in val_indices]
+    val_labels = val_labels[val_indices]
+    test_files = [test_files[i] for i in test_indices]
+    test_labels = test_labels[test_indices]
+    
+    logger.info(f"train_file num : {len(train_files)} (normal: {n_normal_train}, abnormal: {n_abnormal_train})")
+    logger.info(f"val_file num : {len(val_files)} (normal: {n_normal_val}, abnormal: {n_abnormal_val})")
+    logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
+    
+    return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
 ########################################################################
 # keras model
@@ -344,14 +423,49 @@ def keras_model(input_dim, config=None):
             x = Add()([x, layer_input])
     
     if use_residual and first_layer_output.shape[-1] == input_dim:
-        x = Dense(input_dim, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
-        # For binary cross-entropy, we shouldn't use residual connection at the output
-        # since we need values between 0 and 1
+        x = Dense(1, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
         output = x
     else:
-        output = Dense(input_dim, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
+        output = Dense(1, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
 
     return Model(inputs=inputLayer, outputs=output)
+
+
+def normalize_spectrograms(spectrograms, method="minmax"):
+    """
+    Normalize spectrograms using different methods.
+    
+    Args:
+        spectrograms: Array of spectrograms to normalize
+        method: Normalization method ('minmax', 'zscore', or 'log')
+        
+    Returns:
+        Normalized spectrograms
+    """
+    if method == "minmax":
+        # Min-max normalization to range [0, 1]
+        min_val = np.min(spectrograms)
+        max_val = np.max(spectrograms)
+        if max_val == min_val:
+            return np.zeros_like(spectrograms)
+        return (spectrograms - min_val) / (max_val - min_val)
+    
+    elif method == "zscore":
+        # Z-score normalization (mean=0, std=1)
+        mean = np.mean(spectrograms)
+        std = np.std(spectrograms)
+        if std == 0:
+            return np.zeros_like(spectrograms)
+        return (spectrograms - mean) / std
+    
+    elif method == "log":
+        # Log normalization
+        return np.log1p(spectrograms)
+    
+    else:
+        logger.warning(f"Unknown normalization method: {method}, returning original data")
+        return spectrograms
+
 
 ########################################################################
 # main
@@ -464,14 +578,27 @@ def main():
         history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
         evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
 
+       
         print("============== DATASET_GENERATOR ==============")
-        if os.path.exists(train_pickle) and os.path.exists(eval_files_pickle) and os.path.exists(eval_labels_pickle):
+        train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
+        train_labels_pickle = f"{param['pickle_directory']}/train_labels_{machine_type}_{machine_id}_{db}.pickle"
+        val_pickle = f"{param['pickle_directory']}/val_{machine_type}_{machine_id}_{db}.pickle"
+        val_labels_pickle = f"{param['pickle_directory']}/val_labels_{machine_type}_{machine_id}_{db}.pickle"
+        test_files_pickle = f"{param['pickle_directory']}/test_files_{machine_type}_{machine_id}_{db}.pickle"
+        test_labels_pickle = f"{param['pickle_directory']}/test_labels_{machine_type}_{machine_id}_{db}.pickle"
+
+        if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
+            os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
+            os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
             train_data = load_pickle(train_pickle)
-            eval_files = load_pickle(eval_files_pickle)
-            eval_labels = load_pickle(eval_labels_pickle)
+            train_labels = load_pickle(train_labels_pickle)
+            val_data = load_pickle(val_pickle)
+            val_labels = load_pickle(val_labels_pickle)
+            test_files = load_pickle(test_files_pickle)
+            test_labels = load_pickle(test_labels_pickle)
         else:
-            train_files, train_labels, eval_files, eval_labels = dataset_generator(target_dir)
-            if len(train_files) == 0 or len(eval_files) == 0:
+            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir)
+            if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue
 
@@ -483,19 +610,35 @@ def main():
                                             hop_length=param["feature"]["hop_length"],
                                             power=param["feature"]["power"],
                                             augment=True)  # Apply augmentation to normal data
+                                            
+            val_data = list_to_vector_array(val_files,
+                                        msg="generate validation_dataset",
+                                        n_mels=param["feature"]["n_mels"],
+                                        frames=param["feature"]["frames"],
+                                        n_fft=param["feature"]["n_fft"],
+                                        hop_length=param["feature"]["hop_length"],
+                                        power=param["feature"]["power"],
+                                        augment=False)  # No augmentation for validation
             
-            if train_data.shape[0] == 0:
-                logger.error(f"No valid training data for {evaluation_result_key}, skipping...")
+            if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+                logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
                 continue
 
             save_pickle(train_pickle, train_data)
-            save_pickle(eval_files_pickle, eval_files)
-            save_pickle(eval_labels_pickle, eval_labels)
+            save_pickle(train_labels_pickle, train_labels)
+            save_pickle(val_pickle, val_data)
+            save_pickle(val_labels_pickle, val_labels)
+            save_pickle(test_files_pickle, test_files)
+            save_pickle(test_labels_pickle, test_labels)
 
-        # After loading or creating train_data
-        train_vectors_count = train_data.shape[0]
-        logger.info(f"Number of training feature vectors: {train_vectors_count}")
+        # Print shapes
+        logger.info(f"Training data shape: {train_data.shape}")
+        logger.info(f"Training labels shape: {train_labels.shape}")
+        logger.info(f"Validation data shape: {val_data.shape}")
+        logger.info(f"Validation labels shape: {val_labels.shape}")
+        logger.info(f"Number of test files: {len(test_files)}")
 
+        
         print("============== MODEL TRAINING ==============")
         model_config = param.get("model", {}).get("architecture", {})
         model = keras_model(
@@ -535,7 +678,6 @@ def main():
                     min_delta=0.001,
                     restore_best_weights=True
                 ))
-
             
             sample_weights = np.ones(len(train_data))
 
@@ -553,149 +695,80 @@ def main():
 
             history = model.fit(
                 train_data,
-                train_data,
+                train_labels,  # Changed from train_data to train_labels
                 epochs=param["fit"]["epochs"],
                 batch_size=param["fit"]["batch_size"],
                 shuffle=param["fit"]["shuffle"],
-                validation_split=param["fit"]["validation_split"],
+                validation_data=(val_data, val_labels),  # Use validation data and labels
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
                 sample_weight=sample_weights
             )
 
+            model.save_weights(model_file)
             visualizer.loss_plot(history)
             visualizer.save_figure(history_img)
 
-        print("============== EVALUATION ==============")
-        y_pred_global = [0. for _ in eval_labels]
-        y_pred_feature = [0. for _ in eval_labels]
-        y_true = eval_labels
-        original_specs = []
-        reconstructed_specs = []
 
-        for num, file_name in tqdm(enumerate(eval_files), total=len(eval_files)):
+        print("============== EVALUATION ==============")
+        y_pred = []
+        y_true = test_labels
+
+        for num, file_name in tqdm(enumerate(test_files), total=len(test_files)):
             try:
                 data = file_to_vector_array(file_name,
-                                           n_mels=param["feature"]["n_mels"],
-                                           frames=param["feature"]["frames"],
-                                           n_fft=param["feature"]["n_fft"],
-                                           hop_length=param["feature"]["hop_length"],
-                                           power=param["feature"]["power"],
-                                           augment=False)  # No augmentation during eval
-                                           
+                                        n_mels=param["feature"]["n_mels"],
+                                        frames=param["feature"]["frames"],
+                                        n_fft=param["feature"]["n_fft"],
+                                        hop_length=param["feature"]["hop_length"],
+                                        power=param["feature"]["power"],
+                                        augment=False)  # No augmentation during eval
+                                        
                 if data.shape[0] == 0:
                     logger.warning(f"No valid features extracted from file: {file_name}")
                     continue
-                    
+                        
+                # Get the predicted class probability
                 pred = model.predict(data, verbose=0)
-                # Global reconstruction error
-                global_error = np.mean(np.square(data - pred), axis=1)
-                y_pred_global[num] = np.mean(global_error)
-                # Feature-level error (per mel-frequency bin)
-                feature_error = np.mean(np.square(data - pred), axis=0)  # Shape: (n_mels * frames,)
-                y_pred_feature[num] = np.mean(feature_error)
-                original_specs.append(data)
-                reconstructed_specs.append(pred)
+                # Average the predictions across all frames
+                file_pred = np.mean(pred)
+                y_pred.append(file_pred)
             except Exception as e:
                 logger.warning(f"Error processing file: {file_name}, error: {e}")
+                # If there's an error, use a default value (e.g., 0.5)
+                y_pred.append(0.5)
 
-        # Combine global and feature-level scores
-        y_pred_combined = [0.5 * g + 0.5 * f for g, f in zip(y_pred_global, y_pred_feature)]
+        # Optimize threshold using ROC curve
+        fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
+        optimal_idx = np.argmax(tpr - fpr)
+        optimal_threshold = thresholds[optimal_idx]
+        logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
 
-        # Statistical thresholding: mean + k*std on normal samples
-        normal_indices = [i for i, label in enumerate(y_true) if label == 0]
-        normal_scores = [y_pred_combined[i] for i in normal_indices]
-        if normal_scores:
-            mean_normal = np.mean(normal_scores)
-            std_normal = np.std(normal_scores)
-            stat_threshold = mean_normal + 2 * std_normal  # k=2
-            evaluation_result["Statistical Threshold"] = float(stat_threshold)
-        else:
-            stat_threshold = np.mean(y_pred_combined)  # Fallback
-            evaluation_result["Statistical Threshold"] = float(stat_threshold)
+        # Convert predictions to binary using optimal threshold
+        y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
 
-        # Optimize threshold using ROC and Precision-Recall curves
-        fpr, tpr, roc_thresholds = metrics.roc_curve(y_true, y_pred_combined)
-        precision, recall, pr_thresholds = metrics.precision_recall_curve(y_true, y_pred_combined)
-        
-        # Balance Specificity and Recall
-        best_threshold = None
-        best_score = -float('inf')
-        for i, thresh in enumerate(roc_thresholds):
-            if i >= len(fpr) or i >= len(tpr):
-                continue
-            # Equal weight to TPR (Recall) and FPR
-            score = tpr[i] - fpr[i]  # Equal balance between Recall and Specificity
-            if score > best_score:
-                best_score = score
-                best_threshold = thresh
-        
-        if best_threshold is None:
-            best_threshold = stat_threshold  # Fallback to statistical threshold
+        # Calculate metrics
+        accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+        precision = metrics.precision_score(y_true, y_pred_binary)
+        recall = metrics.recall_score(y_true, y_pred_binary)
+        f1 = metrics.f1_score(y_true, y_pred_binary)
+        roc_auc = metrics.roc_auc_score(y_true, y_pred)
 
+        # Add metrics to evaluation result
+        evaluation_result["Accuracy"] = float(accuracy)
+        evaluation_result["Precision"] = float(precision)
+        evaluation_result["Recall"] = float(recall)
+        evaluation_result["F1 Score"] = float(f1)
+        evaluation_result["ROC AUC"] = float(roc_auc)
+        evaluation_result["Optimal Threshold"] = float(optimal_threshold)
 
-        # GMM-based per-machine-type-ID thresholding
-        try:
-            # Get scores for normal samples only
-            normal_indices = [i for i, label in enumerate(y_true) if label == 0]
-            normal_scores = [y_pred_combined[i] for i in normal_indices]
-            
-            if len(normal_scores) > 5:  # Need enough samples for GMM
-                # Fit GMM with 2 components (assuming potential bimodal distribution)
-                gmm = GaussianMixture(n_components=2, covariance_type='full', random_state=42)
-                # Reshape to 2D array for GMM
-                normal_scores_reshaped = np.array(normal_scores).reshape(-1, 1)
-                gmm.fit(normal_scores_reshaped)
-                
-                # Get component with higher mean (likely the anomalous-like normal samples)
-                means = gmm.means_.flatten()
-                higher_mean_idx = np.argmax(means)
-                
-                # Calculate GMM threshold as mean + 1.5*std of the higher component
-                gmm_mean = means[higher_mean_idx]
-                gmm_cov = gmm.covariances_[higher_mean_idx][0][0]  # Get variance
-                gmm_std = np.sqrt(gmm_cov)
-                gmm_threshold = gmm_mean + 1.5 * gmm_std
-                
-                logger.info(f"GMM-based threshold for {machine_type}_{machine_id}: {gmm_threshold:.4f}")
-                
-                # Use GMM threshold if it's more specific to this machine type
-                if f"fan_id_00" in machine_id or f"fan_id_04" in machine_id:
-                    # For problematic fan IDs, use a more lenient threshold
-                    best_threshold = min(best_threshold, gmm_threshold)
-                    logger.info(f"Using more lenient threshold for problematic ID: {best_threshold:.4f}")
-                elif gmm_threshold > stat_threshold:  # More conservative than statistical
-                    best_threshold = 0.7 * best_threshold + 0.3 * gmm_threshold  # Weighted average
-                    logger.info(f"Using weighted threshold: {best_threshold:.4f}")
-        except Exception as e:
-            logger.warning(f"GMM thresholding failed: {e}, using best ROC threshold")
-
-        # Apply best threshold
-        y_pred_binary = (np.array(y_pred_combined) >= best_threshold).astype(int)
-
-        # Calculate accuracy
-        try:
-            # Accuracy
-            accuracy = metrics.accuracy_score(y_true, y_pred_binary)
-            logger.info(f"Accuracy: {accuracy}")
-            evaluation_result["Accuracy"] = float(accuracy)
-            
-            # Best threshold for reference
-            evaluation_result["Best Threshold"] = float(best_threshold)
-            
-        except Exception as e:
-            logger.error(f"Error calculating metrics: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error calculating metrics: {e}")
+        logger.info(f"Accuracy: {accuracy:.4f}")
+        logger.info(f"Precision: {precision:.4f}")
+        logger.info(f"Recall: {recall:.4f}")
+        logger.info(f"F1 Score: {f1:.4f}")
+        logger.info(f"ROC AUC: {roc_auc:.4f}")
 
         results[evaluation_result_key] = evaluation_result
-
-
-        # Count normal and abnormal samples in y_true
-        normal_count = sum(1 for label in y_true if label == 0)
-        abnormal_count = sum(1 for label in y_true if label == 1)
-        logger.info(f"Evaluation set feature vectors: {normal_count} normal, {abnormal_count} abnormal")
 
         print("===========================")
 

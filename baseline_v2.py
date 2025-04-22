@@ -238,13 +238,13 @@ def list_to_vector_array(file_list,
     return dataset[:total_size, :]
 
 def list_to_vector_array_with_labels(file_list, labels,
-                         msg="calc...",
-                         n_mels=64,
-                         frames=5,
-                         n_fft=1024,
-                         hop_length=512,
-                         power=2.0,
-                         augment=False):
+                                      msg="calc...",
+                                      n_mels=64,
+                                      frames=5,
+                                      n_fft=1024,
+                                      hop_length=512,
+                                      power=2.0,
+                                      augment=False):
     """Generate vector array and corresponding expanded labels from file list"""
     dims = n_mels * frames
     dataset = None
@@ -287,6 +287,7 @@ def list_to_vector_array_with_labels(file_list, labels,
         return np.empty((0, dims), float), np.array([])
         
     return dataset[:total_size, :], expanded_labels[:total_size]
+
 
 def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="wav"):
     """

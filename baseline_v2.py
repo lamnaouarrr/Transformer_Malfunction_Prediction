@@ -332,6 +332,14 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
     normal_files = []
     abnormal_files = []
     
+
+    # debug
+    print(f"DEBUG - Breakdown for {machine_id}:")
+    print(f"  Normal files found: {len(normal_files)}")
+    print(f"  Abnormal files found: {len(abnormal_files)}")
+    print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
+    print(f"  Abnormal train: {len(abnormal_train_files)}, Abnormal val: {len(abnormal_val_files)}, Abnormal test: {len(abnormal_test_files)}")
+
     if is_normal:
         normal_files = [str(f) for f in files_in_dir]
         # Try to find matching abnormal directory
@@ -435,25 +443,9 @@ def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="
     print(f"Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
 
-    #debug
-    if machine_id == "id_00":
-        print(f"Debug ID 00 - Found normal files: {len(normal_files)}")
-        if len(normal_files) > 0:
-            print(f"Sample path: {normal_files[0]}")
-        print(f"Debug ID 00 - Found abnormal files: {len(abnormal_files)}")
-        if len(abnormal_files) > 0:
-            print(f"Sample path: {abnormal_files[0]}")
-    #debug
-    test_path = Path(param["base_directory"]) / "normal" / "0dB" / "fan" / "id_00"
-    print(f"Path exists: {test_path.exists()}")
-    if test_path.exists():
-        print(f"Files in directory: {list(test_path.glob('*.wav'))}")
-    #debug
-    print(f"Data split info for {machine_id}:")
-    print(f"Normal files: {len(normal_files)}")
-    print(f"Abnormal files: {len(abnormal_files)}")
 
-    
+
+
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
 ########################################################################
@@ -597,6 +589,11 @@ def main():
     # Updated to match the actual directory structure
     normal_path = Path(param["base_directory"]) / "normal"
     abnormal_path = Path(param["base_directory"]) / "abnormal"
+
+    #debug
+    normal_count = sum(1 for label in train_labels_expanded if label == 0)
+    abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
+    print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
     
     # Count normal files
     for db_dir in normal_path.glob("*"):
@@ -889,19 +886,10 @@ def main():
         f1 = metrics.f1_score(y_true, y_pred_binary)
         roc_auc = metrics.roc_auc_score(y_true, y_pred)
 
-        # Add metrics to evaluation result
+        
         evaluation_result["Accuracy"] = float(accuracy)
-        evaluation_result["Precision"] = float(precision)
-        evaluation_result["Recall"] = float(recall)
-        evaluation_result["F1 Score"] = float(f1)
-        evaluation_result["ROC AUC"] = float(roc_auc)
-        evaluation_result["Optimal Threshold"] = float(optimal_threshold)
 
         logger.info(f"Accuracy: {accuracy:.4f}")
-        logger.info(f"Precision: {precision:.4f}")
-        logger.info(f"Recall: {recall:.4f}")
-        logger.info(f"F1 Score: {f1:.4f}")
-        logger.info(f"ROC AUC: {roc_auc:.4f}")
 
         results[evaluation_result_key] = evaluation_result
 

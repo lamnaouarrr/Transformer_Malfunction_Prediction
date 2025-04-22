@@ -89,14 +89,26 @@ class Visualizer:
     def __init__(self):
         pass
 
-    def loss_plot(self, loss, val_loss):
-        plt.figure(figsize=(30, 10))
-        plt.plot(loss)
-        plt.plot(val_loss)
+    def loss_plot(self, history):
+        plt.figure(figsize=(30, 20))
+        
+        # Plot loss
+        plt.subplot(2, 1, 1)
+        plt.plot(history.history['loss'])
+        plt.plot(history.history['val_loss'])
         plt.title("Model loss")
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.legend(["Train", "Test"], loc="upper right")
+        plt.legend(["Train", "Validation"], loc="upper right")
+        
+        # Plot accuracy
+        plt.subplot(2, 1, 2)
+        plt.plot(history.history['accuracy'])
+        plt.plot(history.history['val_accuracy'])
+        plt.title("Model accuracy")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.legend(["Train", "Validation"], loc="lower right")
 
     def save_figure(self, name):
         plt.savefig(name)
@@ -478,6 +490,7 @@ def main():
             if "weighted_metrics" not in compile_params:
                 compile_params["weighted_metrics"] = []
 
+            compile_params["metrics"] = ['accuracy']
             model.compile(**compile_params)
             
             callbacks = []
@@ -515,6 +528,9 @@ def main():
                 callbacks=callbacks,
                 sample_weight=sample_weights
             )
+
+            visualizer.loss_plot(history)
+            visualizer.save_figure(history_img)
 
         print("============== EVALUATION ==============")
         y_pred_global = [0. for _ in eval_labels]
@@ -623,54 +639,18 @@ def main():
         # Apply best threshold
         y_pred_binary = (np.array(y_pred_combined) >= best_threshold).astype(int)
 
-        # Calculate metrics - keep only AUC, Specificity, MCC, and SSIM
+        # Calculate accuracy
         try:
-            # AUC
-            score = metrics.roc_auc_score(y_true, y_pred_combined)
-            logger.info(f"AUC : {score}")
-            evaluation_result["AUC"] = float(score)
-            
-            # Confusion matrix for Specificity and MCC
-            tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred_binary).ravel()
-            
-            # Specificity
-            specificity = float(tn / (tn + fp + 1e-10))
-            evaluation_result["Specificity"] = specificity
-            logger.info(f"Specificity: {specificity:.4f}")
-            
-            # MCC
-            mcc_numerator = (tp * tn) - (fp * fn)
-            mcc_denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn) + 1e-10)
-            mcc = float(mcc_numerator / mcc_denominator)
-            evaluation_result["MCC"] = mcc
-            logger.info(f"MCC: {mcc:.4f}")
+            # Accuracy
+            accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+            logger.info(f"Accuracy: {accuracy}")
+            evaluation_result["Accuracy"] = float(accuracy)
             
             # Best threshold for reference
             evaluation_result["Best Threshold"] = float(best_threshold)
-
-            # Average SSIM
-            ssim_scores = []
-            for orig, recon in zip(original_specs, reconstructed_specs):
-                for i in range(min(len(orig), len(recon))):
-                    try:
-                        orig_spec = orig[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                        recon_spec = recon[i].reshape(param["feature"]["n_mels"], param["feature"]["frames"])
-                        # Use a small window size - must be odd and <= smallest dimension
-                        win_size = 3
-                        ssim_value = ssim(
-                            orig_spec, 
-                            recon_spec,
-                            win_size=win_size,
-                            data_range=orig_spec.max() - orig_spec.min() + 1e-10
-                        )
-                        ssim_scores.append(ssim_value)
-                    except Exception as e:
-                        logger.warning(f"SSIM calculation error: {e}")
-                        
-            if ssim_scores:
-                evaluation_result["SSIM"] = float(np.mean(ssim_scores))
-            else:
-                evaluation_result["SSIM"] = float(-1)
+            
+        except Exception as e:
+            logger.error(f"Error calculating metrics: {e}")
             
         except Exception as e:
             logger.error(f"Error calculating metrics: {e}")

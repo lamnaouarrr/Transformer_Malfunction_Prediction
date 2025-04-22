@@ -11,7 +11,8 @@ fit:
   compile:
     optimizer: "adam"
     loss: "mean_squared_error"
-    weighted_metrics: []  # Add this to fix the warning
+    metrics: ["accuracy"]
+    weighted_metrics: ["accuracy"]
   epochs: 150
   batch_size: 512
   shuffle: True

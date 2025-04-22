@@ -811,11 +811,11 @@ def main():
             print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
             history = model.fit(
                 train_data,
-                train_labels,  # This should be train_labels_expanded, not train_labels
+                train_labels_expanded,  # CHANGE THIS LINE - use the expanded labels
                 epochs=param["fit"]["epochs"],
                 batch_size=param["fit"]["batch_size"],
                 shuffle=param["fit"]["shuffle"],
-                validation_data=(val_data, val_labels_expanded),
+                validation_data=(val_data, val_labels_expanded),  # And make sure this is also using the expanded labels
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
                 sample_weight=sample_weights

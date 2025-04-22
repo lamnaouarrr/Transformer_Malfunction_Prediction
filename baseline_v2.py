@@ -245,7 +245,6 @@ def list_to_vector_array_with_labels(file_list, labels,
                                       hop_length=512,
                                       power=2.0,
                                       augment=False):
-    """Generate vector array and corresponding expanded labels from file list"""
     dims = n_mels * frames
     dataset = None
     expanded_labels = None
@@ -263,7 +262,7 @@ def list_to_vector_array_with_labels(file_list, labels,
         if vector_array.shape[0] == 0:
             continue
 
-        # Create labels array for this file
+        # Ensure that the labels match the number of samples in vector_array
         file_labels = np.full(vector_array.shape[0], labels[idx])
         
         if dataset is None:
@@ -273,20 +272,23 @@ def list_to_vector_array_with_labels(file_list, labels,
             dataset = np.zeros((estimated_total_size, dims), float)
             expanded_labels = np.zeros(estimated_total_size, float)
         
-        # Make sure we have enough space
+        # Ensure there is enough space in the dataset
         if total_size + vector_array.shape[0] > dataset.shape[0]:
             dataset = np.resize(dataset, (dataset.shape[0] * 2, dims))
             expanded_labels = np.resize(expanded_labels, dataset.shape[0])
         
+        # Insert the new data into the dataset
         dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
         expanded_labels[total_size:total_size + vector_array.shape[0]] = file_labels
         total_size += vector_array.shape[0]
 
+    # Trimming the dataset to the right size
     if dataset is None:
         logger.warning("No valid data was found in the file list.")
         return np.empty((0, dims), float), np.array([])
-        
+
     return dataset[:total_size, :], expanded_labels[:total_size]
+
 
 
 def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="wav"):

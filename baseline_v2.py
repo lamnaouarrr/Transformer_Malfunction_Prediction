@@ -369,6 +369,44 @@ def main():
     visualizer = Visualizer()
 
     base_path = Path(param["base_directory"])
+
+    print("============== COUNTING DATASET SAMPLES ==============")
+    logger.info("Counting all samples in the dataset...")
+    
+    total_normal_files = 0
+    total_abnormal_files = 0
+    
+    # Get all machine directories
+    all_machine_dirs = []
+    for db_dir in base_path.glob("*"):
+        if db_dir.is_dir():
+            for machine_type_dir in db_dir.glob("*"):
+                if machine_type_dir.is_dir():
+                    for machine_id_dir in machine_type_dir.glob("*"):
+                        if machine_id_dir.is_dir() and "/id_" in str(machine_id_dir):
+                            all_machine_dirs.append(machine_id_dir)
+    
+    # Count normal and abnormal files across all machine directories
+    for machine_dir in all_machine_dirs:
+        normal_path = machine_dir / "normal"
+        abnormal_path = machine_dir / "abnormal"
+        
+        if normal_path.exists():
+            normal_count = len(list(normal_path.glob("*.wav")))
+            total_normal_files += normal_count
+        
+        if abnormal_path.exists():
+            abnormal_count = len(list(abnormal_path.glob("*.wav")))
+            total_abnormal_files += abnormal_count
+    
+    # Print and log the total counts
+    print(f"Total normal files in dataset: {total_normal_files}")
+    print(f"Total abnormal files in dataset: {total_abnormal_files}")
+    print(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
+    logger.info(f"Total normal files in dataset: {total_normal_files}")
+    logger.info(f"Total abnormal files in dataset: {total_abnormal_files}")
+    logger.info(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
+
     dirs = []
 
     # Keep the filtering mechanism based on YAML config

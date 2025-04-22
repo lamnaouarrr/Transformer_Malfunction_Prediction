@@ -171,7 +171,11 @@ def file_to_vector_array(file_name,
     dims = n_mels * frames
     sr, y = demux_wav(file_name)
     if y is None:
+        print(f"Failed to load {file_name}")
         return np.empty((0, dims), float)
+    else:
+        print(f"Successfully loaded {file_name}")
+
         
     mel_spectrogram = librosa.feature.melspectrogram(y=y,
                                                     sr=sr,

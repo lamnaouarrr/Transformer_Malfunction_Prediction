@@ -399,10 +399,7 @@ def main():
             abnormal_count = len(list(abnormal_path.glob("*.wav")))
             total_abnormal_files += abnormal_count
     
-    # Print and log the total counts
-    print(f"Total normal files in dataset: {total_normal_files}")
-    print(f"Total abnormal files in dataset: {total_abnormal_files}")
-    print(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
+    # log the total counts
     logger.info(f"Total normal files in dataset: {total_normal_files}")
     logger.info(f"Total abnormal files in dataset: {total_abnormal_files}")
     logger.info(f"Total files in dataset: {total_normal_files + total_abnormal_files}")

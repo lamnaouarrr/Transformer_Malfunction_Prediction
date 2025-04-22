@@ -457,6 +457,10 @@ def main():
             save_pickle(eval_files_pickle, eval_files)
             save_pickle(eval_labels_pickle, eval_labels)
 
+        # After loading or creating train_data
+        train_vectors_count = train_data.shape[0]
+        logger.info(f"Number of training feature vectors: {train_vectors_count}")
+
         print("============== MODEL TRAINING ==============")
         model_config = param.get("model", {}).get("architecture", {})
         model = keras_model(
@@ -651,6 +655,13 @@ def main():
             logger.error(f"Error calculating metrics: {e}")
 
         results[evaluation_result_key] = evaluation_result
+
+
+        # Count normal and abnormal samples in y_true
+        normal_count = sum(1 for label in y_true if label == 0)
+        abnormal_count = sum(1 for label in y_true if label == 1)
+        logger.info(f"Evaluation set feature vectors: {normal_count} normal, {abnormal_count} abnormal")
+
         print("===========================")
 
     end_time = time.time()

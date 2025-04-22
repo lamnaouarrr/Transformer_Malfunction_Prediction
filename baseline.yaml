@@ -10,7 +10,7 @@ feature:
 fit:
   compile:
     optimizer: "adam"
-    loss: "mean_squared_error"
+    loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
   epochs: 150
@@ -33,16 +33,14 @@ filter:
 # Model architecture parameters
 model:
   architecture:
-    depth: 4  # Keep original depth
-    width: 128  # Keep original width
-    bottleneck: 32  # Keep original bottleneck
-    activation: "relu"
-    dropout: 0.2  # Keep original dropout
+    depth: 4
+    width: 128
+    bottleneck: 32
+    activation: "sigmoid"  # Changed to sigmoid for binary values
+    dropout: 0.2
     batch_norm: true
     residual: true
-  loss: "hybrid"
-  hybrid_loss_alpha: 0.4  # Reduced from 0.6 to prioritize SSIM
-  margin: 1.0  # Keep original margin value
+  loss: "binary_crossentropy"
 
 # Directory paths
 base_directory: "./dataset"

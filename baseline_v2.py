@@ -41,31 +41,15 @@ from sklearn.mixture import GaussianMixture
 __versions__ = "2.1.0"
 ########################################################################
 
-def ssim_loss(y_true, y_pred):
+def binary_cross_entropy_loss(y_true, y_pred):
     """
-    Structural Similarity Index (SSIM) loss with appropriate window size
+    Binary cross-entropy loss for autoencoder
     """
-    # Use a smaller window size (must be odd and <= smallest dimension)
-    window_size = 3  # Smallest odd number that will work with your dimensions
+    # Normalize inputs if needed (values between 0 and 1)
+    y_true_normalized = (y_true - K.min(y_true)) / (K.max(y_true) - K.min(y_true) + K.epsilon())
+    y_pred_normalized = (y_pred - K.min(y_pred)) / (K.max(y_pred) - K.min(y_pred) + K.epsilon())
     
-    return 1 - tf.reduce_mean(tf.image.ssim(
-        tf.reshape(y_true, [-1, 64, 5, 1]),
-        tf.reshape(y_pred, [-1, 64, 5, 1]), 
-        max_val=K.max(y_true) - K.min(y_true) + K.epsilon(),
-        filter_size=window_size
-    ))
-
-def hybrid_loss_with_margin(y_true, y_pred, alpha=0.5, margin=1.0):
-    """
-    Combination of MSE, SSIM loss, and a reduced margin term to improve SSIM
-    """
-    mse = mean_squared_error(y_true, y_pred)
-    ssim = ssim_loss(y_true, y_pred)
-    error = K.mean(K.square(y_true - y_pred), axis=1)
-    normal_mask = K.cast(K.less(error, margin), K.floatx())
-    margin_loss = K.mean(normal_mask * error)
-    # Prioritize SSIM by reducing alpha and margin weight
-    return alpha * mse + (1 - alpha) * ssim + 0.15 * margin_loss  # Changed margin weight to 0.15
+    return tf.keras.losses.binary_crossentropy(y_true_normalized, y_pred_normalized)
 
 ########################################################################
 # setup STD I/O
@@ -208,6 +192,9 @@ def file_to_vector_array(file_name,
     for t in range(frames):
         vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
 
+    # Add normalization for binary cross-entropy
+    vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
+    
     return vectorarray
 
 def list_to_vector_array(file_list,
@@ -350,10 +337,12 @@ def keras_model(input_dim, config=None):
             x = Add()([x, layer_input])
     
     if use_residual and first_layer_output.shape[-1] == input_dim:
-        x = Dense(input_dim, activation=None, kernel_regularizer=l2(weight_decay))(x)
-        output = Add()([x, inputLayer])
+        x = Dense(input_dim, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
+        # For binary cross-entropy, we shouldn't use residual connection at the output
+        # since we need values between 0 and 1
+        output = x
     else:
-        output = Dense(input_dim, activation=None, kernel_regularizer=l2(weight_decay))(x)
+        output = Dense(input_dim, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
 
     return Model(inputs=inputLayer, outputs=output)
 
@@ -476,12 +465,11 @@ def main():
             compile_params = param["fit"]["compile"].copy()
             loss_type = param.get("model", {}).get("loss", "mse")
 
-            if loss_type == "ssim":
-                compile_params["loss"] = ssim_loss
-            elif loss_type == "hybrid":
-                alpha = param.get("model", {}).get("hybrid_loss_alpha", 0.5)
-                margin = param.get("model", {}).get("margin", 1.0)
-                compile_params["loss"] = lambda y_true, y_pred: hybrid_loss_with_margin(y_true, y_pred, alpha, margin)
+            if loss_type == "binary_crossentropy":
+                compile_params["loss"] = binary_cross_entropy_loss
+            else:
+                # Default to standard binary_crossentropy from Keras
+                compile_params["loss"] = "binary_crossentropy"
 
             if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
                 compile_params["optimizer"] = tf.keras.optimizers.Adam()

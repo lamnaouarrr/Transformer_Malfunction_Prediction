@@ -233,87 +233,75 @@ def list_to_vector_array(file_list,
         
     return dataset[:total_size, :]
 
-def dataset_generator(target_dir,
-                      split_ratio=[0.8, 0.1, 0.1],
-                      ext="wav"):
+def dataset_generator(target_dir, param=None, split_ratio=[0.8, 0.1, 0.1], ext="wav"):
     """
-    Generate training, validation, and testing datasets matching the actual directory structure.
+    Generate training, validation, and testing datasets for the new directory structure.
     
-    target_dir: base directory of the dataset
+    target_dir: A directory containing audio files for a specific machine ID
+    param: parameters dictionary from the YAML config
     split_ratio: train/val/test split ratio as [train, val, test]
     ext: file extension for audio files
     """
     logger.info(f"target_dir : {target_dir}")
-    target_dir_path = Path(target_dir)
-
-    # Updated paths to match actual directory structure
+    
+    if param is None:
+        param = {}
+    
+    # Parse the target directory path to extract db, machine_type, and machine_id
+    parts = Path(target_dir).parts
+    db = None
+    machine_type = None
+    machine_id = None
+    is_normal = "normal" in str(target_dir)
+    
+    # Find the relevant parts
+    for i, part in enumerate(parts):
+        if part in ["0dB", "3dB", "6dB", "-3dB", "-6dB"]:
+            db = part
+            if i+2 < len(parts):
+                machine_type = parts[i+1]
+                machine_id = parts[i+2]
+            break
+    
+    if not db or not machine_type or not machine_id:
+        logger.warning(f"Could not parse directory properly: {target_dir}")
+        return [], [], [], [], [], []
+    
+    # Get files in the current directory
+    files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
+    
+    # If the target is normal, find corresponding abnormal directory
+    base_dir = Path(param.get("base_directory", "./dataset"))
+    
     normal_files = []
     abnormal_files = []
     
-    # Modified paths to match the actual structure
-    normal_path = target_dir_path / "normal"
-    abnormal_path = target_dir_path / "abnormal"
+    if is_normal:
+        normal_files = [str(f) for f in files_in_dir]
+        # Try to find matching abnormal directory
+        abnormal_dir = base_dir / "abnormal" / db / machine_type / machine_id
+        if abnormal_dir.exists():
+            abnormal_files = [str(f) for f in abnormal_dir.glob(f"*.{ext}")]
+    else:
+        abnormal_files = [str(f) for f in files_in_dir]
+        # Try to find matching normal directory
+        normal_dir = base_dir / "normal" / db / machine_type / machine_id
+        if normal_dir.exists():
+            normal_files = [str(f) for f in normal_dir.glob(f"*.{ext}")]
     
-    # Handle filter parameters from baseline.yaml
-    filter_enabled = param.get("filter", {}).get("enabled", False)
-    filter_db = param.get("filter", {}).get("db_level")
-    filter_machine = param.get("filter", {}).get("machine_type")
-    filter_id = param.get("filter", {}).get("machine_id")
-    
-    # Function to apply filters when collecting files
-    def should_include_path(path_parts, is_normal):
-        # Path parts should be like: [dataset, normal/abnormal, dB, machine_type, machine_id]
-        if len(path_parts) < 5:
-            return False
-            
-        db_level = path_parts[-3]
-        machine_type = path_parts[-2]
-        machine_id = path_parts[-1]
-        
-        if filter_enabled:
-            if filter_db and db_level != filter_db:
-                return False
-            if filter_machine and machine_type != filter_machine:
-                return False
-            if filter_id and machine_id != filter_id:
-                return False
-                
-        return True
-    
-    # Walk through normal files with the actual structure
-    for db_dir in normal_path.glob("*"):
-        if db_dir.is_dir():
-            for machine_type_dir in db_dir.glob("*"):
-                if machine_type_dir.is_dir():
-                    for machine_id_dir in machine_type_dir.glob("*"):
-                        if machine_id_dir.is_dir():
-                            path_parts = machine_id_dir.parts
-                            if should_include_path(path_parts, True):
-                                normal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
-    
-    # Walk through abnormal files with the actual structure
-    for db_dir in abnormal_path.glob("*"):
-        if db_dir.is_dir():
-            for machine_type_dir in db_dir.glob("*"):
-                if machine_type_dir.is_dir():
-                    for machine_id_dir in machine_type_dir.glob("*"):
-                        if machine_id_dir.is_dir():
-                            path_parts = machine_id_dir.parts
-                            if should_include_path(path_parts, False):
-                                abnormal_files.extend([str(file_path) for file_path in machine_id_dir.glob(f"*.{ext}")])
-    
-    # Create labels (0 for normal, 1 for abnormal)
-    normal_labels = np.zeros(len(normal_files))
-    abnormal_labels = np.ones(len(abnormal_files))
-    
-    # Check if files were found
+    # Check if we have any files
     if len(normal_files) == 0:
-        logger.exception(f"No {ext} files found in normal directory!")
-        return [], [], [], [], [], [], [], []
+        logger.warning(f"No normal {ext} files found for {machine_type}/{machine_id}")
+        if len(abnormal_files) == 0:
+            logger.error(f"No files found at all for {machine_type}/{machine_id}")
+            return [], [], [], [], [], []
     
     if len(abnormal_files) == 0:
-        logger.exception(f"No {ext} files found in abnormal directory!")
-        return [], [], [], [], [], [], [], []
+        logger.warning(f"No abnormal {ext} files found for {machine_type}/{machine_id}")
+    
+    # Create labels
+    normal_labels = np.zeros(len(normal_files))
+    abnormal_labels = np.ones(len(abnormal_files))
     
     # Print the number of files
     num_normal = len(normal_files)
@@ -323,15 +311,17 @@ def dataset_generator(target_dir,
     logger.info(f"Total samples: {num_normal + num_abnormal}")
     
     # Shuffle files while keeping labels aligned
-    normal_indices = np.arange(len(normal_files))
-    abnormal_indices = np.arange(len(abnormal_files))
-    np.random.shuffle(normal_indices)
-    np.random.shuffle(abnormal_indices)
+    if num_normal > 0:
+        normal_indices = np.arange(len(normal_files))
+        np.random.shuffle(normal_indices)
+        normal_files = [normal_files[i] for i in normal_indices]
+        normal_labels = normal_labels[normal_indices]
     
-    normal_files = [normal_files[i] for i in normal_indices]
-    normal_labels = normal_labels[normal_indices]
-    abnormal_files = [abnormal_files[i] for i in abnormal_indices]
-    abnormal_labels = abnormal_labels[abnormal_indices]
+    if num_abnormal > 0:
+        abnormal_indices = np.arange(len(abnormal_files))
+        np.random.shuffle(abnormal_indices)
+        abnormal_files = [abnormal_files[i] for i in abnormal_indices]
+        abnormal_labels = abnormal_labels[abnormal_indices]
     
     # Calculate split indices
     n_normal_train = int(num_normal * split_ratio[0])
@@ -340,46 +330,50 @@ def dataset_generator(target_dir,
     n_abnormal_val = int(num_abnormal * split_ratio[1])
     
     # Split normal files
-    normal_train_files = normal_files[:n_normal_train]
-    normal_train_labels = normal_labels[:n_normal_train]
-    normal_val_files = normal_files[n_normal_train:n_normal_train+n_normal_val]
-    normal_val_labels = normal_labels[n_normal_train:n_normal_train+n_normal_val]
-    normal_test_files = normal_files[n_normal_train+n_normal_val:]
-    normal_test_labels = normal_labels[n_normal_train+n_normal_val:]
+    normal_train_files = normal_files[:n_normal_train] if num_normal > 0 else []
+    normal_train_labels = normal_labels[:n_normal_train] if num_normal > 0 else np.array([])
+    normal_val_files = normal_files[n_normal_train:n_normal_train+n_normal_val] if num_normal > 0 else []
+    normal_val_labels = normal_labels[n_normal_train:n_normal_train+n_normal_val] if num_normal > 0 else np.array([])
+    normal_test_files = normal_files[n_normal_train+n_normal_val:] if num_normal > 0 else []
+    normal_test_labels = normal_labels[n_normal_train+n_normal_val:] if num_normal > 0 else np.array([])
     
     # Split abnormal files
-    abnormal_train_files = abnormal_files[:n_abnormal_train]
-    abnormal_train_labels = abnormal_labels[:n_abnormal_train]
-    abnormal_val_files = abnormal_files[n_abnormal_train:n_abnormal_train+n_abnormal_val]
-    abnormal_val_labels = abnormal_labels[n_abnormal_train:n_abnormal_train+n_abnormal_val]
-    abnormal_test_files = abnormal_files[n_abnormal_train+n_abnormal_val:]
-    abnormal_test_labels = abnormal_labels[n_abnormal_train+n_abnormal_val:]
+    abnormal_train_files = abnormal_files[:n_abnormal_train] if num_abnormal > 0 else []
+    abnormal_train_labels = abnormal_labels[:n_abnormal_train] if num_abnormal > 0 else np.array([])
+    abnormal_val_files = abnormal_files[n_abnormal_train:n_abnormal_train+n_abnormal_val] if num_abnormal > 0 else []
+    abnormal_val_labels = abnormal_labels[n_abnormal_train:n_abnormal_train+n_abnormal_val] if num_abnormal > 0 else np.array([])
+    abnormal_test_files = abnormal_files[n_abnormal_train+n_abnormal_val:] if num_abnormal > 0 else []
+    abnormal_test_labels = abnormal_labels[n_abnormal_train+n_abnormal_val:] if num_abnormal > 0 else np.array([])
     
     # Combine normal and abnormal datasets
     train_files = normal_train_files + abnormal_train_files
-    train_labels = np.concatenate((normal_train_labels, abnormal_train_labels))
+    train_labels = np.concatenate([normal_train_labels, abnormal_train_labels]) if len(normal_train_labels) > 0 or len(abnormal_train_labels) > 0 else np.array([])
     val_files = normal_val_files + abnormal_val_files
-    val_labels = np.concatenate((normal_val_labels, abnormal_val_labels))
+    val_labels = np.concatenate([normal_val_labels, abnormal_val_labels]) if len(normal_val_labels) > 0 or len(abnormal_val_labels) > 0 else np.array([])
     test_files = normal_test_files + abnormal_test_files
-    test_labels = np.concatenate((normal_test_labels, abnormal_test_labels))
+    test_labels = np.concatenate([normal_test_labels, abnormal_test_labels]) if len(normal_test_labels) > 0 or len(abnormal_test_labels) > 0 else np.array([])
     
     # Shuffle the training, validation and test sets
-    train_indices = np.arange(len(train_files))
-    val_indices = np.arange(len(val_files))
-    test_indices = np.arange(len(test_files))
-    np.random.shuffle(train_indices)
-    np.random.shuffle(val_indices)
-    np.random.shuffle(test_indices)
+    if len(train_files) > 0:
+        train_indices = np.arange(len(train_files))
+        np.random.shuffle(train_indices)
+        train_files = [train_files[i] for i in train_indices]
+        train_labels = train_labels[train_indices]
     
-    train_files = [train_files[i] for i in train_indices]
-    train_labels = train_labels[train_indices]
-    val_files = [val_files[i] for i in val_indices]
-    val_labels = val_labels[val_indices]
-    test_files = [test_files[i] for i in test_indices]
-    test_labels = test_labels[test_indices]
+    if len(val_files) > 0:
+        val_indices = np.arange(len(val_files))
+        np.random.shuffle(val_indices)
+        val_files = [val_files[i] for i in val_indices]
+        val_labels = val_labels[val_indices]
     
-    logger.info(f"train_file num : {len(train_files)} (normal: {n_normal_train}, abnormal: {n_abnormal_train})")
-    logger.info(f"val_file num : {len(val_files)} (normal: {n_normal_val}, abnormal: {n_abnormal_val})")
+    if len(test_files) > 0:
+        test_indices = np.arange(len(test_files))
+        np.random.shuffle(test_indices)
+        test_files = [test_files[i] for i in test_indices]
+        test_labels = test_labels[test_indices]
+    
+    logger.info(f"train_file num : {len(train_files)} (normal: {len(normal_train_files)}, abnormal: {len(abnormal_train_files)})")
+    logger.info(f"val_file num : {len(val_files)} (normal: {len(normal_val_files)}, abnormal: {len(abnormal_val_files)})")
     logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
     
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
@@ -559,55 +553,29 @@ def main():
         filter_machine = param["filter"].get("machine_type")
         filter_id = param["filter"].get("machine_id")
         
-        # Update to handle the new structure with top-level normal/abnormal
-        dirs = []
-        
-        # Process normal directories
+        # Start with the normal directory as we're finding our target dirs
         normal_base = base_path / "normal"
-        if normal_base.exists():
-            pattern_parts = []
-            if filter_db:
-                pattern_parts.append(filter_db)
-            else:
-                pattern_parts.append("*")
-            if filter_machine:
-                pattern_parts.append(filter_machine)
-            else:
-                pattern_parts.append("*")
-            if filter_id:
-                pattern_parts.append(filter_id)
-            else:
-                pattern_parts.append("*")
-            
-            pattern = str(normal_base.joinpath(*pattern_parts))
-            normal_dirs = sorted(glob.glob(pattern))
-            dirs.extend(normal_dirs)
         
-        # Process abnormal directories
-        abnormal_base = base_path / "abnormal"
-        if abnormal_base.exists():
-            pattern_parts = []
-            if filter_db:
-                pattern_parts.append(filter_db)
-            else:
-                pattern_parts.append("*")
-            if filter_machine:
-                pattern_parts.append(filter_machine)
-            else:
-                pattern_parts.append("*")
-            if filter_id:
-                pattern_parts.append(filter_id)
-            else:
-                pattern_parts.append("*")
-            
-            pattern = str(abnormal_base.joinpath(*pattern_parts))
-            abnormal_dirs = sorted(glob.glob(pattern))
-            dirs.extend(abnormal_dirs)
+        pattern_parts = []
+        if filter_db:
+            pattern_parts.append(filter_db)
+        else:
+            pattern_parts.append("*")
+        if filter_machine:
+            pattern_parts.append(filter_machine)
+        else:
+            pattern_parts.append("*")
+        if filter_id:
+            pattern_parts.append(filter_id)
+        else:
+            pattern_parts.append("*")
+        
+        glob_pattern = str(normal_base.joinpath(*pattern_parts))
+        dirs = sorted(glob.glob(glob_pattern))
     else:
-        # Get all directories with machine IDs
-        normal_dirs = sorted(glob.glob(str(base_path / "normal" / "*" / "*" / "*")))
-        abnormal_dirs = sorted(glob.glob(str(base_path / "abnormal" / "*" / "*" / "*")))
-        dirs = normal_dirs + abnormal_dirs
+        # Get all machine ID directories from the normal path
+        # We use normal paths as the base since they typically have all machine IDs
+        dirs = sorted(glob.glob(str(base_path / "normal" / "*" / "*" / "*")))
 
     # Only include directories that contain machine IDs
     dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
@@ -673,7 +641,7 @@ def main():
             test_files = load_pickle(test_files_pickle)
             test_labels = load_pickle(test_labels_pickle)
         else:
-            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir)
+            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
             if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
                 logger.error(f"No files found for {evaluation_result_key}, skipping...")
                 continue

@@ -53,7 +53,7 @@ model:
     depth: 4
     width: 128
     bottleneck: 32
-    activation: "sigmoid"  # Changed to sigmoid for binary values
+    activation: "sigmoid"
     dropout: 0.2
     batch_norm: true
     residual: true

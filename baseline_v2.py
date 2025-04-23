@@ -954,8 +954,8 @@ def main():
     logger.info(f"Total execution time: {total_time:.2f} seconds")
     results["execution_time_seconds"] = float(total_time)
 
-    if len(all_y_true) > 0 and len(all_y_pred_binary) > 0:
-        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred_binary)
+    if len(all_y_true) > 0 and len(all_y_pred) > 0:
+        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
         results["overall_accuracy"] = float(overall_accuracy)
         logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
 

@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 from pathlib import Path
 
 def reorganize_audio_files(base_path):
@@ -21,7 +22,8 @@ def reorganize_audio_files(base_path):
         temp_dir = base_dir / f"temp_{category}"
         temp_dir.mkdir(exist_ok=True)
         
-        # Walk through all directories and files in this category
+        # First, move all files to temp directory
+        moved_files = []
         for root, dirs, files in os.walk(category_path, topdown=False):
             # Skip the top-level category directory itself
             if Path(root) == category_path:
@@ -36,35 +38,65 @@ def reorganize_audio_files(base_path):
                     rel_path = Path(root).relative_to(category_path)
                     
                     # Create new filename with path information
-                    # Format: category_dir1_dir2_..._filename.wav
                     path_parts = list(rel_path.parts)
                     new_filename = f"{category}_" + "_".join(path_parts) + "-" + file
                     
                     # Create destination path
                     temp_dest_path = temp_dir / new_filename
                     
-                    # Move and rename the file
-                    shutil.copy2(original_path, temp_dest_path)
-                    print(f"Copied {original_path} to {temp_dest_path}")
+                    try:
+                        # Copy file to temp location
+                        shutil.copy2(original_path, temp_dest_path)
+                        moved_files.append((original_path, temp_dest_path))
+                        print(f"Copied {original_path} to {temp_dest_path}")
+                    except (PermissionError, OSError) as e:
+                        print(f"Error copying {original_path}: {e}")
         
-        # Now remove all subdirectories in the category
-        for item in category_path.iterdir():
-            if item.is_dir():
-                shutil.rmtree(item)
-                print(f"Removed directory {item}")
+        # After copying all files, try deleting the originals
+        for original_path, _ in moved_files:
+            try:
+                os.remove(original_path)
+                print(f"Removed original file {original_path}")
+            except (PermissionError, OSError) as e:
+                print(f"Error removing original file {original_path}: {e}")
+        
+        # Now try to remove empty directories from bottom up
+        for root, dirs, files in os.walk(category_path, topdown=False):
+            # Skip the top-level category directory itself
+            if Path(root) == category_path:
+                continue
+                
+            if not os.listdir(root):  # Check if directory is empty
+                try:
+                    os.rmdir(root)
+                    print(f"Removed empty directory {root}")
+                except (PermissionError, OSError) as e:
+                    print(f"Error removing directory {root}: {e}")
         
         # Move files from temp directory to category directory
         for file in temp_dir.iterdir():
             if file.is_file():
-                shutil.move(file, category_path / file.name)
-                print(f"Moved {file} to {category_path / file.name}")
+                try:
+                    final_dest = category_path / file.name
+                    shutil.move(file, final_dest)
+                    print(f"Moved {file} to {final_dest}")
+                except (PermissionError, OSError) as e:
+                    print(f"Error moving {file} to final destination: {e}")
         
         # Remove temporary directory
-        shutil.rmtree(temp_dir)
-        print(f"Removed temporary directory {temp_dir}")
+        try:
+            shutil.rmtree(temp_dir)
+            print(f"Removed temporary directory {temp_dir}")
+        except (PermissionError, OSError) as e:
+            print(f"Error removing temporary directory {temp_dir}: {e}")
 
 if __name__ == "__main__":
-    # Change this to your dataset path
     dataset_path = "dataset"
+    
+    # Check if command line argument is provided
+    if len(sys.argv) > 1:
+        dataset_path = sys.argv[1]
+    
+    print(f"Processing dataset at: {dataset_path}")
     reorganize_audio_files(dataset_path)
     print("Reorganization complete!")

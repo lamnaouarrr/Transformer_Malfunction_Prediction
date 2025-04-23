@@ -346,11 +346,23 @@ def dataset_generator(target_dir, param=None):
         if len(parts) >= 4:  # Ensure we have enough parts in the filename
             # Format: normal_0dB_fan_id_00-00000000.wav
             # Or: abnormal_0dB_fan_id_00-00000000.wav
+            condition = parts[0]  # normal or abnormal
             db = parts[1]
             machine_type = parts[2]
-            machine_id_with_file = parts[3]
-            # Extract just the machine_id part (before the hyphen if exists)
-            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
+            # Handle id part which might contain a hyphen and file number
+            id_part = parts[3]
+            machine_id = id_part.split('-')[0] if '-' in id_part else id_part
+            
+            key = (db, machine_type, machine_id)
+            
+            if condition == "normal":
+                if key not in normal_data:
+                    normal_data[key] = []
+                normal_data[key].append(str(file_path))
+            else:
+                if key not in abnormal_data:
+                    abnormal_data[key] = []
+                abnormal_data[key].append(str(file_path))
             
             key = (db, machine_type, machine_id)
             
@@ -544,14 +556,6 @@ def keras_model(input_dim, config=None):
     activation = config.get("activation", "relu")
     weight_decay = config.get("weight_decay", 1e-4)
     
-    # Get attention parameters
-    attention_config = config.get("attention", {})
-    use_attention = attention_config.get("enabled", True)
-    num_heads = attention_config.get("num_heads", 2)
-    key_dim_factor = attention_config.get("key_dim_factor", 0.5)
-    bottleneck_weight = attention_config.get("bottleneck_weight", 0.7)
-    attention_weight = attention_config.get("attention_weight", 0.3)
-    
     inputLayer = Input(shape=(input_dim,))
     
     x = Dense(width, activation=None, kernel_regularizer=l2(weight_decay))(inputLayer)
@@ -578,19 +582,9 @@ def keras_model(input_dim, config=None):
         if use_residual and layer_input.shape[-1] == layer_width:
             x = Add()([x, layer_input])
     
-    # Bottleneck layer with attention
+
     bottleneck_output = Dense(bottleneck, activation=activation, name="bottleneck")(x)
-    
-    if use_attention:
-        # Reshape for attention: (batch_size, 1, bottleneck)
-        attn_input = tf.expand_dims(bottleneck_output, axis=1)
-        # Apply attention with configurable parameters
-        attn_output = MultiHeadAttention(num_heads=num_heads, key_dim=int(bottleneck * key_dim_factor))(attn_input, attn_input)
-        attn_output = tf.squeeze(attn_output, axis=1)  # (batch_size, bottleneck)
-        # Use configurable weights for attention mix
-        x = bottleneck_weight * bottleneck_output + attention_weight * attn_output
-    else:
-        x = bottleneck_output
+    x = bottleneck_output
     
     # Decoder
     for i in range(depth - 1):
@@ -685,7 +679,10 @@ def main():
     logger.info(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
 
     # Define target_dir (use normal_path as default, since dataset_generator will find corresponding abnormal files)
-    target_dir = normal_path
+    target_dir = normal_path if normal_path.exists() else abnormal_path
+    if not target_dir.exists():
+        logger.error("Neither normal nor abnormal directory exists!")
+        return [], [], [], [], [], []
 
     # Get model file information from the first file in the directory
     sample_files = list(Path(target_dir).glob(f"*.{param.get('dataset', {}).get('file_extension', 'wav')}"))
@@ -874,6 +871,9 @@ def main():
         model.save_weights(model_file)
         visualizer.loss_plot(history, machine_type, machine_id, db)
         visualizer.save_figure(history_img)
+    
+    # Define evaluation_result dictionary
+    evaluation_result = {}
 
     if not os.path.exists(model_file):
         # Capture the final training and validation accuracies

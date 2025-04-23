@@ -40,13 +40,6 @@ fit:
     fan_id_00: 2.0
     fan_id_04: 2.0
 
-# Filter to focus on specific dataset parts
-filter:
-  enabled: true
-  db_level: "0dB"
-  machine_type: "fan"
-  machine_id: null  # null means all IDs
-
 # Model architecture parameters
 model:
   architecture:
@@ -58,12 +51,6 @@ model:
     batch_norm: true
     residual: true
     weight_decay: 0.0001  # L2 regularization weight decay
-    attention:
-      enabled: true
-      num_heads: 2
-      key_dim_factor: 0.5  # bottleneck // 2
-      bottleneck_weight: 0.7
-      attention_weight: 0.3
   loss: "binary_crossentropy"
   normalization_method: "minmax"  # Options: "minmax", "zscore", "log"
   threshold_optimization: true

@@ -191,7 +191,7 @@ def file_to_vector_array(file_name,
         print(f"Failed to load {file_name}")
         return np.empty((0, dims), float)
 
-    if augment and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
+    if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
         log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
 
         
@@ -203,7 +203,7 @@ def file_to_vector_array(file_name,
                                                     power=power)
     log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
     
-    if augment and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
+    if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
         log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
     
     vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1

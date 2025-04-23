@@ -312,12 +312,10 @@ def list_to_vector_array_with_labels(file_list, labels,
 
 def dataset_generator(target_dir, param=None):
     """
-    Generate training, validation, and testing datasets for the new directory structure.
+    Generate training, validation, and testing datasets for the new simplified directory structure.
     
-    target_dir: A directory containing audio files for a specific machine ID
+    target_dir: Base directory ('normal' or 'abnormal')
     param: parameters dictionary from the YAML config
-    split_ratio: train/val/test split ratio as [train, val, test]
-    ext: file extension for audio files
     """
     logger.info(f"target_dir : {target_dir}")
     
@@ -327,60 +325,117 @@ def dataset_generator(target_dir, param=None):
     split_ratio = param.get("dataset", {}).get("split_ratio", [0.8, 0.1, 0.1])
     ext = param.get("dataset", {}).get("file_extension", "wav")
     
-    # Parse the target directory path to extract db, machine_type, and machine_id
-    parts = Path(target_dir).parts
-    db = None
-    machine_type = None
-    machine_id = None
+    # Determine if we're processing normal or abnormal files
     is_normal = "normal" in str(target_dir)
+    condition = "normal" if is_normal else "abnormal"
     
-    # Find the relevant parts
-    for i, part in enumerate(parts):
-        if part in ["0dB", "6dB", "-6dB"]:
-            db = part
-            if i+2 < len(parts):
-                machine_type = parts[i+1]
-                machine_id = parts[i+2]
-            break
-    
-    if not db or not machine_type or not machine_id:
-        logger.warning(f"Could not parse directory properly: {target_dir}")
-        return [], [], [], [], [], []
-    
-    # Get files in the current directory
+    # Get all files in the directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
     print(f"Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
     
-    # If the target is normal, find corresponding abnormal directory
-    base_dir = Path(param.get("base_directory", "./dataset"))
+    # Parse file names to extract db, machine_type, and machine_id
+    normal_data = {}  # {(db, machine_type, machine_id): [files]}
+    abnormal_data = {}  # {(db, machine_type, machine_id): [files]}
     
-    normal_files = []
-    abnormal_files = []
+    # Process current directory files
+    for file_path in files_in_dir:
+        filename = file_path.name
+        parts = filename.split('_')
+        
+        if len(parts) >= 4:  # Ensure we have enough parts in the filename
+            # Format: normal_0dB_fan_id_00-00000000.wav
+            # Or: abnormal_0dB_fan_id_00-00000000.wav
+            db = parts[1]
+            machine_type = parts[2]
+            machine_id_with_file = parts[3]
+            # Extract just the machine_id part (before the hyphen if exists)
+            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
+            
+            key = (db, machine_type, machine_id)
+            
+            if is_normal:
+                if key not in normal_data:
+                    normal_data[key] = []
+                normal_data[key].append(str(file_path))
+            else:
+                if key not in abnormal_data:
+                    abnormal_data[key] = []
+                abnormal_data[key].append(str(file_path))
     
-
-    if is_normal:
-        normal_files = [str(f) for f in files_in_dir]
-        # Try to find matching abnormal directory
-        abnormal_dir = base_dir / "abnormal" / db / machine_type / machine_id
-        if abnormal_dir.exists():
-            abnormal_files = [str(f) for f in abnormal_dir.glob(f"*.{ext}")]
-    else:
-        abnormal_files = [str(f) for f in files_in_dir]
-        # Try to find matching normal directory
-        normal_dir = base_dir / "normal" / db / machine_type / machine_id
-        if normal_dir.exists():
-            normal_files = [str(f) for f in normal_dir.glob(f"*.{ext}")]
+    # Get the other condition directory to find matching files
+    other_condition = "abnormal" if is_normal else "normal"
+    other_dir = Path(param.get("base_directory", "./dataset")) / other_condition
+    
+    # Get files from the other condition directory
+    other_files = list(other_dir.glob(f"*.{ext}"))
+    
+    # Process other directory files
+    for file_path in other_files:
+        filename = file_path.name
+        parts = filename.split('_')
+        
+        if len(parts) >= 4:
+            db = parts[1]
+            machine_type = parts[2]
+            machine_id_with_file = parts[3]
+            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
+            
+            key = (db, machine_type, machine_id)
+            
+            if not is_normal:  # We're processing abnormal dir initially, so these are normal files
+                if key not in normal_data:
+                    normal_data[key] = []
+                normal_data[key].append(str(file_path))
+            else:  # We're processing normal dir initially, so these are abnormal files
+                if key not in abnormal_data:
+                    abnormal_data[key] = []
+                abnormal_data[key].append(str(file_path))
     
     # Check if we have any files
-    if len(normal_files) == 0:
-        logger.warning(f"No normal {ext} files found for {machine_type}/{machine_id}")
-        if len(abnormal_files) == 0:
-            logger.error(f"No files found at all for {machine_type}/{machine_id}")
+    if not normal_data:
+        logger.warning(f"No normal {ext} files found")
+        if not abnormal_data:
+            logger.error(f"No files found at all")
             return [], [], [], [], [], []
     
-    if len(abnormal_files) == 0:
-        logger.warning(f"No abnormal {ext} files found for {machine_type}/{machine_id}")
+    if not abnormal_data:
+        logger.warning(f"No abnormal {ext} files found")
+    
+    # Apply filter if enabled
+    if param.get("filter", {}).get("enabled", False):
+        filter_db = param["filter"].get("db_level")
+        filter_machine = param["filter"].get("machine_type")
+        filter_id = param["filter"].get("machine_id")
+        
+        filtered_normal_data = {}
+        filtered_abnormal_data = {}
+        
+        for key in normal_data:
+            db, machine_type, machine_id = key
+            if (not filter_db or db == filter_db) and \
+               (not filter_machine or machine_type == filter_machine) and \
+               (not filter_id or machine_id == filter_id):
+                filtered_normal_data[key] = normal_data[key]
+        
+        for key in abnormal_data:
+            db, machine_type, machine_id = key
+            if (not filter_db or db == filter_db) and \
+               (not filter_machine or machine_type == filter_machine) and \
+               (not filter_id or machine_id == filter_id):
+                filtered_abnormal_data[key] = abnormal_data[key]
+        
+        normal_data = filtered_normal_data
+        abnormal_data = filtered_abnormal_data
+    
+    # Get all normal and abnormal files
+    normal_files = []
+    for files in normal_data.values():
+        normal_files.extend(files)
+    
+    abnormal_files = []
+    for files in abnormal_data.values():
+        abnormal_files.extend(files)
     
     # Create labels
     normal_labels = np.zeros(len(normal_files))
@@ -459,18 +514,14 @@ def dataset_generator(target_dir, param=None):
     logger.info(f"val_file num : {len(val_files)} (normal: {len(normal_val_files)}, abnormal: {len(abnormal_val_files)})")
     logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
 
+    # Debug info
     print(f"Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
-
-
-    # debug
-    print(f"DEBUG - Breakdown for {machine_id}:")
+    print(f"DEBUG - Dataset summary:")
     print(f"  Normal files found: {len(normal_files)}")
     print(f"  Abnormal files found: {len(abnormal_files)}")
     print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
     print(f"  Abnormal train: {len(abnormal_train_files)}, Abnormal val: {len(abnormal_val_files)}, Abnormal test: {len(abnormal_test_files)}")
-
-
 
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
@@ -621,333 +672,254 @@ def main():
     print("============== COUNTING DATASET SAMPLES ==============")
     logger.info("Counting all samples in the dataset...")
     
-    total_normal_files = 0
-    total_abnormal_files = 0
-    
-    # Updated to match the actual directory structure
     normal_path = Path(param["base_directory"]) / "normal"
     abnormal_path = Path(param["base_directory"]) / "abnormal"
     
-    # Count normal files
-    for db_dir in normal_path.glob("*"):
-        if db_dir.is_dir():
-            for machine_type_dir in db_dir.glob("*"):
-                if machine_type_dir.is_dir():
-                    for machine_id_dir in machine_type_dir.glob("*"):
-                        if machine_id_dir.is_dir():
-                            normal_count = len(list(machine_id_dir.glob("*.wav")))
-                            total_normal_files += normal_count
-    
-    # Count abnormal files
-    for db_dir in abnormal_path.glob("*"):
-        if db_dir.is_dir():
-            for machine_type_dir in db_dir.glob("*"):
-                if machine_type_dir.is_dir():
-                    for machine_id_dir in machine_type_dir.glob("*"):
-                        if machine_id_dir.is_dir():
-                            abnormal_count = len(list(machine_id_dir.glob("*.wav")))
-                            total_abnormal_files += abnormal_count
+    # Count files
+    total_normal_files = len(list(normal_path.glob("*.wav"))) if normal_path.exists() else 0
+    total_abnormal_files = len(list(abnormal_path.glob("*.wav"))) if abnormal_path.exists() else 0
     
     # Log the total counts
     logger.info(f"Total normal files in dataset: {total_normal_files}")
     logger.info(f"Total abnormal files in dataset: {total_abnormal_files}")
     logger.info(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
 
-    dirs = []
+    # Define target_dir (use normal_path as default, since dataset_generator will find corresponding abnormal files)
+    target_dir = normal_path
 
-    # Keep the filtering mechanism based on YAML config
-    if param.get("filter", {}).get("enabled", False):
-        filter_db = param["filter"].get("db_level")
-        filter_machine = param["filter"].get("machine_type")
-        filter_id = param["filter"].get("machine_id")
-        
-        # Start with the normal directory as we're finding our target dirs
-        normal_base = base_path / "normal"
-        
-        pattern_parts = []
-        if filter_db:
-            pattern_parts.append(filter_db)
-        else:
-            pattern_parts.append("*")
-        if filter_machine:
-            pattern_parts.append(filter_machine)
-        else:
-            pattern_parts.append("*")
-        if filter_id:
-            pattern_parts.append(filter_id)
-        else:
-            pattern_parts.append("*")
-        
-        glob_pattern = str(normal_base.joinpath(*pattern_parts))
-        dirs = sorted(glob.glob(glob_pattern))
+    # Get model file information from the first file in the directory
+    sample_files = list(Path(target_dir).glob(f"*.{param.get('dataset', {}).get('file_extension', 'wav')}"))
+
+    if not sample_files:
+        logger.warning(f"No files found in {target_dir}")
+        return  # Exit main() if no files are found
+
+    # Parse a sample filename to get db, machine_type, machine_id
+    filename = sample_files[0].name
+    parts = filename.split('_')
+
+    if len(parts) < 4:
+        logger.warning(f"Filename format incorrect: {filename}")
+        return  # Exit main() if filename format is incorrect
+
+    condition = parts[0]  # normal or abnormal
+    db = parts[1]
+    machine_type = parts[2]
+    machine_id = parts[3].split('-')[0] if '-' in parts[3] else parts[3]
+
+    print("============== DATASET_GENERATOR ==============")
+    train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
+    train_labels_pickle = f"{param['pickle_directory']}/train_labels_{machine_type}_{machine_id}_{db}.pickle"
+    val_pickle = f"{param['pickle_directory']}/val_{machine_type}_{machine_id}_{db}.pickle"
+    val_labels_pickle = f"{param['pickle_directory']}/val_labels_{machine_type}_{machine_id}_{db}.pickle"
+    test_files_pickle = f"{param['pickle_directory']}/test_files_{machine_type}_{machine_id}_{db}.pickle"
+    test_labels_pickle = f"{param['pickle_directory']}/test_labels_{machine_type}_{machine_id}_{db}.pickle"
+
+    # Initialize variables
+    train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+
+    if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
+        os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
+        os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
+        train_data = load_pickle(train_pickle)
+        train_labels = load_pickle(train_labels_pickle)
+        val_data = load_pickle(val_pickle)
+        val_labels = load_pickle(val_labels_pickle)
+        test_files = load_pickle(test_files_pickle)
+        test_labels = load_pickle(test_labels_pickle)
     else:
-        # Get all machine ID directories from the normal path
-        # We use normal paths as the base since they typically have all machine IDs
-        dirs = sorted(glob.glob(str(base_path / "normal" / "*" / "*" / "*")))
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
 
-    # Only include directories that contain machine IDs
-    dirs = [dir_path for dir_path in dirs if os.path.isdir(dir_path) and "/id_" in dir_path]
+        if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
+            logger.error(f"No files found for {machine_type}_{machine_id}_{db}, skipping...")
+            return  # Exit main() if no files are found after generation
 
-    result_file = f"{param['result_directory']}/resultv2.yaml"
-    results = {}
+    train_data, train_labels_expanded = list_to_vector_array_with_labels(
+        train_files,
+        train_labels,
+        msg="generate train_dataset",
+        n_mels=param["feature"]["n_mels"],
+        frames=param["feature"]["frames"],
+        n_fft=param["feature"]["n_fft"],
+        hop_length=param["feature"]["hop_length"],
+        power=param["feature"]["power"],
+        augment=True
+    )
+    print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
 
-    #Create variables to track overall metrics
-    all_y_true = []
-    all_y_pred = []
+    val_data, val_labels_expanded = list_to_vector_array_with_labels(
+        val_files,
+        val_labels,
+        msg="generate validation_dataset",
+        n_mels=param["feature"]["n_mels"],
+        frames=param["feature"]["frames"],
+        n_fft=param["feature"]["n_fft"],
+        hop_length=param["feature"]["hop_length"],
+        power=param["feature"]["power"],
+        augment=False
+    )
 
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
+    if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+        logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
+        continue
+
+    save_pickle(train_pickle, train_data)
+    save_pickle(train_labels_pickle, train_labels_expanded)
+    save_pickle(val_pickle, val_data)
+    save_pickle(val_labels_pickle, val_labels_expanded)
+    save_pickle(test_files_pickle, test_files)
+    save_pickle(test_labels_pickle, test_labels)
+
+    # Print shapes
+    logger.info(f"Training data shape: {train_data.shape}")
+    logger.info(f"Training labels shape: {train_labels_expanded.shape}")
+    logger.info(f"Validation data shape: {val_data.shape}")
+    logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
+    logger.info(f"Number of test files: {len(test_files)}")
+
+    #debug
+    normal_count = sum(1 for label in train_labels_expanded if label == 0)
+    abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
+    print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
+
+    
+    print("============== MODEL TRAINING ==============")
+    model_config = param.get("model", {}).get("architecture", {})
+    model = keras_model(
+        param["feature"]["n_mels"] * param["feature"]["frames"],
+        config=model_config
+    )
+    model.summary()
+
+    if os.path.exists(model_file):
+        model.load_weights(model_file)
+        logger.info("Model loaded from file, no training performed")
+    else:
+        compile_params = param["fit"]["compile"].copy()
+        loss_type = param.get("model", {}).get("loss", "mse")
+
+        # Handle learning_rate separately for the optimizer
+        learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
+
+        if loss_type == "binary_crossentropy":
+            compile_params["loss"] = binary_cross_entropy_loss
+        else:
+            # Default to standard binary_crossentropy from Keras
+            compile_params["loss"] = "binary_crossentropy"
+
+        if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
+            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+        # Add weighted_metrics to fix the warning
+        if "weighted_metrics" not in compile_params:
+            compile_params["weighted_metrics"] = []
+
+        compile_params["metrics"] = ['accuracy']
+        model.compile(**compile_params)
+        
+        callbacks = []
+        early_stopping_config = param.get("fit", {}).get("early_stopping", {})
+        if early_stopping_config.get("enabled", False):
+            callbacks.append(tf.keras.callbacks.EarlyStopping(
+                monitor=early_stopping_config.get("monitor", "val_loss"),
+                patience=early_stopping_config.get("patience", 10),
+                min_delta=early_stopping_config.get("min_delta", 0.001),
+                restore_best_weights=early_stopping_config.get("restore_best_weights", True)
+            ))
+        
+        sample_weights = np.ones(len(train_data))
+
+        # Apply targeted sample weighting
+        special_case_weights = param.get("fit", {}).get("special_case_weights", {})
+        special_case_key = f"{machine_type}_{machine_id}"
+        
+        if special_case_key in special_case_weights:
+            # Apply special case weight
+            sample_weights *= special_case_weights[special_case_key]
+        elif param.get("fit", {}).get("apply_sample_weights", False):
+            # Normal weighting for other cases
+            weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
+            weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
+            
+            if machine_id in weighted_machine_ids:
+                sample_weights *= weight_factor
+
+        
+        print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
+        history = model.fit(
+            train_data,
+            train_labels_expanded,
+            epochs=param["fit"]["epochs"],
+            batch_size=param["fit"]["batch_size"],
+            shuffle=param["fit"]["shuffle"],
+            validation_data=(val_data, val_labels_expanded),
+            verbose=param["fit"]["verbose"],
+            callbacks=callbacks,
+            sample_weight=sample_weights
+        )
+
+        model.save_weights(model_file)
+        visualizer.loss_plot(history, machine_type, machine_id, db)
+        visualizer.save_figure(history_img)
+
+
+    print("============== EVALUATION ==============")
+    y_pred = []
+    y_true = test_labels
+
+    for num, file_name in tqdm(enumerate(test_files), total=len(test_files)):
         try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPUs and enabled memory growth")
-        except RuntimeError as e:
-            logger.warning(f"Memory growth setting failed: {e}")
-
-    for dir_idx, target_dir in enumerate(dirs):
-        print("\n===========================")
-        print(f"[{dir_idx + 1}/{len(dirs)}] {target_dir}")
-
-        parts = Path(target_dir).parts
-        # Adjust for the new structure (normal/abnormal is at the beginning)
-        # Format will be like: [..., 'normal'/'abnormal', '0dB', 'fan', 'id_00']
-        for i, part in enumerate(parts):
-            if part in ['normal', 'abnormal']:
-                condition = part  # normal or abnormal
-                db = parts[i+1]
-                machine_type = parts[i+2]
-                machine_id = parts[i+3]
-                break
-        else:
-            # If the loop completes without finding normal/abnormal
-            logger.warning(f"Could not parse directory structure properly: {target_dir}")
-            # Default to assuming the last 3 parts are what we need
-            db = parts[-3]
-            machine_type = parts[-2]
-            machine_id = parts[-1]
-
-        evaluation_result = {}
-        train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
-        eval_files_pickle = f"{param['pickle_directory']}/eval_files_{machine_type}_{machine_id}_{db}.pickle"
-        eval_labels_pickle = f"{param['pickle_directory']}/eval_labels_{machine_type}_{machine_id}_{db}.pickle"
-        model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.weights.h5"
-        history_img = f"{param['model_directory']}/history_{machine_type}_{machine_id}_{db}.png"
-        evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
-
-       
-        print("============== DATASET_GENERATOR ==============")
-        train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
-        train_labels_pickle = f"{param['pickle_directory']}/train_labels_{machine_type}_{machine_id}_{db}.pickle"
-        val_pickle = f"{param['pickle_directory']}/val_{machine_type}_{machine_id}_{db}.pickle"
-        val_labels_pickle = f"{param['pickle_directory']}/val_labels_{machine_type}_{machine_id}_{db}.pickle"
-        test_files_pickle = f"{param['pickle_directory']}/test_files_{machine_type}_{machine_id}_{db}.pickle"
-        test_labels_pickle = f"{param['pickle_directory']}/test_labels_{machine_type}_{machine_id}_{db}.pickle"
-
-        # Initialize variables
-        train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
-
-        if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
-            os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
-            os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
-            train_data = load_pickle(train_pickle)
-            train_labels = load_pickle(train_labels_pickle)
-            val_data = load_pickle(val_pickle)
-            val_labels = load_pickle(val_labels_pickle)
-            test_files = load_pickle(test_files_pickle)
-            test_labels = load_pickle(test_labels_pickle)
-        else:
-            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
-
-            if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
-                logger.error(f"No files found for {evaluation_result_key}, skipping...")
+            data = file_to_vector_array(file_name,
+                                    n_mels=param["feature"]["n_mels"],
+                                    frames=param["feature"]["frames"],
+                                    n_fft=param["feature"]["n_fft"],
+                                    hop_length=param["feature"]["hop_length"],
+                                    power=param["feature"]["power"],
+                                    augment=False)  # No augmentation during eval
+                                    
+            if data.shape[0] == 0:
+                logger.warning(f"No valid features extracted from file: {file_name}")
                 continue
+                    
+            # Get the predicted class probability
+            pred = model.predict(data, verbose=0)
+            # Average the predictions across all frames
+            file_pred = np.mean(pred)
+            y_pred.append(file_pred)
+        except Exception as e:
+            logger.warning(f"Error processing file: {file_name}, error: {e}")
+            # If there's an error, use a default value (e.g., 0.5)
+            default_prediction = param.get("dataset", {}).get("default_prediction", 0.5)
+            y_pred.append(default_prediction)
 
-        train_data, train_labels_expanded = list_to_vector_array_with_labels(
-            train_files,
-            train_labels,
-            msg="generate train_dataset",
-            n_mels=param["feature"]["n_mels"],
-            frames=param["feature"]["frames"],
-            n_fft=param["feature"]["n_fft"],
-            hop_length=param["feature"]["hop_length"],
-            power=param["feature"]["power"],
-            augment=True
-        )
-        print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
+    # Optimize threshold using ROC curve if enabled
+    if param.get("model", {}).get("threshold_optimization", True):
+        fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
+        optimal_idx = np.argmax(tpr - fpr)
+        optimal_threshold = thresholds[optimal_idx]
+    else:
+        optimal_threshold = 0.5  # Default threshold
+    logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
 
-        val_data, val_labels_expanded = list_to_vector_array_with_labels(
-            val_files,
-            val_labels,
-            msg="generate validation_dataset",
-            n_mels=param["feature"]["n_mels"],
-            frames=param["feature"]["frames"],
-            n_fft=param["feature"]["n_fft"],
-            hop_length=param["feature"]["hop_length"],
-            power=param["feature"]["power"],
-            augment=False
-        )
+    # Convert predictions to binary using optimal threshold
+    y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
 
-        if train_data.shape[0] == 0 or val_data.shape[0] == 0:
-            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-            continue
+    # Calculate metrics
+    accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+    
+    evaluation_result = {}
+    evaluation_result["Accuracy"] = float(accuracy)
 
-        save_pickle(train_pickle, train_data)
-        save_pickle(train_labels_pickle, train_labels_expanded)
-        save_pickle(val_pickle, val_data)
-        save_pickle(val_labels_pickle, val_labels_expanded)
-        save_pickle(test_files_pickle, test_files)
-        save_pickle(test_labels_pickle, test_labels)
+    logger.info(f"Accuracy: {accuracy:.4f}")
 
-        # Print shapes
-        logger.info(f"Training data shape: {train_data.shape}")
-        logger.info(f"Training labels shape: {train_labels_expanded.shape}")
-        logger.info(f"Validation data shape: {val_data.shape}")
-        logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
-        logger.info(f"Number of test files: {len(test_files)}")
-
-        #debug
-        normal_count = sum(1 for label in train_labels_expanded if label == 0)
-        abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
-        print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
-
-        
-        print("============== MODEL TRAINING ==============")
-        model_config = param.get("model", {}).get("architecture", {})
-        model = keras_model(
-            param["feature"]["n_mels"] * param["feature"]["frames"],
-            config=model_config
-        )
-        model.summary()
-
-        if os.path.exists(model_file):
-            model.load_weights(model_file)
-            logger.info("Model loaded from file, no training performed")
-        else:
-            compile_params = param["fit"]["compile"].copy()
-            loss_type = param.get("model", {}).get("loss", "mse")
-
-            # Handle learning_rate separately for the optimizer
-            learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
-
-            if loss_type == "binary_crossentropy":
-                compile_params["loss"] = binary_cross_entropy_loss
-            else:
-                # Default to standard binary_crossentropy from Keras
-                compile_params["loss"] = "binary_crossentropy"
-
-            if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-                compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-
-            # Add weighted_metrics to fix the warning
-            if "weighted_metrics" not in compile_params:
-                compile_params["weighted_metrics"] = []
-
-            compile_params["metrics"] = ['accuracy']
-            model.compile(**compile_params)
-            
-            callbacks = []
-            early_stopping_config = param.get("fit", {}).get("early_stopping", {})
-            if early_stopping_config.get("enabled", False):
-                callbacks.append(tf.keras.callbacks.EarlyStopping(
-                    monitor=early_stopping_config.get("monitor", "val_loss"),
-                    patience=early_stopping_config.get("patience", 10),
-                    min_delta=early_stopping_config.get("min_delta", 0.001),
-                    restore_best_weights=early_stopping_config.get("restore_best_weights", True)
-                ))
-            
-            sample_weights = np.ones(len(train_data))
-
-            # Apply targeted sample weighting
-            special_case_weights = param.get("fit", {}).get("special_case_weights", {})
-            special_case_key = f"{machine_type}_{machine_id}"
-            
-            if special_case_key in special_case_weights:
-                # Apply special case weight
-                sample_weights *= special_case_weights[special_case_key]
-            elif param.get("fit", {}).get("apply_sample_weights", False):
-                # Normal weighting for other cases
-                weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
-                weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
-                
-                if machine_id in weighted_machine_ids:
-                    sample_weights *= weight_factor
-
-            
-            print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
-            history = model.fit(
-                train_data,
-                train_labels_expanded,
-                epochs=param["fit"]["epochs"],
-                batch_size=param["fit"]["batch_size"],
-                shuffle=param["fit"]["shuffle"],
-                validation_data=(val_data, val_labels_expanded),
-                verbose=param["fit"]["verbose"],
-                callbacks=callbacks,
-                sample_weight=sample_weights
-            )
-
-            model.save_weights(model_file)
-            visualizer.loss_plot(history, machine_type, machine_id, db)
-            visualizer.save_figure(history_img)
+    results[evaluation_result_key] = evaluation_result
 
 
-        print("============== EVALUATION ==============")
-        y_pred = []
-        y_true = test_labels
+    #add the machine's predictions and true labels to the overall collection
+    all_y_true.extend(y_true)
+    all_y_pred.extend(y_pred_binary)
 
-        for num, file_name in tqdm(enumerate(test_files), total=len(test_files)):
-            try:
-                data = file_to_vector_array(file_name,
-                                        n_mels=param["feature"]["n_mels"],
-                                        frames=param["feature"]["frames"],
-                                        n_fft=param["feature"]["n_fft"],
-                                        hop_length=param["feature"]["hop_length"],
-                                        power=param["feature"]["power"],
-                                        augment=False)  # No augmentation during eval
-                                        
-                if data.shape[0] == 0:
-                    logger.warning(f"No valid features extracted from file: {file_name}")
-                    continue
-                        
-                # Get the predicted class probability
-                pred = model.predict(data, verbose=0)
-                # Average the predictions across all frames
-                file_pred = np.mean(pred)
-                y_pred.append(file_pred)
-            except Exception as e:
-                logger.warning(f"Error processing file: {file_name}, error: {e}")
-                # If there's an error, use a default value (e.g., 0.5)
-                default_prediction = param.get("dataset", {}).get("default_prediction", 0.5)
-                y_pred.append(default_prediction)
-
-        # Optimize threshold using ROC curve if enabled
-        if param.get("model", {}).get("threshold_optimization", True):
-            fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
-            optimal_idx = np.argmax(tpr - fpr)
-            optimal_threshold = thresholds[optimal_idx]
-        else:
-            optimal_threshold = 0.5  # Default threshold
-        logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
-
-        # Convert predictions to binary using optimal threshold
-        y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
-
-        # Calculate metrics
-        accuracy = metrics.accuracy_score(y_true, y_pred_binary)
-        
-        evaluation_result = {}
-        evaluation_result["Accuracy"] = float(accuracy)
-
-        logger.info(f"Accuracy: {accuracy:.4f}")
-
-        results[evaluation_result_key] = evaluation_result
-
-
-        #add the machine's predictions and true labels to the overall collection
-        all_y_true.extend(y_true)
-        all_y_pred.extend(y_pred_binary)
-
-        print("===========================")
+    print("===========================")
 
     end_time = time.time()
     total_time = end_time - start_time

@@ -687,6 +687,10 @@ def main():
     result_file = f"{param['result_directory']}/resultv2.yaml"
     results = {}
 
+    #Create variables to track overall metrics
+    all_y_true = []
+    all_y_pred = []
+
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -923,11 +927,6 @@ def main():
 
         # Calculate metrics
         accuracy = metrics.accuracy_score(y_true, y_pred_binary)
-        precision = metrics.precision_score(y_true, y_pred_binary)
-        recall = metrics.recall_score(y_true, y_pred_binary)
-        f1 = metrics.f1_score(y_true, y_pred_binary)
-        roc_auc = metrics.roc_auc_score(y_true, y_pred)
-
         
         evaluation_result["Accuracy"] = float(accuracy)
 
@@ -935,12 +934,28 @@ def main():
 
         results[evaluation_result_key] = evaluation_result
 
+
+        #add the machine's predictions and true labels to the overall collection
+        all_y_true.extend(y_true)
+        all_y_pred.extend(y_pred_binary)
+
         print("===========================")
 
     end_time = time.time()
     total_time = end_time - start_time
     logger.info(f"Total execution time: {total_time:.2f} seconds")
     results["execution_time_seconds"] = float(total_time)
+
+    #calculate overall accuracy
+    if len(all_y_true) > 0 and len(all_y_pred) > 0:
+        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
+        
+        # Add overall metrics to results
+        results["overall"] = {
+            "accuracy": float(overall_accuracy),
+        }
+        
+        logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
 
     print("\n===========================")
     logger.info(f"all results -> {result_file}")

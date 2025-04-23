@@ -71,11 +71,11 @@ logger = setup_logging()
 ########################################################################
 class Visualizer:
     def __init__(self, param=None):
-        self.param = param or {}
-        pass
+        self.param = param or {}  # Initialize with param or empty dict
 
     def loss_plot(self, history, machine_type=None, machine_id=None, db=None):
-        fig_size = param.get("visualization", {}).get("figure_size", [30, 20])
+        # Change this line
+        fig_size = self.param.get("visualization", {}).get("figure_size", [30, 20])
         plt.figure(figsize=(fig_size[0], fig_size[1]))
         
         # Create title with machine information

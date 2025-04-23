@@ -823,6 +823,9 @@ def main():
             compile_params = param["fit"]["compile"].copy()
             loss_type = param.get("model", {}).get("loss", "mse")
 
+            # Handle learning_rate separately for the optimizer
+            learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
+
             if loss_type == "binary_crossentropy":
                 compile_params["loss"] = binary_cross_entropy_loss
             else:
@@ -830,7 +833,7 @@ def main():
                 compile_params["loss"] = "binary_crossentropy"
 
             if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-                compile_params["optimizer"] = tf.keras.optimizers.Adam()
+                compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
             # Add weighted_metrics to fix the warning
             if "weighted_metrics" not in compile_params:

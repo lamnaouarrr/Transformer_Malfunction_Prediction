@@ -70,7 +70,8 @@ logger = setup_logging()
 # visualizer
 ########################################################################
 class Visualizer:
-    def __init__(self):
+    def __init__(self, param=None):
+        self.param = param or {}
         pass
 
     def loss_plot(self, history, machine_type=None, machine_id=None, db=None):
@@ -613,7 +614,7 @@ def main():
     os.makedirs(param["model_directory"], exist_ok=True)
     os.makedirs(param["result_directory"], exist_ok=True)
 
-    visualizer = Visualizer()
+    visualizer = Visualizer(param)
 
     base_path = Path(param["base_directory"])
 

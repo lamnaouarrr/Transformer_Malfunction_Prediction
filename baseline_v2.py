@@ -761,7 +761,7 @@ def main():
 
     if train_data.shape[0] == 0 or val_data.shape[0] == 0:
         logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-        continue
+        return  # Exit main() if no valid training/validation data
 
     save_pickle(train_pickle, train_data)
     save_pickle(train_labels_pickle, train_labels_expanded)

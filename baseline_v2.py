@@ -335,7 +335,7 @@ def dataset_generator(target_dir, param=None):
     
     # Find the relevant parts
     for i, part in enumerate(parts):
-        if part in ["0dB", "3dB", "6dB", "-3dB", "-6dB"]:
+        if part in ["0dB", "6dB", "-6dB"]:
             db = part
             if i+2 < len(parts):
                 machine_type = parts[i+1]
@@ -348,6 +348,8 @@ def dataset_generator(target_dir, param=None):
     
     # Get files in the current directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
+    print(f"Looking for files in: {target_dir}")
+    print(f"Found {len(files_in_dir)} files")
     
     # If the target is normal, find corresponding abnormal directory
     base_dir = Path(param.get("base_directory", "./dataset"))

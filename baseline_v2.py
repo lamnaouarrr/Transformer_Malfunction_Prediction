@@ -186,6 +186,7 @@ def file_to_vector_array(file_name,
     """
     Convert file_name to a vector array with optional augmentation for normal data.
     """
+    print(f"DEBUG: Processing file: {file_name}")
     dims = n_mels * frames
     sr, y = demux_wav(file_name)
     if y is None:
@@ -317,6 +318,7 @@ def dataset_generator(target_dir, param=None):
     target_dir: Base directory ('normal' or 'abnormal')
     param: parameters dictionary from the YAML config
     """
+    print(f"DEBUG: dataset_generator called with target_dir: {target_dir}")
     logger.info(f"target_dir : {target_dir}")
     
     if param is None:
@@ -328,11 +330,17 @@ def dataset_generator(target_dir, param=None):
     # Determine if we're processing normal or abnormal files
     is_normal = "normal" in str(target_dir)
     condition = "normal" if is_normal else "abnormal"
+    print(f"DEBUG: Processing {condition} files")
     
     # Get all files in the directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
     print(f"Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
+
+    # If no files found, try listing the directory contents
+    if len(files_in_dir) == 0:
+        print(f"DEBUG: No files with extension '{ext}' found in {target_dir}")
+        print(f"DEBUG: Directory contents: {list(Path(target_dir).iterdir())[:10]}")  # Show first 10 files
     
     # Parse file names to extract db, machine_type, and machine_id
     normal_data = {}  # {(db, machine_type, machine_id): [files]}
@@ -649,7 +657,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 # main
 ########################################################################
-def main():
+ddef main():
     start_time = time.time()
 
     with open("baseline.yaml", "r") as stream:
@@ -660,6 +668,23 @@ def main():
     os.makedirs(param["result_directory"], exist_ok=True)
 
     visualizer = Visualizer(param)
+
+    # Test audio file loading directly
+    normal_path = Path(param["base_directory"]) / "normal"
+    abnormal_path = Path(param["base_directory"]) / "abnormal"
+    
+    # Try to load a sample file directly
+    test_files = list(normal_path.glob("*.wav"))[:1] if normal_path.exists() and list(normal_path.glob("*.wav")) else list(abnormal_path.glob("*.wav"))[:1]
+    
+    if test_files:
+        print(f"DEBUG: Testing direct audio load for: {test_files[0]}")
+        sr, y = demux_wav(str(test_files[0]))
+        if y is not None:
+            print(f"DEBUG: Successfully loaded audio with sr={sr}, length={len(y)}")
+        else:
+            print(f"DEBUG: Failed to load audio file")
+    else:
+        print("DEBUG: No test files found to verify audio loading")
 
     base_path = Path(param["base_directory"])
 
@@ -682,10 +707,12 @@ def main():
     target_dir = normal_path if normal_path.exists() else abnormal_path
     if not target_dir.exists():
         logger.error("Neither normal nor abnormal directory exists!")
-        return [], [], [], [], [], []
+        return
 
     # Get model file information from the first file in the directory
     sample_files = list(Path(target_dir).glob(f"*.{param.get('dataset', {}).get('file_extension', 'wav')}"))
+    print(f"DEBUG: Found {len(sample_files)} files in {target_dir}")
+    print(f"DEBUG: First 5 files: {[f.name for f in sample_files[:5]]}")
 
     if not sample_files:
         logger.warning(f"No files found in {target_dir}")
@@ -694,6 +721,7 @@ def main():
     # Parse a sample filename to get db, machine_type, machine_id
     filename = sample_files[0].name
     parts = filename.split('_')
+    print(f"DEBUG: Parsing filename '{filename}' into parts: {parts}")
 
     if len(parts) < 4:
         logger.warning(f"Filename format incorrect: {filename}")
@@ -703,9 +731,14 @@ def main():
     db = parts[1]
     machine_type = parts[2]
     machine_id = parts[3].split('-')[0] if '-' in parts[3] else parts[3]
+    print(f"DEBUG: Extracted - condition: {condition}, db: {db}, machine_type: {machine_type}, machine_id: {machine_id}")
     
-    # Define evaluation_result_key here before it's used
-    evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
+    # Use a straightforward key without unintended characters
+    evaluation_result_key = f"{machine_type}_{machine_id}_{db}".replace("-", "_")
+    print(f"DEBUG: Using evaluation_result_key: {evaluation_result_key}")
+
+    # Initialize evaluation result dictionary
+    evaluation_result = {}
     
     # Initialize results dictionary if it doesn't exist
     results = {}
@@ -872,8 +905,6 @@ def main():
         visualizer.loss_plot(history, machine_type, machine_id, db)
         visualizer.save_figure(history_img)
     
-    # Define evaluation_result dictionary
-    evaluation_result = {}
 
     if not os.path.exists(model_file):
         # Capture the final training and validation accuracies

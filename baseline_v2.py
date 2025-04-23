@@ -657,7 +657,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 # main
 ########################################################################
-ddef main():
+def main():
     start_time = time.time()
 
     with open("baseline.yaml", "r") as stream:

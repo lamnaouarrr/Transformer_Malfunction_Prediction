@@ -186,7 +186,6 @@ def file_to_vector_array(file_name,
     """
     Convert file_name to a vector array with optional augmentation for normal data.
     """
-    print(f"DEBUG: Processing file: {file_name}")
     dims = n_mels * frames
     sr, y = demux_wav(file_name)
     if y is None:

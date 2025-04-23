@@ -706,6 +706,15 @@ def main():
     db = parts[1]
     machine_type = parts[2]
     machine_id = parts[3].split('-')[0] if '-' in parts[3] else parts[3]
+    
+    # Define evaluation_result_key here before it's used
+    evaluation_result_key = f"{machine_type}_{machine_id}_{db}"
+    
+    # Initialize results dictionary if it doesn't exist
+    results = {}
+    all_y_true = []
+    all_y_pred = []
+    result_file = param.get("result_file", "resultv2.yaml")
 
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
@@ -731,7 +740,7 @@ def main():
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
 
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
-            logger.error(f"No files found for {machine_type}_{machine_id}_{db}, skipping...")
+            logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
 
     train_data, train_labels_expanded = list_to_vector_array_with_labels(
@@ -866,6 +875,34 @@ def main():
         visualizer.loss_plot(history, machine_type, machine_id, db)
         visualizer.save_figure(history_img)
 
+    if not os.path.exists(model_file):
+        # Capture the final training and validation accuracies
+        train_accuracy = history.history['accuracy'][-1]
+        val_accuracy = history.history['val_accuracy'][-1]
+        
+        # Store these in the results dictionary
+        evaluation_result["TrainAccuracy"] = float(train_accuracy)
+        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
+        
+        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
+        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
+    else:
+        # If model was loaded from file and not trained, we need to evaluate on train and validation data
+        train_pred = model.predict(train_data, verbose=0)
+        train_pred_binary = (train_pred.flatten() >= 0.5).astype(int)
+        train_accuracy = metrics.accuracy_score(train_labels_expanded, train_pred_binary)
+        
+        val_pred = model.predict(val_data, verbose=0)
+        val_pred_binary = (val_pred.flatten() >= 0.5).astype(int)
+        val_accuracy = metrics.accuracy_score(val_labels_expanded, val_pred_binary)
+        
+        # Store these in the results dictionary
+        evaluation_result["TrainAccuracy"] = float(train_accuracy)
+        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
+        
+        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
+        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
+
 
     print("============== EVALUATION ==============")
     y_pred = []
@@ -911,11 +948,8 @@ def main():
     # Calculate metrics
     accuracy = metrics.accuracy_score(y_true, y_pred_binary)
     
-    evaluation_result = {}
-    evaluation_result["Accuracy"] = float(accuracy)
-
-    logger.info(f"Accuracy: {accuracy:.4f}")
-
+    evaluation_result["TestAccuracy"] = float(accuracy)
+    logger.info(f"Test Accuracy: {accuracy:.4f}")
     results[evaluation_result_key] = evaluation_result
 
 

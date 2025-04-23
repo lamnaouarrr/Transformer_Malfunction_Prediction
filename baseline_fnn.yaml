@@ -68,12 +68,12 @@ visualization:
 
 # Directory paths
 base_directory: "./dataset"
-pickle_directory: "./pickle_fnn"
-model_directory: "./model_fnn"
-result_directory: "./result_fnn"
-result_file: "resultv2.yaml"
+pickle_directory: "./pickle/pickle_fnn"
+model_directory: "./model/model_fnn"
+result_directory: "./result/result_fnn"
+result_file: "result_fnn.yaml"
 
 # Logging parameters
 logging:
   level: "DEBUG"
-  file: "baseline.log"
+  file: "baseline_fnn.log"

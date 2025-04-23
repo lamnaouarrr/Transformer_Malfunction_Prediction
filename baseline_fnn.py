@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
- @file   baseline_v2.py
+ @file   baseline_fnn.py
  @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025 with enhancements.
  @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr), further modified by Grok
  Copyright (C) 2019 Hitachi, Ltd. All right reserved.
@@ -55,7 +55,7 @@ def binary_cross_entropy_loss(y_true, y_pred):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    logging.basicConfig(level=logging.DEBUG, filename="baseline.log")
+    logging.basicConfig(level=logging.DEBUG, filename="baseline_fnn.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -660,7 +660,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 def main():
     start_time = time.time()
 
-    with open("baseline.yaml", "r") as stream:
+    with open("baseline_fnn.yaml", "r") as stream:
         param = yaml.safe_load(stream)
 
     os.makedirs(param["pickle_directory"], exist_ok=True)
@@ -744,7 +744,7 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = param.get("result_file", "resultv2.yaml")
+    result_file = param.get("result_file", "result_fnn.yaml")
 
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"

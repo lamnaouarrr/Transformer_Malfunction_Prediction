@@ -180,7 +180,8 @@ def file_to_vector_array(file_name,
                          n_fft=1024,
                          hop_length=512,
                          power=2.0,
-                         augment=False):
+                         augment=False,
+                         param=None):
     """
     Convert file_name to a vector array with optional augmentation for normal data.
     """
@@ -928,6 +929,7 @@ def main():
         # Calculate metrics
         accuracy = metrics.accuracy_score(y_true, y_pred_binary)
         
+        evaluation_result = {}
         evaluation_result["Accuracy"] = float(accuracy)
 
         logger.info(f"Accuracy: {accuracy:.4f}")
@@ -946,15 +948,9 @@ def main():
     logger.info(f"Total execution time: {total_time:.2f} seconds")
     results["execution_time_seconds"] = float(total_time)
 
-    #calculate overall accuracy
-    if len(all_y_true) > 0 and len(all_y_pred) > 0:
-        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
-        
-        # Add overall metrics to results
-        results["overall"] = {
-            "accuracy": float(overall_accuracy),
-        }
-        
+    if len(all_y_true) > 0 and len(all_y_pred_binary) > 0:
+        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred_binary)
+        results["overall_accuracy"] = float(overall_accuracy)
         logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
 
     print("\n===========================")

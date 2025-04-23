@@ -784,6 +784,10 @@ def main():
 
     
     print("============== MODEL TRAINING ==============")
+    # Define model_file and history_img variables
+    model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.h5"
+    history_img = f"{param['result_directory']}/history_{machine_type}_{machine_id}_{db}.png"
+
     model_config = param.get("model", {}).get("architecture", {})
     model = keras_model(
         param["feature"]["n_mels"] * param["feature"]["frames"],

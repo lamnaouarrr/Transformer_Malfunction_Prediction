@@ -1,8 +1,8 @@
 dataset
-.venv
 model
+result
 pickle
-=2.15.0
-=3.7.0
+logs
+.venv
 get-pip.py
 __pycache__

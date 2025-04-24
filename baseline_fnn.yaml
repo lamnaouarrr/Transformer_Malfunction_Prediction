@@ -70,7 +70,7 @@ visualization:
 # Directory paths
 base_directory: "./dataset"
 pickle_directory: "./pickle/pickle_fnn"
-model_directory: "./model/model_fnn"
+model_directory: "./model/FNN"
 result_directory: "./result/result_fnn"
 result_file: "result_fnn.yaml"
 

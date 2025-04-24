@@ -1,9 +1,9 @@
 # Feature extraction parameters
 feature:
-  n_mels: 64
-  frames: 5
-  n_fft: 1024
-  hop_length: 512
+  n_mels: 48           # Reduced from 64
+  frames: 4            # Reduced from 5
+  n_fft: 1024          # Keep as is
+  hop_length: 1024     # Doubled from 512
   power: 2.0
   augmentation:
     enabled: true

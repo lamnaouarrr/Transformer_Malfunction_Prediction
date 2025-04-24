@@ -28,7 +28,8 @@ from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention
-from tensorflow.keras.losses import mean_squared_error
+#from tensorflow.keras.losses import mean_squared_error
+from tensorflow.keras.losses import mse as mean_squared_error
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from pathlib import Path
@@ -181,7 +182,6 @@ def file_to_vector_array(file_name,
                          n_fft=1024,
                          hop_length=512,
                          power=2.0,
-                         stride=3,
                          augment=False,
                          param=None):
     """
@@ -219,7 +219,6 @@ def file_to_vector_array(file_name,
     # Add normalization for binary cross-entropy
     vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
     
-    vectorarray = vectorarray[::stride, :]
     return vectorarray
 
 def list_to_vector_array(file_list,

@@ -15,15 +15,27 @@ import uvicorn
 from pathlib import Path
 import tempfile
 
-# Import functions from baseline_fnn.py
-sys.path.append('..')
-from baseline_fnn import (
-    setup_logging,
-    file_to_vector_array,
-    demux_wav,
-    keras_model,
-    normalize_spectrograms
-)
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Add compatibility layer for TensorFlow
+import tensorflow as tf
+if not hasattr(tf.keras.losses, 'mean_squared_error'):
+    # Define the function if it doesn't exist
+    tf.keras.losses.mean_squared_error = tf.keras.losses.MeanSquaredError()
+
+# Now import from baseline_fnn
+try:
+    from baseline_fnn import (
+        setup_logging,
+        file_to_vector_array,
+        demux_wav,
+        keras_model,
+        normalize_spectrograms
+    )
+except ImportError as e:
+    print(f"Error importing from baseline_fnn: {e}")
+    sys.exit(1)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -44,8 +56,9 @@ app.add_middleware(
 # Setup logging
 logger = setup_logging()
 
-# Load configuration
-with open("../baseline_fnn.yaml", "r") as stream:
+# Find the correct path to the YAML file
+yaml_path = os.path.join(os.path.dirname(__file__), '..', 'baseline_fnn.yaml')
+with open(yaml_path, "r") as stream:
     param = yaml.safe_load(stream)
 
 # Global variables

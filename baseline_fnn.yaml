@@ -6,6 +6,7 @@ feature:
   hop_length: 1024     # Doubled from 512
   stride: 4 
   power: 2.0
+  sr: 16000
   augmentation:
     enabled: true
     max_mask_freq: 10
@@ -53,7 +54,7 @@ model:
     residual: true
     weight_decay: 0.0001  # L2 regularization weight decay
   loss: "binary_crossentropy"
-  normalization_method: "minmax"  # Options: "minmax", "zscore", "log"
+  normalization_method: "minmax_local"
   threshold_optimization: true
 
 # Dataset generation parameters

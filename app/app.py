@@ -223,24 +223,27 @@ def main():
                             result = send_to_api(uploaded_file.getvalue(), api_url, mode="file")
                         
                         if result and "error" not in result:
-                            # Display result
-                            prediction = result.get("confidence", result.get("prediction", 0))
-                            threshold = result.get("threshold", 0.5)
-                            prediction_label = result.get("result", result.get("prediction", "unknown"))
-                            
+                            # Get the anomaly score and prediction label from the API result
+                            anomaly_score = result.get("anomaly_score", 0.0) # Use get with a default float value
+                            prediction_label = result.get("prediction", "unknown") # Get the string label
+                            threshold = result.get("threshold", 0.5) # Get the threshold from the API
+
                             # Show result with appropriate styling
                             if prediction_label == "normal":
-                                st.success(f"✅ Normal Sound (Confidence: {(1-prediction):.4f})")
+                                # Assuming API doesn't return confidence directly, maybe use 1 - score?
+                                # Or if your API provides a confidence, use that key.
+                                # For now, displaying the score for both:
+                                st.success(f"✅ Normal Sound (Anomaly Score: {anomaly_score:.4f})")
                             else:
-                                st.error(f"⚠️ Abnormal Sound Detected (Anomaly Score: {prediction:.4f})")
-                                
+                                st.error(f"⚠️ Abnormal Sound Detected (Anomaly Score: {anomaly_score:.4f})")
+
                             st.info(f"API Threshold: {threshold:.4f}")
-                            
+
                             # Update Results History
                             st.session_state.results.append({
                                 "Filename": uploaded_file.name,
                                 "Result": prediction_label.capitalize(),
-                                "Score": prediction,
+                                "Score": anomaly_score, # Use the numerical score for history
                                 "Threshold": threshold,
                                 "Source": f"API ({api_endpoint})",
                                 "Timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")

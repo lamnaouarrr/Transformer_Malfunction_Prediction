@@ -28,8 +28,7 @@ from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention
-#from tensorflow.keras.losses import mean_squared_error
-from tensorflow.keras.losses import mse as mean_squared_error
+from tensorflow.keras.losses import mean_squared_error
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from pathlib import Path
@@ -81,8 +80,6 @@ class Visualizer:
         
         # Create title with machine information
         title_info = ""
-        if machine_type and machine_id and db:
-            title_info = f" for {machine_type} {machine_id} {db}"
         
         # Plot loss
         plt.subplot(2, 1, 1)
@@ -188,38 +185,52 @@ def file_to_vector_array(file_name,
     Convert file_name to a vector array with optional augmentation for normal data.
     """
     dims = n_mels * frames
-    sr, y = demux_wav(file_name)
-    if y is None:
-        print(f"Failed to load {file_name}")
-        return np.empty((0, dims), float)
-
-    if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
-        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
-
+    
+    try:
+        sr, y = demux_wav(file_name)
+        if y is None:
+            logger.error(f"Failed to load {file_name}")
+            return np.empty((0, dims), float)
         
-    mel_spectrogram = librosa.feature.melspectrogram(y=y,
-                                                    sr=sr,
-                                                    n_fft=n_fft,
-                                                    hop_length=hop_length,
-                                                    n_mels=n_mels,
-                                                    power=power)
-    log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
-    
-    if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
-        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
-    
-    vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
-    if vectorarray_size < 1:
+        # Skip files that are too short
+        if len(y) < n_fft:
+            logger.warning(f"File too short: {file_name}")
+            return np.empty((0, dims), float)
+            
+        mel_spectrogram = librosa.feature.melspectrogram(y=y,
+                                                       sr=sr,
+                                                       n_fft=n_fft,
+                                                       hop_length=hop_length,
+                                                       n_mels=n_mels,
+                                                       power=power)
+        log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
+        
+        if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
+            log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
+        
+        vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
+        if vectorarray_size < 1:
+            logger.warning(f"Not enough frames in {file_name}")
+            return np.empty((0, dims), float)
+
+        # Use a more memory-efficient approach
+        vectorarray = np.zeros((vectorarray_size, dims), float)
+        for t in range(frames):
+            vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
+
+        # Normalize for binary cross-entropy
+        if np.max(vectorarray) > np.min(vectorarray):
+            vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
+            
+        # Apply subsampling to reduce memory usage
+        stride = param.get("feature", {}).get("stride", 4) if param else 4
+        vectorarray = vectorarray[::stride, :]
+        
+        return vectorarray
+        
+    except Exception as e:
+        logger.error(f"Error in file_to_vector_array for {file_name}: {e}")
         return np.empty((0, dims), float)
-
-    vectorarray = np.zeros((vectorarray_size, dims), float)
-    for t in range(frames):
-        vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
-
-    # Add normalization for binary cross-entropy
-    vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
-    
-    return vectorarray
 
 def list_to_vector_array(file_list,
                          msg="calc...",
@@ -233,23 +244,28 @@ def list_to_vector_array(file_list,
     dataset = None
     total_size = 0
 
-    for idx in tqdm(range(len(file_list)), desc=msg):
-        vector_array = file_to_vector_array(file_list[idx],
-                                           n_mels=n_mels,
-                                           frames=frames,
-                                           n_fft=n_fft,
-                                           hop_length=hop_length,
-                                           power=power,
-                                           augment=augment)
+    for idx in tqdm(range(len(file_list)), desc=msg, total=len(file_list)):
+        try:
+            vector_array = file_to_vector_array(file_list[idx],
+                                            n_mels=n_mels,
+                                            frames=frames,
+                                            n_fft=n_fft,
+                                            hop_length=hop_length,
+                                            power=power,
+                                            augment=augment)
         
-        if vector_array.shape[0] == 0:
-            continue
+            if vector_array.shape[0] == 0:
+                continue
 
-        if dataset is None:
-            dataset = np.zeros((vector_array.shape[0] * len(file_list), dims), float)
-        
-        dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
-        total_size += vector_array.shape[0]
+            if dataset is None:
+                dataset = np.zeros((vector_array.shape[0] * len(file_list), dims), float)
+            
+            dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
+            total_size += vector_array.shape[0]
+
+        except Exception as e:
+            logger.error(f"Failed to process file {file_list[idx]}: {e}")
+            continue  # Skip this file and continue with the next
 
     if dataset is None:
         logger.warning("No valid data was found in the file list.")
@@ -264,50 +280,65 @@ def list_to_vector_array_with_labels(file_list, labels,
                                       n_fft=1024,
                                       hop_length=512,
                                       power=2.0,
-                                      augment=False):
+                                      augment=False,
+                                      batch_size=500):  # Added batch_size parameter
     dims = n_mels * frames
     dataset = None
     expanded_labels = None
     total_size = 0
-
-    for idx in tqdm(range(len(file_list)), desc=msg):
-        vector_array = file_to_vector_array(file_list[idx],
-                                           n_mels=n_mels,
-                                           frames=frames,
-                                           n_fft=n_fft,
-                                           hop_length=hop_length,
-                                           power=power,
-                                           augment=augment)
+    
+    # Process files in batches to avoid memory issues
+    for batch_start in tqdm(range(0, len(file_list), batch_size), desc=f"{msg} (in batches)"):
+        batch_end = min(batch_start + batch_size, len(file_list))
+        batch_files = file_list[batch_start:batch_end]
+        batch_labels = labels[batch_start:batch_end]
         
-        if vector_array.shape[0] == 0:
+        batch_vectors = []
+        batch_expanded_labels = []
+        
+        for idx, file_path in enumerate(batch_files):
+            try:
+                vector_array = file_to_vector_array(file_path,
+                                                   n_mels=n_mels,
+                                                   frames=frames,
+                                                   n_fft=n_fft,
+                                                   hop_length=hop_length,
+                                                   power=power,
+                                                   augment=augment)
+                
+                if vector_array.shape[0] == 0:
+                    continue
+                
+                # Store vectors and corresponding labels
+                batch_vectors.append(vector_array)
+                batch_expanded_labels.extend([batch_labels[idx]] * vector_array.shape[0])
+            except Exception as e:
+                logger.error(f"Error processing file {file_path}: {e}")
+                continue
+        
+        if not batch_vectors:
             continue
-
-        # Ensure that the labels match the number of samples in vector_array
-        file_labels = np.full(vector_array.shape[0], labels[idx])
+            
+        # Combine all vectors from this batch
+        batch_dataset = np.vstack(batch_vectors) if batch_vectors else np.empty((0, dims), float)
+        batch_expanded_labels = np.array(batch_expanded_labels)
         
+        # Initialize or extend the main dataset arrays
         if dataset is None:
-            # Estimate total size to preallocate arrays
-            avg_vectors_per_file = vector_array.shape[0]
-            estimated_total_size = avg_vectors_per_file * len(file_list)
-            dataset = np.zeros((estimated_total_size, dims), float)
-            expanded_labels = np.zeros(estimated_total_size, float)
+            dataset = batch_dataset
+            expanded_labels = batch_expanded_labels
+        else:
+            dataset = np.vstack([dataset, batch_dataset])
+            expanded_labels = np.concatenate([expanded_labels, batch_expanded_labels])
         
-        # Ensure there is enough space in the dataset
-        if total_size + vector_array.shape[0] > dataset.shape[0]:
-            dataset = np.resize(dataset, (dataset.shape[0] * 2, dims))
-            expanded_labels = np.resize(expanded_labels, dataset.shape[0])
-        
-        # Insert the new data into the dataset
-        dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
-        expanded_labels[total_size:total_size + vector_array.shape[0]] = file_labels
-        total_size += vector_array.shape[0]
+        total_size += batch_dataset.shape[0]
+        logger.info(f"Processed batch {batch_start//batch_size + 1}/{(len(file_list)-1)//batch_size + 1}, total samples: {total_size}")
 
-    # Trimming the dataset to the right size
     if dataset is None:
         logger.warning("No valid data was found in the file list.")
         return np.empty((0, dims), float), np.array([])
 
-    return dataset[:total_size, :], expanded_labels[:total_size]
+    return dataset, expanded_labels
 
 
 
@@ -363,18 +394,8 @@ def dataset_generator(target_dir, param=None):
             
             key = (db, machine_type, machine_id)
             
+            # Add file to appropriate dictionary based on its actual condition
             if condition == "normal":
-                if key not in normal_data:
-                    normal_data[key] = []
-                normal_data[key].append(str(file_path))
-            else:
-                if key not in abnormal_data:
-                    abnormal_data[key] = []
-                abnormal_data[key].append(str(file_path))
-            
-            key = (db, machine_type, machine_id)
-            
-            if is_normal:
                 if key not in normal_data:
                     normal_data[key] = []
                 normal_data[key].append(str(file_path))
@@ -734,7 +755,7 @@ def main():
     print(f"DEBUG: Extracted - condition: {condition}, db: {db}, machine_type: {machine_type}, machine_id: {machine_id}")
     
     # Use a straightforward key without unintended characters
-    evaluation_result_key = f"{machine_type}_{machine_id}_{db}".replace("-", "_")
+    evaluation_result_key = "overall_model"
     print(f"DEBUG: Using evaluation_result_key: {evaluation_result_key}")
 
     # Initialize evaluation result dictionary
@@ -744,15 +765,15 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = param.get("result_file", "result_fnn.yaml")
+    result_file = f"{param['result_directory']}/result_fnn.yaml"
 
     print("============== DATASET_GENERATOR ==============")
-    train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
-    train_labels_pickle = f"{param['pickle_directory']}/train_labels_{machine_type}_{machine_id}_{db}.pickle"
-    val_pickle = f"{param['pickle_directory']}/val_{machine_type}_{machine_id}_{db}.pickle"
-    val_labels_pickle = f"{param['pickle_directory']}/val_labels_{machine_type}_{machine_id}_{db}.pickle"
-    test_files_pickle = f"{param['pickle_directory']}/test_files_{machine_type}_{machine_id}_{db}.pickle"
-    test_labels_pickle = f"{param['pickle_directory']}/test_labels_{machine_type}_{machine_id}_{db}.pickle"
+    train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
+    train_labels_pickle = f"{param['pickle_directory']}/train_labels_overall.pickle"
+    val_pickle = f"{param['pickle_directory']}/val_overall.pickle"
+    val_labels_pickle = f"{param['pickle_directory']}/val_labels_overall.pickle"
+    test_files_pickle = f"{param['pickle_directory']}/test_files_overall.pickle"
+    test_labels_pickle = f"{param['pickle_directory']}/test_labels_overall.pickle"
 
     # Initialize variables
     train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
@@ -824,8 +845,8 @@ def main():
     
     print("============== MODEL TRAINING ==============")
     # Define model_file and history_img variables
-    model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.h5"
-    history_img = f"{param['result_directory']}/history_{machine_type}_{machine_id}_{db}.png"
+    model_file = f"{param['model_directory']}/model_overall.h5"
+    history_img = f"{param['result_directory']}/history_overall.png"
 
     model_config = param.get("model", {}).get("architecture", {})
     model = keras_model(
@@ -872,20 +893,11 @@ def main():
         
         sample_weights = np.ones(len(train_data))
 
-        # Apply targeted sample weighting
-        special_case_weights = param.get("fit", {}).get("special_case_weights", {})
-        special_case_key = f"{machine_type}_{machine_id}"
-        
-        if special_case_key in special_case_weights:
-            # Apply special case weight
-            sample_weights *= special_case_weights[special_case_key]
-        elif param.get("fit", {}).get("apply_sample_weights", False):
-            # Normal weighting for other cases
-            weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
-            weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
-            
-            if machine_id in weighted_machine_ids:
-                sample_weights *= weight_factor
+        # Apply uniform sample weights - no machine-specific weighting
+        if param.get("fit", {}).get("apply_sample_weights", False):
+            # Apply a uniform weight factor if needed
+            weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
+            sample_weights *= weight_factor
 
         
         print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
@@ -902,7 +914,7 @@ def main():
         )
 
         model.save_weights(model_file)
-        visualizer.loss_plot(history, machine_type, machine_id, db)
+        visualizer.loss_plot(history)
         visualizer.save_figure(history_img)
     
 

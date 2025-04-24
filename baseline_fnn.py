@@ -80,8 +80,6 @@ class Visualizer:
         
         # Create title with machine information
         title_info = ""
-        if machine_type and machine_id and db:
-            title_info = f" for {machine_type} {machine_id} {db}"
         
         # Plot loss
         plt.subplot(2, 1, 1)
@@ -757,7 +755,7 @@ def main():
     print(f"DEBUG: Extracted - condition: {condition}, db: {db}, machine_type: {machine_type}, machine_id: {machine_id}")
     
     # Use a straightforward key without unintended characters
-    evaluation_result_key = f"{machine_type}_{machine_id}_{db}".replace("-", "_")
+    evaluation_result_key = "overall_model"
     print(f"DEBUG: Using evaluation_result_key: {evaluation_result_key}")
 
     # Initialize evaluation result dictionary
@@ -767,15 +765,15 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = param.get("result_file", "result_fnn.yaml")
+    result_file = f"{param['result_directory']}/result_fnn.yaml"
 
     print("============== DATASET_GENERATOR ==============")
-    train_pickle = f"{param['pickle_directory']}/train_{machine_type}_{machine_id}_{db}.pickle"
-    train_labels_pickle = f"{param['pickle_directory']}/train_labels_{machine_type}_{machine_id}_{db}.pickle"
-    val_pickle = f"{param['pickle_directory']}/val_{machine_type}_{machine_id}_{db}.pickle"
-    val_labels_pickle = f"{param['pickle_directory']}/val_labels_{machine_type}_{machine_id}_{db}.pickle"
-    test_files_pickle = f"{param['pickle_directory']}/test_files_{machine_type}_{machine_id}_{db}.pickle"
-    test_labels_pickle = f"{param['pickle_directory']}/test_labels_{machine_type}_{machine_id}_{db}.pickle"
+    train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
+    train_labels_pickle = f"{param['pickle_directory']}/train_labels_overall.pickle"
+    val_pickle = f"{param['pickle_directory']}/val_overall.pickle"
+    val_labels_pickle = f"{param['pickle_directory']}/val_labels_overall.pickle"
+    test_files_pickle = f"{param['pickle_directory']}/test_files_overall.pickle"
+    test_labels_pickle = f"{param['pickle_directory']}/test_labels_overall.pickle"
 
     # Initialize variables
     train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
@@ -847,8 +845,8 @@ def main():
     
     print("============== MODEL TRAINING ==============")
     # Define model_file and history_img variables
-    model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.h5"
-    history_img = f"{param['result_directory']}/history_{machine_type}_{machine_id}_{db}.png"
+    model_file = f"{param['model_directory']}/model_overall.h5"
+    history_img = f"{param['result_directory']}/history_overall.png"
 
     model_config = param.get("model", {}).get("architecture", {})
     model = keras_model(
@@ -895,20 +893,11 @@ def main():
         
         sample_weights = np.ones(len(train_data))
 
-        # Apply targeted sample weighting
-        special_case_weights = param.get("fit", {}).get("special_case_weights", {})
-        special_case_key = f"{machine_type}_{machine_id}"
-        
-        if special_case_key in special_case_weights:
-            # Apply special case weight
-            sample_weights *= special_case_weights[special_case_key]
-        elif param.get("fit", {}).get("apply_sample_weights", False):
-            # Normal weighting for other cases
-            weighted_machine_ids = param.get("fit", {}).get("weighted_machine_ids", [])
-            weight_factor = param.get("fit", {}).get("weight_factor", 1.5)
-            
-            if machine_id in weighted_machine_ids:
-                sample_weights *= weight_factor
+        # Apply uniform sample weights - no machine-specific weighting
+        if param.get("fit", {}).get("apply_sample_weights", False):
+            # Apply a uniform weight factor if needed
+            weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
+            sample_weights *= weight_factor
 
         
         print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
@@ -925,7 +914,7 @@ def main():
         )
 
         model.save_weights(model_file)
-        visualizer.loss_plot(history, machine_type, machine_id, db)
+        visualizer.loss_plot(history)
         visualizer.save_figure(history_img)
     
 

@@ -234,7 +234,7 @@ def list_to_vector_array(file_list,
     dataset = None
     total_size = 0
 
-    for idx in tqdm(range(len(file_list)), desc=msg):
+    for idx in tqdm(range(len(file_list)), desc=msg, total=len(file_list)):
         vector_array = file_to_vector_array(file_list[idx],
                                            n_mels=n_mels,
                                            frames=frames,

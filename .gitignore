@@ -3,4 +3,5 @@ dataset
 model
 pickle
 =2.15.0
+=3.7.0
 get-pip.py

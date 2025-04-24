@@ -55,7 +55,8 @@ def binary_cross_entropy_loss(y_true, y_pred):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    logging.basicConfig(level=logging.DEBUG, filename="baseline_fnn.log")
+    os.makedirs("/logs/log_fnn", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="/logs/log_fnn/baseline_fnn.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')

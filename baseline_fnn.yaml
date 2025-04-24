@@ -77,4 +77,4 @@ result_file: "result_fnn.yaml"
 # Logging parameters
 logging:
   level: "DEBUG"
-  file: "baseline_fnn.log"
+  file: "/logs/log_fnn/baseline_fnn.log"

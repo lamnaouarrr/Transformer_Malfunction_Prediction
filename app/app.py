@@ -109,7 +109,7 @@ def main():
         # Model selection (you can expand this to allow selecting different models)
         model_path = st.text_input(
             "Model Path", 
-            value="model_fan_id_00_0dB.h5",
+            value="model/FNN/model_fan_id_00_0dB.h5",
             help="Path to your trained FNN model (.h5 file)"
         )
         

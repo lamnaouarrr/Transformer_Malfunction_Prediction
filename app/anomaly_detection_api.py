@@ -16,6 +16,7 @@ from pathlib import Path
 import tempfile
 
 # Import functions from baseline_fnn.py
+sys.path.append('..')
 from baseline_fnn import (
     setup_logging,
     file_to_vector_array,
@@ -44,7 +45,7 @@ app.add_middleware(
 logger = setup_logging()
 
 # Load configuration
-with open("baseline_fnn.yaml", "r") as stream:
+with open("../baseline_fnn.yaml", "r") as stream:
     param = yaml.safe_load(stream)
 
 # Global variables
@@ -52,10 +53,18 @@ model = None
 model_file = None
 threshold = 0.5  # Default threshold
 
+def ensure_directory_exists(directory):
+    """Create directory if it doesn't exist"""
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        logger.info(f"Created directory: {directory}")
+
 def load_model():
     """Load the trained model"""
     global model, model_file, threshold
     
+    ensure_directory_exists(f"{param['model_directory']}/FNN")
+
     # Get model file information from the first file in the directory
     normal_path = Path(param["base_directory"]) / "normal"
     abnormal_path = Path(param["base_directory"]) / "abnormal"
@@ -85,7 +94,7 @@ def load_model():
     machine_id = parts[3].split('-')[0] if '-' in parts[3] else parts[3]
     
     # Define model file path
-    model_file = f"{param['model_directory']}/model_{machine_type}_{machine_id}_{db}.h5"
+    model_file = f"{param['model_directory']}/FNN/model_{machine_type}_{machine_id}_{db}.h5"
     
     # Check if model file exists
     if not os.path.exists(model_file):

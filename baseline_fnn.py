@@ -187,38 +187,51 @@ def file_to_vector_array(file_name,
     Convert file_name to a vector array with optional augmentation for normal data.
     """
     dims = n_mels * frames
+    
     try:
         sr, y = demux_wav(file_name)
         if y is None:
-            print(f"Failed to load {file_name}")
+            logger.error(f"Failed to load {file_name}")
             return np.empty((0, dims), float)
-
+        
+        # Skip files that are too short
+        if len(y) < n_fft:
+            logger.warning(f"File too short: {file_name}")
+            return np.empty((0, dims), float)
+            
         mel_spectrogram = librosa.feature.melspectrogram(y=y,
-                                                        sr=sr,
-                                                        n_fft=n_fft,
-                                                        hop_length=hop_length,
-                                                        n_mels=n_mels,
-                                                        power=power)
+                                                       sr=sr,
+                                                       n_fft=n_fft,
+                                                       hop_length=hop_length,
+                                                       n_mels=n_mels,
+                                                       power=power)
         log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
-
+        
         if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
             log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
-
+        
         vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
         if vectorarray_size < 1:
+            logger.warning(f"Not enough frames in {file_name}")
             return np.empty((0, dims), float)
 
+        # Use a more memory-efficient approach
         vectorarray = np.zeros((vectorarray_size, dims), float)
         for t in range(frames):
             vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
 
-        # Add normalization for binary cross-entropy
-        vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
-
+        # Normalize for binary cross-entropy
+        if np.max(vectorarray) > np.min(vectorarray):
+            vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
+            
+        # Apply subsampling to reduce memory usage
+        stride = param.get("feature", {}).get("stride", 4) if param else 4
+        vectorarray = vectorarray[::stride, :]
+        
         return vectorarray
-
+        
     except Exception as e:
-        logger.error(f"Error processing {file_name}: {e}")
+        logger.error(f"Error in file_to_vector_array for {file_name}: {e}")
         return np.empty((0, dims), float)
 
 def list_to_vector_array(file_list,
@@ -262,72 +275,72 @@ def list_to_vector_array(file_list,
         
     return dataset[:total_size, :]
 
-def list_to_vector_array_with_labels(file_list, labels, batch_size=1000,
-                                     msg="calc...",
-                                     n_mels=64,
-                                     frames=5,
-                                     n_fft=1024,
-                                     hop_length=512,
-                                     power=2.0,
-                                     augment=False):
+def list_to_vector_array_with_labels(file_list, labels,
+                                      msg="calc...",
+                                      n_mels=64,
+                                      frames=5,
+                                      n_fft=1024,
+                                      hop_length=512,
+                                      power=2.0,
+                                      augment=False,
+                                      batch_size=500):  # Added batch_size parameter
     dims = n_mels * frames
     dataset = None
     expanded_labels = None
     total_size = 0
-
-    for i in tqdm(range(0, len(file_list), batch_size), desc=msg):
-        batch_files = file_list[i:min(i + batch_size, len(file_list))]
-        batch_labels = labels[i:min(i + batch_size, len(file_list))]
+    
+    # Process files in batches to avoid memory issues
+    for batch_start in tqdm(range(0, len(file_list), batch_size), desc=f"{msg} (in batches)"):
+        batch_end = min(batch_start + batch_size, len(file_list))
+        batch_files = file_list[batch_start:batch_end]
+        batch_labels = labels[batch_start:batch_end]
         
         batch_vectors = []
-        batch_file_labels = []
-
-        for idx, file in enumerate(batch_files):
-            vector_array = file_to_vector_array(file,
-                                               n_mels=n_mels,
-                                               frames=frames,
-                                               n_fft=n_fft,
-                                               hop_length=hop_length,
-                                               power=power,
-                                               augment=augment)
-            
-            if vector_array.shape[0] == 0:
-                continue
-
-            batch_vectors.append(vector_array)
-            batch_file_labels.extend(np.full(vector_array.shape[0], batch_labels[idx]))
-
-        if batch_vectors:  # Check if batch_vectors is not empty
-            batch_vectors_concatenated = np.concatenate(batch_vectors, axis=0)
-            batch_file_labels = np.array(batch_file_labels)
-            
-            batch_size_current = batch_vectors_concatenated.shape[0]
-
-            if dataset is None:
-                # Estimate total size to preallocate arrays
-                avg_vectors_per_file = np.mean([v.shape[0] for v in batch_vectors]) if batch_vectors else 0 
-                estimated_total_size = int(avg_vectors_per_file * len(file_list) if avg_vectors_per_file > 0 else 0)
+        batch_expanded_labels = []
+        
+        for idx, file_path in enumerate(batch_files):
+            try:
+                vector_array = file_to_vector_array(file_path,
+                                                   n_mels=n_mels,
+                                                   frames=frames,
+                                                   n_fft=n_fft,
+                                                   hop_length=hop_length,
+                                                   power=power,
+                                                   augment=augment)
                 
-                dataset = np.zeros((estimated_total_size, dims), float) if estimated_total_size > 0 else np.empty((0, dims), float)
-                expanded_labels = np.zeros(estimated_total_size, float) if estimated_total_size > 0 else np.empty(0, float)
+                if vector_array.shape[0] == 0:
+                    continue
+                
+                # Store vectors and corresponding labels
+                batch_vectors.append(vector_array)
+                batch_expanded_labels.extend([batch_labels[idx]] * vector_array.shape[0])
+            except Exception as e:
+                logger.error(f"Error processing file {file_path}: {e}")
+                continue
+        
+        if not batch_vectors:
+            continue
+            
+        # Combine all vectors from this batch
+        batch_dataset = np.vstack(batch_vectors) if batch_vectors else np.empty((0, dims), float)
+        batch_expanded_labels = np.array(batch_expanded_labels)
+        
+        # Initialize or extend the main dataset arrays
+        if dataset is None:
+            dataset = batch_dataset
+            expanded_labels = batch_expanded_labels
+        else:
+            dataset = np.vstack([dataset, batch_dataset])
+            expanded_labels = np.concatenate([expanded_labels, batch_expanded_labels])
+        
+        total_size += batch_dataset.shape[0]
+        logger.info(f"Processed batch {batch_start//batch_size + 1}/{(len(file_list)-1)//batch_size + 1}, total samples: {total_size}")
 
-            # Ensure there is enough space in the dataset
-            if total_size + batch_size_current > dataset.shape[0]:
-                dataset_new_size = max(dataset.shape[0] * 2, total_size + batch_size_current) if dataset.shape[0] > 0 else total_size + batch_size_current
-                dataset = np.resize(dataset, (dataset_new_size, dims))
-                expanded_labels = np.resize(expanded_labels, dataset_new_size)
-
-            # Insert the new data into the dataset
-            dataset[total_size:total_size + batch_size_current, :] = batch_vectors_concatenated
-            expanded_labels[total_size:total_size + batch_size_current] = batch_file_labels
-            total_size += batch_size_current
-
-    # Trimming the dataset to the right size
-    if dataset is None or dataset.shape[0] == 0:
-        print("No valid data was found in the file list.")
+    if dataset is None:
+        logger.warning("No valid data was found in the file list.")
         return np.empty((0, dims), float), np.array([])
 
-    return dataset[:total_size, :], expanded_labels[:total_size]
+    return dataset, expanded_labels
 
 
 
@@ -383,18 +396,8 @@ def dataset_generator(target_dir, param=None):
             
             key = (db, machine_type, machine_id)
             
+            # Add file to appropriate dictionary based on its actual condition
             if condition == "normal":
-                if key not in normal_data:
-                    normal_data[key] = []
-                normal_data[key].append(str(file_path))
-            else:
-                if key not in abnormal_data:
-                    abnormal_data[key] = []
-                abnormal_data[key].append(str(file_path))
-            
-            key = (db, machine_type, machine_id)
-            
-            if is_normal:
                 if key not in normal_data:
                     normal_data[key] = []
                 normal_data[key].append(str(file_path))

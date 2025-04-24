@@ -4,6 +4,7 @@ feature:
   frames: 4            # Reduced from 5
   n_fft: 1024          # Keep as is
   hop_length: 1024     # Doubled from 512
+  stride: 4 
   power: 2.0
   augmentation:
     enabled: true

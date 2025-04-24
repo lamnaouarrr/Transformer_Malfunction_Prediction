@@ -181,46 +181,45 @@ def file_to_vector_array(file_name,
                          n_fft=1024,
                          hop_length=512,
                          power=2.0,
-                         stride=3,
                          augment=False,
                          param=None):
     """
     Convert file_name to a vector array with optional augmentation for normal data.
     """
     dims = n_mels * frames
-    sr, y = demux_wav(file_name)
-    if y is None:
-        print(f"Failed to load {file_name}")
+    try:
+        sr, y = demux_wav(file_name)
+        if y is None:
+            print(f"Failed to load {file_name}")
+            return np.empty((0, dims), float)
+
+        mel_spectrogram = librosa.feature.melspectrogram(y=y,
+                                                        sr=sr,
+                                                        n_fft=n_fft,
+                                                        hop_length=hop_length,
+                                                        n_mels=n_mels,
+                                                        power=power)
+        log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
+
+        if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
+            log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
+
+        vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
+        if vectorarray_size < 1:
+            return np.empty((0, dims), float)
+
+        vectorarray = np.zeros((vectorarray_size, dims), float)
+        for t in range(frames):
+            vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
+
+        # Add normalization for binary cross-entropy
+        vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
+
+        return vectorarray
+
+    except Exception as e:
+        logger.error(f"Error processing {file_name}: {e}")
         return np.empty((0, dims), float)
-
-    if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
-        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
-
-        
-    mel_spectrogram = librosa.feature.melspectrogram(y=y,
-                                                    sr=sr,
-                                                    n_fft=n_fft,
-                                                    hop_length=hop_length,
-                                                    n_mels=n_mels,
-                                                    power=power)
-    log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
-    
-    if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
-        log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
-    
-    vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
-    if vectorarray_size < 1:
-        return np.empty((0, dims), float)
-
-    vectorarray = np.zeros((vectorarray_size, dims), float)
-    for t in range(frames):
-        vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
-
-    # Add normalization for binary cross-entropy
-    vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
-    
-    vectorarray = vectorarray[::stride, :]
-    return vectorarray
 
 def list_to_vector_array(file_list,
                          msg="calc...",
@@ -235,22 +234,27 @@ def list_to_vector_array(file_list,
     total_size = 0
 
     for idx in tqdm(range(len(file_list)), desc=msg, total=len(file_list)):
-        vector_array = file_to_vector_array(file_list[idx],
-                                           n_mels=n_mels,
-                                           frames=frames,
-                                           n_fft=n_fft,
-                                           hop_length=hop_length,
-                                           power=power,
-                                           augment=augment)
+        try:
+            vector_array = file_to_vector_array(file_list[idx],
+                                            n_mels=n_mels,
+                                            frames=frames,
+                                            n_fft=n_fft,
+                                            hop_length=hop_length,
+                                            power=power,
+                                            augment=augment)
         
-        if vector_array.shape[0] == 0:
-            continue
+            if vector_array.shape[0] == 0:
+                continue
 
-        if dataset is None:
-            dataset = np.zeros((vector_array.shape[0] * len(file_list), dims), float)
-        
-        dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
-        total_size += vector_array.shape[0]
+            if dataset is None:
+                dataset = np.zeros((vector_array.shape[0] * len(file_list), dims), float)
+            
+            dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
+            total_size += vector_array.shape[0]
+
+        except Exception as e:
+            logger.error(f"Failed to process file {file_list[idx]}: {e}")
+            continue  # Skip this file and continue with the next
 
     if dataset is None:
         logger.warning("No valid data was found in the file list.")
@@ -258,54 +262,69 @@ def list_to_vector_array(file_list,
         
     return dataset[:total_size, :]
 
-def list_to_vector_array_with_labels(file_list, labels,
-                                      msg="calc...",
-                                      n_mels=64,
-                                      frames=5,
-                                      n_fft=1024,
-                                      hop_length=512,
-                                      power=2.0,
-                                      augment=False):
+def list_to_vector_array_with_labels(file_list, labels, batch_size=1000,
+                                     msg="calc...",
+                                     n_mels=64,
+                                     frames=5,
+                                     n_fft=1024,
+                                     hop_length=512,
+                                     power=2.0,
+                                     augment=False):
     dims = n_mels * frames
     dataset = None
     expanded_labels = None
     total_size = 0
 
-    for idx in tqdm(range(len(file_list)), desc=msg):
-        vector_array = file_to_vector_array(file_list[idx],
-                                           n_mels=n_mels,
-                                           frames=frames,
-                                           n_fft=n_fft,
-                                           hop_length=hop_length,
-                                           power=power,
-                                           augment=augment)
+    for i in tqdm(range(0, len(file_list), batch_size), desc=msg):
+        batch_files = file_list[i:min(i + batch_size, len(file_list))]
+        batch_labels = labels[i:min(i + batch_size, len(file_list))]
         
-        if vector_array.shape[0] == 0:
-            continue
+        batch_vectors = []
+        batch_file_labels = []
 
-        # Ensure that the labels match the number of samples in vector_array
-        file_labels = np.full(vector_array.shape[0], labels[idx])
-        
-        if dataset is None:
-            # Estimate total size to preallocate arrays
-            avg_vectors_per_file = vector_array.shape[0]
-            estimated_total_size = avg_vectors_per_file * len(file_list)
-            dataset = np.zeros((estimated_total_size, dims), float)
-            expanded_labels = np.zeros(estimated_total_size, float)
-        
-        # Ensure there is enough space in the dataset
-        if total_size + vector_array.shape[0] > dataset.shape[0]:
-            dataset = np.resize(dataset, (dataset.shape[0] * 2, dims))
-            expanded_labels = np.resize(expanded_labels, dataset.shape[0])
-        
-        # Insert the new data into the dataset
-        dataset[total_size:total_size + vector_array.shape[0], :] = vector_array
-        expanded_labels[total_size:total_size + vector_array.shape[0]] = file_labels
-        total_size += vector_array.shape[0]
+        for idx, file in enumerate(batch_files):
+            vector_array = file_to_vector_array(file,
+                                               n_mels=n_mels,
+                                               frames=frames,
+                                               n_fft=n_fft,
+                                               hop_length=hop_length,
+                                               power=power,
+                                               augment=augment)
+            
+            if vector_array.shape[0] == 0:
+                continue
+
+            batch_vectors.append(vector_array)
+            batch_file_labels.extend(np.full(vector_array.shape[0], batch_labels[idx]))
+
+        if batch_vectors:  # Check if batch_vectors is not empty
+            batch_vectors_concatenated = np.concatenate(batch_vectors, axis=0)
+            batch_file_labels = np.array(batch_file_labels)
+            
+            batch_size_current = batch_vectors_concatenated.shape[0]
+
+            if dataset is None:
+                # Estimate total size to preallocate arrays
+                avg_vectors_per_file = np.mean([v.shape[0] for v in batch_vectors]) if batch_vectors else 0 
+                estimated_total_size = int(avg_vectors_per_file * len(file_list) if avg_vectors_per_file > 0 else 0)
+                
+                dataset = np.zeros((estimated_total_size, dims), float) if estimated_total_size > 0 else np.empty((0, dims), float)
+                expanded_labels = np.zeros(estimated_total_size, float) if estimated_total_size > 0 else np.empty(0, float)
+
+            # Ensure there is enough space in the dataset
+            if total_size + batch_size_current > dataset.shape[0]:
+                dataset_new_size = max(dataset.shape[0] * 2, total_size + batch_size_current) if dataset.shape[0] > 0 else total_size + batch_size_current
+                dataset = np.resize(dataset, (dataset_new_size, dims))
+                expanded_labels = np.resize(expanded_labels, dataset_new_size)
+
+            # Insert the new data into the dataset
+            dataset[total_size:total_size + batch_size_current, :] = batch_vectors_concatenated
+            expanded_labels[total_size:total_size + batch_size_current] = batch_file_labels
+            total_size += batch_size_current
 
     # Trimming the dataset to the right size
-    if dataset is None:
-        logger.warning("No valid data was found in the file list.")
+    if dataset is None or dataset.shape[0] == 0:
+        print("No valid data was found in the file list.")
         return np.empty((0, dims), float), np.array([])
 
     return dataset[:total_size, :], expanded_labels[:total_size]

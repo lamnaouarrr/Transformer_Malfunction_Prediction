@@ -548,6 +548,27 @@ def dataset_generator(target_dir, param=None):
     abnormal_val_labels = abnormal_labels[n_abnormal_train:n_abnormal_train+n_abnormal_val] if num_abnormal > 0 else np.array([])
     abnormal_test_files = abnormal_files[n_abnormal_train+n_abnormal_val:] if num_abnormal > 0 else []
     abnormal_test_labels = abnormal_labels[n_abnormal_train+n_abnormal_val:] if num_abnormal > 0 else np.array([])
+
+
+    if len(normal_test_files) == 0:
+        logger.warning("No normal samples in test set! Adding some from training set.")
+        # Move some normal samples from train to test if available
+        move_count = min(5, len(normal_train_files))
+        if move_count > 0:
+            normal_test_files = normal_train_files[:move_count]
+            normal_test_labels = normal_train_labels[:move_count]
+            normal_train_files = normal_train_files[move_count:]
+            normal_train_labels = normal_train_labels[move_count:]
+
+    if len(abnormal_test_files) == 0:
+        logger.warning("No abnormal samples in test set! Adding some from training set.")
+        # Move some abnormal samples from train to test if available
+        move_count = min(5, len(abnormal_train_files))
+        if move_count > 0:
+            abnormal_test_files = abnormal_train_files[:move_count]
+            abnormal_test_labels = abnormal_train_labels[:move_count]
+            abnormal_train_files = abnormal_train_files[move_count:]
+            abnormal_train_labels = abnormal_train_labels[move_count:]
     
     # Combine normal and abnormal datasets
     train_files = normal_train_files + abnormal_train_files
@@ -704,6 +725,25 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 # main
 ########################################################################
 def main():
+    print("============== CHECKING DIRECTORY STRUCTURE ==============")
+    normal_dir = Path(param["base_directory"]) / "normal"
+    abnormal_dir = Path(param["base_directory"]) / "abnormal"
+
+    print(f"Normal directory exists: {normal_dir.exists()}")
+    if normal_dir.exists():
+        normal_files = list(normal_dir.glob("*.wav"))
+        print(f"Number of normal files found: {len(normal_files)}")
+        if normal_files:
+            print(f"Sample normal filename: {normal_files[0].name}")
+
+    print(f"Abnormal directory exists: {abnormal_dir.exists()}")
+    if abnormal_dir.exists():
+        abnormal_files = list(abnormal_dir.glob("*.wav"))
+        print(f"Number of abnormal files found: {len(abnormal_files)}")
+        if abnormal_files:
+            print(f"Sample abnormal filename: {abnormal_files[0].name}")
+
+    
     start_time = time.time()
 
     with open("baseline_fnn.yaml", "r") as stream:
@@ -1002,13 +1042,14 @@ def main():
             y_pred.append(default_prediction)
 
     # Optimize threshold using ROC curve if enabled
-    if param.get("model", {}).get("threshold_optimization", True):
+    if param.get("model", {}).get("threshold_optimization", True) and len(y_true) > 0 and len(np.unique(y_true)) > 1:
         fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
         optimal_idx = np.argmax(tpr - fpr)
         optimal_threshold = thresholds[optimal_idx]
+        logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
     else:
         optimal_threshold = 0.5  # Default threshold
-    logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
+        logger.info(f"Using default threshold: {optimal_threshold}")
 
     # Convert predictions to binary using optimal threshold
     y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
@@ -1019,6 +1060,42 @@ def main():
 
     # Calculate metrics
     accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+
+    #debug####################################################################
+    print(f"DEBUG - y_true values distribution: {np.unique(y_true, return_counts=True)}")
+    print(f"DEBUG - y_pred_binary values distribution: {np.unique(y_pred_binary, return_counts=True)}")
+    print(f"DEBUG - First 10 pairs of true and predicted values:")
+    for i in range(min(10, len(y_true))):
+        print(f"  True: {y_true[i]}, Predicted: {y_pred_binary[i]}")
+
+    if len(y_true) == 0:
+        logger.error("Test set is empty! No samples to evaluate.")
+        # Use placeholder values instead of generating a classification report
+        class_report = {
+            "0": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0},
+            "1": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0}
+        }
+    elif len(np.unique(y_pred_binary)) == 1:
+        logger.warning(f"All predictions are the same class: {np.unique(y_pred_binary)[0]}! Classification metrics will be 0.")
+        # Create a simple class report with actual support counts but zero metrics
+        classes = np.unique(y_true)
+        class_report = {}
+        for cls in classes:
+            cls_support = np.sum(y_true == cls)
+            class_report[str(cls)] = {"precision": 0, "recall": 0, "f1-score": 0, "support": cls_support}
+        
+        # Add the other class if missing (with 0 support)
+        for cls in [0, 1]:
+            if str(cls) not in class_report:
+                class_report[str(cls)] = {"precision": 0, "recall": 0, "f1-score": 0, "support": 0}
+    else:
+        # Generate and print classification report
+        class_report = classification_report(y_true, y_pred_binary, output_dict=True)
+        print("\nClassification Report:")
+        print(classification_report(y_true, y_pred_binary))
+
+
+    ###########################################################################
 
     # Generate and print classification report
     class_report = classification_report(y_true, y_pred_binary, output_dict=True)

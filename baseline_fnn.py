@@ -23,6 +23,7 @@ import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
+import seaborn as sns
 
 from tqdm import tqdm
 from sklearn import metrics
@@ -33,6 +34,8 @@ from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from pathlib import Path
 from sklearn.mixture import GaussianMixture
+from sklearn.metrics import classification_report
+from sklearn.metrics import confusion_matrix
 ########################################################################
 
 ########################################################################
@@ -103,6 +106,28 @@ class Visualizer:
     def save_figure(self, name):
         plt.savefig(name)
         plt.close()
+
+
+    def plot_confusion_matrix(self, y_true, y_pred, classes=None, title=None):
+            # Create confusion matrix
+            cm = confusion_matrix(y_true, y_pred)
+            
+            if classes is None:
+                classes = ['Normal', 'Abnormal']
+                
+            if title is None:
+                title = 'Confusion Matrix'
+                
+            # Create figure
+            fig_size = self.param.get("visualization", {}).get("figure_size", [10, 8])
+            plt.figure(figsize=(fig_size[0]//2, fig_size[1]//2))
+            
+            # Plot confusion matrix
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                        xticklabels=classes, yticklabels=classes)
+            plt.title(title)
+            plt.ylabel('True Label')
+            plt.xlabel('Predicted Label')
 
 ########################################################################
 # file I/O
@@ -989,10 +1014,37 @@ def main():
     # Convert predictions to binary using optimal threshold
     y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
 
+    # Plot and save confusion matrix
+    visualizer.plot_confusion_matrix(y_true, y_pred_binary)
+    visualizer.save_figure(f"{param['result_directory']}/confusion_matrix_{evaluation_result_key}.png")
+
     # Calculate metrics
     accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+
+    # Generate and print classification report
+    class_report = classification_report(y_true, y_pred_binary, output_dict=True)
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred_binary))
     
     evaluation_result["TestAccuracy"] = float(accuracy)
+
+    evaluation_result["Precision"] = {
+        "class_0": float(class_report["0"]["precision"]),
+        "class_1": float(class_report["1"]["precision"])
+    }
+    evaluation_result["Recall"] = {
+        "class_0": float(class_report["0"]["recall"]), 
+        "class_1": float(class_report["1"]["recall"])
+    }
+    evaluation_result["F1Score"] = {
+        "class_0": float(class_report["0"]["f1-score"]),
+        "class_1": float(class_report["1"]["f1-score"])
+    }
+    evaluation_result["Support"] = {
+        "class_0": int(class_report["0"]["support"]),
+        "class_1": int(class_report["1"]["support"])
+    }
+
     logger.info(f"Test Accuracy: {accuracy:.4f}")
     results[evaluation_result_key] = evaluation_result
 
@@ -1011,7 +1063,31 @@ def main():
     if len(all_y_true) > 0 and len(all_y_pred) > 0:
         overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
         results["overall_accuracy"] = float(overall_accuracy)
+        
+        # Generate overall classification report
+        overall_report = classification_report(all_y_true, all_y_pred, output_dict=True)
+        results["overall_metrics"] = {
+            "precision": {
+                "class_0": float(overall_report["0"]["precision"]),
+                "class_1": float(overall_report["1"]["precision"])
+            },
+            "recall": {
+                "class_0": float(overall_report["0"]["recall"]),
+                "class_1": float(overall_report["1"]["recall"])
+            },
+            "f1_score": {
+                "class_0": float(overall_report["0"]["f1-score"]),
+                "class_1": float(overall_report["1"]["f1-score"])
+            },
+            "support": {
+                "class_0": int(overall_report["0"]["support"]),
+                "class_1": int(overall_report["1"]["support"])
+            }
+        }
+        
         logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
+        logger.info("Overall Classification Report:")
+        logger.info("\n" + classification_report(all_y_true, all_y_pred))
 
     print("\n===========================")
     logger.info(f"all results -> {result_file}")

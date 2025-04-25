@@ -871,7 +871,7 @@ def main():
     
     print("============== MODEL TRAINING ==============")
     # Define model_file and history_img variables
-    model_file = f"{param['model_directory']}/model_overall.h5"
+    model_file = f"{param['model_directory']}/model_overall.keras"
     history_img = f"{param['result_directory']}/history_overall.png"
 
     model_config = param.get("model", {}).get("architecture", {})
@@ -882,7 +882,7 @@ def main():
     model.summary()
 
     if os.path.exists(model_file):
-        model.load_weights(model_file)
+        model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
         logger.info("Model loaded from file, no training performed")
     else:
         compile_params = param["fit"]["compile"].copy()
@@ -939,7 +939,7 @@ def main():
             sample_weight=sample_weights
         )
 
-        model.save_weights(model_file)
+        model.save(model_file)
         visualizer.loss_plot(history)
         visualizer.save_figure(history_img)
     

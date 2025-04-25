@@ -725,6 +725,9 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 # main
 ########################################################################
 def main():
+
+    with open("baseline_fnn.yaml", "r") as stream:
+        param = yaml.safe_load(stream)
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
     abnormal_dir = Path(param["base_directory"]) / "abnormal"

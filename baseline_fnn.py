@@ -1027,21 +1027,29 @@ def main():
     
     evaluation_result["TestAccuracy"] = float(accuracy)
 
+    # Add this safety check function before accessing class_report
+    def get_safe_metric(report, class_label, metric, default=0.0):
+        """Safely retrieve a metric from classification report with a default fallback."""
+        if str(class_label) in report:
+            return float(report[str(class_label)][metric])
+        return default
+
+    # Then use it for all metrics
     evaluation_result["Precision"] = {
-        "class_0": float(class_report["0"]["precision"]),
-        "class_1": float(class_report["1"]["precision"])
+        "class_0": get_safe_metric(class_report, "0", "precision"),
+        "class_1": get_safe_metric(class_report, "1", "precision")
     }
     evaluation_result["Recall"] = {
-        "class_0": float(class_report["0"]["recall"]), 
-        "class_1": float(class_report["1"]["recall"])
+        "class_0": get_safe_metric(class_report, "0", "recall"),
+        "class_1": get_safe_metric(class_report, "1", "recall")
     }
     evaluation_result["F1Score"] = {
-        "class_0": float(class_report["0"]["f1-score"]),
-        "class_1": float(class_report["1"]["f1-score"])
+        "class_0": get_safe_metric(class_report, "0", "f1-score"),
+        "class_1": get_safe_metric(class_report, "1", "f1-score")
     }
     evaluation_result["Support"] = {
-        "class_0": int(class_report["0"]["support"]),
-        "class_1": int(class_report["1"]["support"])
+        "class_0": int(get_safe_metric(class_report, "0", "support")),
+        "class_1": int(get_safe_metric(class_report, "1", "support"))
     }
 
     logger.info(f"Test Accuracy: {accuracy:.4f}")
@@ -1067,20 +1075,20 @@ def main():
         overall_report = classification_report(all_y_true, all_y_pred, output_dict=True)
         results["overall_metrics"] = {
             "precision": {
-                "class_0": float(overall_report["0"]["precision"]),
-                "class_1": float(overall_report["1"]["precision"])
+                "class_0": get_safe_metric(overall_report, "0", "precision"),
+                "class_1": get_safe_metric(overall_report, "1", "precision")
             },
             "recall": {
-                "class_0": float(overall_report["0"]["recall"]),
-                "class_1": float(overall_report["1"]["recall"])
+                "class_0": get_safe_metric(overall_report, "0", "recall"),
+                "class_1": get_safe_metric(overall_report, "1", "recall")
             },
             "f1_score": {
-                "class_0": float(overall_report["0"]["f1-score"]),
-                "class_1": float(overall_report["1"]["f1-score"])
+                "class_0": get_safe_metric(overall_report, "0", "f1-score"),
+                "class_1": get_safe_metric(overall_report, "1", "f1-score")
             },
             "support": {
-                "class_0": int(overall_report["0"]["support"]),
-                "class_1": int(overall_report["1"]["support"])
+                "class_0": int(get_safe_metric(overall_report, "0", "support")),
+                "class_1": int(get_safe_metric(overall_report, "1", "support"))
             }
         }
         

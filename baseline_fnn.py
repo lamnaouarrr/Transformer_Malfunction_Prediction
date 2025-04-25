@@ -1078,19 +1078,31 @@ def main():
             "0": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0},
             "1": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0}
         }
-    elif len(np.unique(y_pred_binary)) == 1:
+
+    print(f"DEBUG - Classification report keys: {list(class_report.keys())}")
+        
+    if len(np.unique(y_pred_binary)) == 1:
         logger.warning(f"All predictions are the same class: {np.unique(y_pred_binary)[0]}! Classification metrics will be 0.")
-        # Create a simple class report with actual support counts but zero metrics
-        classes = np.unique(y_true)
+        # Create a more detailed class report with actual counts
+        classes = np.unique(np.concatenate([y_true, y_pred_binary]))
         class_report = {}
         for cls in classes:
             cls_support = np.sum(y_true == cls)
-            class_report[str(cls)] = {"precision": 0, "recall": 0, "f1-score": 0, "support": cls_support}
+            tp = np.sum((y_true == cls) & (y_pred_binary == cls))
+            precision = tp / np.sum(y_pred_binary == cls) if np.sum(y_pred_binary == cls) > 0 else 0
+            recall = tp / cls_support if cls_support > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            class_report[str(cls)] = {
+                "precision": float(precision), 
+                "recall": float(recall), 
+                "f1-score": float(f1), 
+                "support": int(cls_support)
+            }
         
-        # Add the other class if missing (with 0 support)
+        # Ensure both 0 and 1 classes are present
         for cls in [0, 1]:
             if str(cls) not in class_report:
-                class_report[str(cls)] = {"precision": 0, "recall": 0, "f1-score": 0, "support": 0}
+                class_report[str(cls)] = {"precision": 0.0, "recall": 0.0, "f1-score": 0.0, "support": 0}
     else:
         # Generate and print classification report
         class_report = classification_report(y_true, y_pred_binary, output_dict=True)
@@ -1099,11 +1111,6 @@ def main():
 
 
     ###########################################################################
-
-    # Generate and print classification report
-    class_report = classification_report(y_true, y_pred_binary, output_dict=True)
-    print("\nClassification Report:")
-    print(classification_report(y_true, y_pred_binary))
     
     evaluation_result["TestAccuracy"] = float(accuracy)
 
@@ -1116,20 +1123,20 @@ def main():
 
     # Then use it for all metrics
     evaluation_result["Precision"] = {
-        "class_0": get_safe_metric(class_report, "0", "precision"),
-        "class_1": get_safe_metric(class_report, "1", "precision")
+        "class_0": get_safe_metric(class_report, "0.0", "precision"),
+        "class_1": get_safe_metric(class_report, "1.0", "precision")
     }
     evaluation_result["Recall"] = {
-        "class_0": get_safe_metric(class_report, "0", "recall"),
-        "class_1": get_safe_metric(class_report, "1", "recall")
+        "class_0": get_safe_metric(class_report, "0.0", "recall"),
+        "class_1": get_safe_metric(class_report, "1.0", "recall")
     }
     evaluation_result["F1Score"] = {
-        "class_0": get_safe_metric(class_report, "0", "f1-score"),
-        "class_1": get_safe_metric(class_report, "1", "f1-score")
+        "class_0": get_safe_metric(class_report, "0.0", "f1-score"),
+        "class_1": get_safe_metric(class_report, "1.0", "f1-score")
     }
     evaluation_result["Support"] = {
-        "class_0": int(get_safe_metric(class_report, "0", "support")),
-        "class_1": int(get_safe_metric(class_report, "1", "support"))
+        "class_0": int(get_safe_metric(class_report, "0.0", "support")),
+        "class_1": int(get_safe_metric(class_report, "1.0", "support"))
     }
 
     logger.info(f"Test Accuracy: {accuracy:.4f}")
@@ -1155,20 +1162,20 @@ def main():
         overall_report = classification_report(all_y_true, all_y_pred, output_dict=True)
         results["overall_metrics"] = {
             "precision": {
-                "class_0": get_safe_metric(overall_report, "0", "precision"),
-                "class_1": get_safe_metric(overall_report, "1", "precision")
+                "class_0": get_safe_metric(overall_report, "0.0", "precision"),
+                "class_1": get_safe_metric(overall_report, "1.0", "precision")
             },
             "recall": {
-                "class_0": get_safe_metric(overall_report, "0", "recall"),
-                "class_1": get_safe_metric(overall_report, "1", "recall")
+                "class_0": get_safe_metric(overall_report, "0.0", "recall"),
+                "class_1": get_safe_metric(overall_report, "1.0", "recall")
             },
             "f1_score": {
-                "class_0": get_safe_metric(overall_report, "0", "f1-score"),
-                "class_1": get_safe_metric(overall_report, "1", "f1-score")
+                "class_0": get_safe_metric(overall_report, "0.0", "f1-score"),
+                "class_1": get_safe_metric(overall_report, "1.0", "f1-score")
             },
             "support": {
-                "class_0": int(get_safe_metric(overall_report, "0", "support")),
-                "class_1": int(get_safe_metric(overall_report, "1", "support"))
+                "class_0": int(get_safe_metric(overall_report, "0.0", "support")),
+                "class_1": int(get_safe_metric(overall_report, "1.0", "support"))
             }
         }
         

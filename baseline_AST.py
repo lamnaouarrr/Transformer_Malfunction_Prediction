@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
- @file   baseline_fnn.py
+ @file   baseline_AST.py
  @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025 with enhancements.
  @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr), further modified by Grok
  Copyright (C) 2019 Hitachi, Ltd. All right reserved.
@@ -24,17 +24,20 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
 import seaborn as sns
+import tensorflow_addons as tfa
 
 from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention
+from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Embedding, GlobalAveragePooling1D, Reshape
 from tensorflow.keras.losses import mean_squared_error
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.mixture import GaussianMixture
 from pathlib import Path
+from sklearn.mixture import GaussianMixture
+from sklearn.metrics import classification_report, confusion_matrix
+from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
 ########################################################################
 
 ########################################################################
@@ -57,8 +60,8 @@ def binary_cross_entropy_loss(y_true, y_pred):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    os.makedirs("./logs/log_fnn", exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_fnn/baseline_fnn.log")
+    os.makedirs("./logs/log_AST", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline_AST.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -198,64 +201,60 @@ def augment_spectrogram(spectrogram, param=None):
 
     return spectrogram
 
-def file_to_vector_array(file_name,
-                         n_mels=64,
-                         frames=5,
-                         n_fft=1024,
-                         hop_length=512,
-                         power=2.0,
-                         augment=False,
-                         param=None):
+def file_to_spectrogram(file_name,
+                     n_mels=128,
+                     frames=8,
+                     n_fft=1024,
+                     hop_length=512,
+                     power=2.0,
+                     time_dim=500,
+                     augment=False,
+                     param=None):
     """
-    Convert file_name to a vector array with optional augmentation for normal data.
+    Convert file_name to a 2D spectrogram for AST processing.
     """
-    dims = n_mels * frames
-    
     try:
         sr, y = demux_wav(file_name)
         if y is None:
             logger.error(f"Failed to load {file_name}")
-            return np.empty((0, dims), float)
+            return None
         
         # Skip files that are too short
         if len(y) < n_fft:
             logger.warning(f"File too short: {file_name}")
-            return np.empty((0, dims), float)
+            return None
             
         mel_spectrogram = librosa.feature.melspectrogram(y=y,
-                                                       sr=sr,
-                                                       n_fft=n_fft,
-                                                       hop_length=hop_length,
-                                                       n_mels=n_mels,
-                                                       power=power)
+                                                   sr=sr,
+                                                   n_fft=n_fft,
+                                                   hop_length=hop_length,
+                                                   n_mels=n_mels,
+                                                   power=power)
+        
         log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
         
         if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
             log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
         
-        vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
-        if vectorarray_size < 1:
-            logger.warning(f"Not enough frames in {file_name}")
-            return np.empty((0, dims), float)
-
-        # Use a more memory-efficient approach
-        vectorarray = np.zeros((vectorarray_size, dims), float)
-        for t in range(frames):
-            vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
-
-        # Normalize for binary cross-entropy
-        if np.max(vectorarray) > np.min(vectorarray):
-            vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
-            
-        # Apply subsampling to reduce memory usage
-        stride = param.get("feature", {}).get("stride", 4) if param else 4
-        vectorarray = vectorarray[::stride, :]
+        # Normalize spectrogram
+        if np.max(log_mel_spectrogram) > np.min(log_mel_spectrogram):
+            log_mel_spectrogram = (log_mel_spectrogram - np.min(log_mel_spectrogram)) / (np.max(log_mel_spectrogram) - np.min(log_mel_spectrogram) + sys.float_info.epsilon)
         
-        return vectorarray
+        # Handle time dimension - pad or crop to fixed size
+        current_time_len = log_mel_spectrogram.shape[1]
+        if current_time_len < time_dim:
+            # Pad
+            padding = np.zeros((n_mels, time_dim - current_time_len))
+            log_mel_spectrogram = np.hstack((log_mel_spectrogram, padding))
+        elif current_time_len > time_dim:
+            # Crop
+            log_mel_spectrogram = log_mel_spectrogram[:, :time_dim]
+            
+        return log_mel_spectrogram
         
     except Exception as e:
-        logger.error(f"Error in file_to_vector_array for {file_name}: {e}")
-        return np.empty((0, dims), float)
+        logger.error(f"Error in file_to_spectrogram for {file_name}: {e}")
+        return None
 
 def list_to_vector_array(file_list,
                          msg="calc...",
@@ -298,19 +297,20 @@ def list_to_vector_array(file_list,
         
     return dataset[:total_size, :]
 
-def list_to_vector_array_with_labels(file_list, labels,
-                                      msg="calc...",
-                                      n_mels=64,
-                                      frames=5,
-                                      n_fft=1024,
-                                      hop_length=512,
-                                      power=2.0,
-                                      augment=False,
-                                      batch_size=500):  # Added batch_size parameter
-    dims = n_mels * frames
-    dataset = None
-    expanded_labels = None
-    total_size = 0
+def list_to_spectrograms_with_labels(file_list, labels,
+                                  msg="calc...",
+                                  n_mels=128,
+                                  frames=8,
+                                  n_fft=1024,
+                                  hop_length=512,
+                                  power=2.0,
+                                  time_dim=500,
+                                  augment=False,
+                                  param=None,
+                                  batch_size=50):
+    """Process files into spectrograms with corresponding labels for AST"""
+    spectrograms = []
+    valid_labels = []
     
     # Process files in batches to avoid memory issues
     for batch_start in tqdm(range(0, len(file_list), batch_size), desc=f"{msg} (in batches)"):
@@ -318,52 +318,41 @@ def list_to_vector_array_with_labels(file_list, labels,
         batch_files = file_list[batch_start:batch_end]
         batch_labels = labels[batch_start:batch_end]
         
-        batch_vectors = []
-        batch_expanded_labels = []
-        
         for idx, file_path in enumerate(batch_files):
             try:
-                vector_array = file_to_vector_array(file_path,
-                                                   n_mels=n_mels,
-                                                   frames=frames,
-                                                   n_fft=n_fft,
-                                                   hop_length=hop_length,
-                                                   power=power,
-                                                   augment=augment)
+                spectrogram = file_to_spectrogram(file_path,
+                                             n_mels=n_mels,
+                                             frames=frames,
+                                             n_fft=n_fft,
+                                             hop_length=hop_length,
+                                             power=power,
+                                             time_dim=time_dim,
+                                             augment=augment,
+                                             param=param)
                 
-                if vector_array.shape[0] == 0:
+                if spectrogram is None:
                     continue
                 
-                # Store vectors and corresponding labels
-                batch_vectors.append(vector_array)
-                batch_expanded_labels.extend([batch_labels[idx]] * vector_array.shape[0])
+                # Store spectrograms and corresponding labels
+                spectrograms.append(spectrogram)
+                valid_labels.append(batch_labels[idx])
+                
             except Exception as e:
                 logger.error(f"Error processing file {file_path}: {e}")
                 continue
+    
+    if not spectrograms:
+        logger.warning("No valid spectrograms were created")
+        return np.array([]), np.array([])
         
-        if not batch_vectors:
-            continue
-            
-        # Combine all vectors from this batch
-        batch_dataset = np.vstack(batch_vectors) if batch_vectors else np.empty((0, dims), float)
-        batch_expanded_labels = np.array(batch_expanded_labels)
-        
-        # Initialize or extend the main dataset arrays
-        if dataset is None:
-            dataset = batch_dataset
-            expanded_labels = batch_expanded_labels
-        else:
-            dataset = np.vstack([dataset, batch_dataset])
-            expanded_labels = np.concatenate([expanded_labels, batch_expanded_labels])
-        
-        total_size += batch_dataset.shape[0]
-        logger.info(f"Processed batch {batch_start//batch_size + 1}/{(len(file_list)-1)//batch_size + 1}, total samples: {total_size}")
-
-    if dataset is None:
-        logger.warning("No valid data was found in the file list.")
-        return np.empty((0, dims), float), np.array([])
-
-    return dataset, expanded_labels
+    # Convert lists to numpy arrays
+    spectrograms_array = np.array(spectrograms)
+    labels_array = np.array(valid_labels)
+    
+    # Add channel dimension for Conv2D compatibility: (batch, height, width) -> (batch, height, width, 1)
+    spectrograms_array = np.expand_dims(spectrograms_array, axis=-1)
+    
+    return spectrograms_array, labels_array
 
 
 
@@ -592,76 +581,108 @@ def dataset_generator(target_dir, param=None):
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
 ########################################################################
-# keras model
+# model
 ########################################################################
-def keras_model(input_dim, config=None):
+# Add these transformer blocks before the keras_model function:
+def transformer_encoder(inputs, head_size, num_heads, ff_dim, dropout=0):
     """
-    Define an enhanced keras model with attention in the bottleneck and weight decay.
+    Transformer encoder block for AST
+    """
+    # Normalization and Attention
+    x = LayerNormalization(epsilon=1e-6)(inputs)
+    attention_output = MultiHeadAttention(
+        key_dim=head_size, num_heads=num_heads, dropout=dropout
+    )(x, x)
+    x = Add()([attention_output, inputs])
+    
+    # Feed Forward Network
+    ff_inputs = x
+    x = LayerNormalization(epsilon=1e-6)(x)
+    x = Dense(ff_dim, activation="gelu")(x)
+    x = Dropout(dropout)(x)
+    x = Dense(inputs.shape[-1])(x)
+    
+    # Residual connection
+    return Add()([x, ff_inputs])
+
+def positional_encoding(length, depth):
+    """
+    Generate positional encoding for transformer
+    """
+    depth = depth/2
+    positions = np.arange(length)[:, np.newaxis]     # (seq, 1)
+    depths = np.arange(depth)[np.newaxis, :]/depth   # (1, depth)
+    angle_rates = 1 / (10000**depths)                # (1, depth)
+    angle_rads = positions * angle_rates             # (seq, depth)
+    pos_encoding = np.concatenate(
+        [np.sin(angle_rads), np.cos(angle_rads)], axis=-1) 
+    return tf.cast(pos_encoding, dtype=tf.float32)
+
+# Replace keras_model with:
+def keras_ast_model(input_shape, config=None):
+    """
+    Define an Audio Spectrogram Transformer (AST) model.
     """
     if config is None:
         config = {}
     
-    depth = config.get("depth", 3)
-    width = config.get("width", 64)
-    bottleneck = config.get("bottleneck", 8)
+    embedding_dim = config.get("embedding_dim", 128)
+    num_layers = config.get("num_layers", 4)
+    num_heads = config.get("num_heads", 4)
+    ff_dim = config.get("ff_dim", 256)
     dropout_rate = config.get("dropout", 0.2)
-    use_batch_norm = config.get("batch_norm", False)
-    use_residual = config.get("residual", False)
-    activation = config.get("activation", "relu")
+    attention_dropout = config.get("attention_dropout", 0.1)
+    head_dropout = config.get("head_dropout", 0.2)
     weight_decay = config.get("weight_decay", 1e-4)
     
-    inputLayer = Input(shape=(input_dim,))
+    # Input is a spectrogram of shape (n_mels, time_steps, 1)
+    inputs = Input(shape=input_shape)
     
-    x = Dense(width, activation=None, kernel_regularizer=l2(weight_decay))(inputLayer)
-    if use_batch_norm:
-        x = BatchNormalization()(x)
-    x = Activation(activation)(x)
-    if dropout_rate > 0:
-        x = Dropout(dropout_rate)(x)
+    # Reshape spectrogram to flattened patches
+    # Convert from (batch, freq, time, channel) to (batch, patches, embedding_dim)
+    patch_size = 16  # 16x16 patches
+    n_mels, time_steps, channels = input_shape
     
-    first_layer_output = x
+    # Calculate number of patches
+    num_patches_height = n_mels // patch_size
+    num_patches_width = time_steps // patch_size
+    num_patches = num_patches_height * num_patches_width
     
-    # Encoder
-    for i in range(depth - 1):
-        layer_width = max(width // (2 ** (i + 1)), bottleneck)
-        layer_input = x
-        
-        x = Dense(layer_width, activation=None, kernel_regularizer=l2(weight_decay))(x)
-        if use_batch_norm:
-            x = BatchNormalization()(x)
-        x = Activation(activation)(x)
-        if dropout_rate > 0:
-            x = Dropout(dropout_rate)(x)
-        
-        if use_residual and layer_input.shape[-1] == layer_width:
-            x = Add()([x, layer_input])
+    # Create patches using Conv2D
+    x = tf.keras.layers.Conv2D(
+        filters=embedding_dim,
+        kernel_size=patch_size,
+        strides=patch_size,
+        padding='valid',
+        kernel_regularizer=l2(weight_decay)
+    )(inputs)
     
+    # Reshape to (batch, patches, embedding_dim)
+    batch_size = tf.shape(x)[0]
+    x = tf.reshape(x, [batch_size, -1, embedding_dim])
+    
+    # Add positional embedding
+    positions = positional_encoding(tf.shape(x)[1], embedding_dim)
+    x = x + positions
+    
+    # Transformer Encoder blocks
+    for _ in range(num_layers):
+        x = transformer_encoder(x, 
+                               embedding_dim // num_heads,  # head size
+                               num_heads, 
+                               ff_dim, 
+                               dropout=attention_dropout)
 
-    bottleneck_output = Dense(bottleneck, activation=activation, name="bottleneck")(x)
-    x = bottleneck_output
+    # Global pooling
+    x = tf.reduce_mean(x, axis=1)
     
-    # Decoder
-    for i in range(depth - 1):
-        layer_width = max(bottleneck * (2 ** (i + 1)), width // (2 ** (depth - i - 2)))
-        layer_input = x
+    # Final classification layers
+    x = LayerNormalization(epsilon=1e-6)(x)
+    x = Dense(ff_dim, activation='gelu', kernel_regularizer=l2(weight_decay))(x)
+    x = Dropout(dropout_rate)(x)
+    outputs = Dense(1, activation='sigmoid', kernel_regularizer=l2(weight_decay))(x)
         
-        x = Dense(layer_width, activation=None, kernel_regularizer=l2(weight_decay))(x)
-        if use_batch_norm:
-            x = BatchNormalization()(x)
-        x = Activation(activation)(x)
-        if dropout_rate > 0:
-            x = Dropout(dropout_rate)(x)
-        
-        if use_residual and layer_input.shape[-1] == layer_width:
-            x = Add()([x, layer_input])
-    
-    if use_residual and first_layer_output.shape[-1] == input_dim:
-        x = Dense(1, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
-        output = x
-    else:
-        output = Dense(1, activation="sigmoid", kernel_regularizer=l2(weight_decay))(x)
-
-    return Model(inputs=inputLayer, outputs=output)
+    return Model(inputs=inputs, outputs=outputs)
 
 
 def normalize_spectrograms(spectrograms, method="minmax"):
@@ -706,7 +727,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 def main():
     start_time = time.time()
 
-    with open("baseline_fnn.yaml", "r") as stream:
+    with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
 
     os.makedirs(param["pickle_directory"], exist_ok=True)
@@ -790,7 +811,7 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = f"{param['result_directory']}/result_fnn.yaml"
+    result_file = f"{param['result_directory']}/result_AST.yaml"
 
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
@@ -819,7 +840,7 @@ def main():
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
 
-    train_data, train_labels_expanded = list_to_vector_array_with_labels(
+    train_data, train_labels_expanded = list_to_spectrograms_with_labels(
         train_files,
         train_labels,
         msg="generate train_dataset",
@@ -828,11 +849,12 @@ def main():
         n_fft=param["feature"]["n_fft"],
         hop_length=param["feature"]["hop_length"],
         power=param["feature"]["power"],
-        augment=True
+        time_dim=param.get("feature", {}).get("time_dim", 500),
+        augment=True,
+        param=param
     )
-    print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
 
-    val_data, val_labels_expanded = list_to_vector_array_with_labels(
+    val_data, val_labels_expanded = list_to_spectrograms_with_labels(
         val_files,
         val_labels,
         msg="generate validation_dataset",
@@ -841,7 +863,9 @@ def main():
         n_fft=param["feature"]["n_fft"],
         hop_length=param["feature"]["hop_length"],
         power=param["feature"]["power"],
-        augment=False
+        time_dim=param.get("feature", {}).get("time_dim", 500),
+        augment=False,
+        param=param
     )
 
     if train_data.shape[0] == 0 or val_data.shape[0] == 0:
@@ -874,58 +898,94 @@ def main():
     history_img = f"{param['result_directory']}/history_overall.png"
 
     model_config = param.get("model", {}).get("architecture", {})
-    model = keras_model(
-        param["feature"]["n_mels"] * param["feature"]["frames"],
-        config=model_config
-    )
+    input_shape = (param["feature"]["frames"], param["feature"]["n_mels"])
+
+    # Create AST model
+    time_dim = param.get("feature", {}).get("time_dim", 500)
+    n_mels = param.get("feature", {}).get("n_mels", 128)
+    input_shape = (n_mels, time_dim, 1)  # (freq, time, channel)
+    model = keras_ast_model(input_shape, config=model_config)
     model.summary()
 
     if os.path.exists(model_file):
-        model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-        logger.info("Model loaded from file, no training performed")
+        # Try to load the entire model rather than just weights
+        try:
+            model = tf.keras.models.load_model(model_file)
+            logger.info("Model loaded from file, no training performed")
+        except Exception as e:
+            logger.warning(f"Could not load model from {model_file}: {e}")
+            logger.info("Will train a new model")
     else:
         compile_params = param["fit"]["compile"].copy()
         loss_type = param.get("model", {}).get("loss", "mse")
 
-        # Handle learning_rate separately for the optimizer
-        learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
+        # Setup learning rate schedule
+        initial_learning_rate = compile_params.pop("learning_rate", 0.001)
+        lr_schedule = ExponentialDecay(
+            initial_learning_rate,
+            decay_steps=100,
+            decay_rate=0.95,
+            staircase=True
+        )
 
         if loss_type == "binary_crossentropy":
             compile_params["loss"] = binary_cross_entropy_loss
         else:
-            # Default to standard binary_crossentropy from Keras
             compile_params["loss"] = "binary_crossentropy"
 
         if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
-        # Add weighted_metrics to fix the warning
         if "weighted_metrics" not in compile_params:
             compile_params["weighted_metrics"] = []
 
         compile_params["metrics"] = ['accuracy']
         model.compile(**compile_params)
         
+        # Setup callbacks
         callbacks = []
+        
         early_stopping_config = param.get("fit", {}).get("early_stopping", {})
         if early_stopping_config.get("enabled", False):
             callbacks.append(tf.keras.callbacks.EarlyStopping(
                 monitor=early_stopping_config.get("monitor", "val_loss"),
-                patience=early_stopping_config.get("patience", 10),
+                patience=early_stopping_config.get("patience", 15),
                 min_delta=early_stopping_config.get("min_delta", 0.001),
                 restore_best_weights=early_stopping_config.get("restore_best_weights", True)
             ))
-        
-        sample_weights = np.ones(len(train_data))
 
-        # Apply uniform sample weights - no machine-specific weighting
+        # Add ReduceLROnPlateau
+        reduce_lr_config = param.get("fit", {}).get("reduce_lr", {})
+        if reduce_lr_config.get("enabled", False):
+            callbacks.append(ReduceLROnPlateau(
+                monitor=reduce_lr_config.get("monitor", "val_loss"),
+                factor=reduce_lr_config.get("factor", 0.1),
+                patience=reduce_lr_config.get("patience", 10),
+                min_delta=reduce_lr_config.get("min_delta", 0.0001),
+                min_lr=reduce_lr_config.get("min_lr", 0.00000001),
+                mode="min",
+                verbose=1
+            ))
+
+        # Add ModelCheckpoint 
+        checkpoint_config = param.get("fit", {}).get("model_checkpoint", {})
+        if checkpoint_config.get("enabled", False):
+            checkpoint_file = model_file.replace('.keras', '_best.keras')
+            callbacks.append(ModelCheckpoint(
+                filepath=checkpoint_file,
+                monitor=checkpoint_config.get("monitor", "val_accuracy"),
+                mode=checkpoint_config.get("mode", "max"),
+                save_best_only=checkpoint_config.get("save_best_only", True),
+                verbose=1
+            ))
+        
+        # Setup sample weights
+        sample_weights = np.ones(len(train_data))
         if param.get("fit", {}).get("apply_sample_weights", False):
-            # Apply a uniform weight factor if needed
             weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
             sample_weights *= weight_factor
-
         
-        print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
+        # Train the model
         history = model.fit(
             train_data,
             train_labels_expanded,
@@ -938,7 +998,8 @@ def main():
             sample_weight=sample_weights
         )
 
-        model.save(model_file)
+        # Save model weights
+        model.save(model_file, save_format='keras')
         visualizer.loss_plot(history)
         visualizer.save_figure(history_img)
     
@@ -978,22 +1039,28 @@ def main():
 
     for num, file_name in tqdm(enumerate(test_files), total=len(test_files)):
         try:
-            data = file_to_vector_array(file_name,
+            data = file_to_spectrogram(file_name,
                                     n_mels=param["feature"]["n_mels"],
                                     frames=param["feature"]["frames"],
                                     n_fft=param["feature"]["n_fft"],
                                     hop_length=param["feature"]["hop_length"],
                                     power=param["feature"]["power"],
-                                    augment=False)  # No augmentation during eval
+                                    time_dim=param.get("feature", {}).get("time_dim", 500),
+                                    augment=False,
+                                    param=param)
                                     
-            if data.shape[0] == 0:
+            if data is None:
                 logger.warning(f"No valid features extracted from file: {file_name}")
                 continue
                     
+            # Add batch and channel dimensions
+            data = np.expand_dims(data, axis=0)  # Add batch dimension
+            data = np.expand_dims(data, axis=-1)  # Add channel dimension
+                
             # Get the predicted class probability
             pred = model.predict(data, verbose=0)
-            # Average the predictions across all frames
-            file_pred = np.mean(pred)
+            # Use the single prediction
+            file_pred = pred[0][0]
             y_pred.append(file_pred)
         except Exception as e:
             logger.warning(f"Error processing file: {file_name}, error: {e}")

@@ -1,0 +1,95 @@
+# Feature extraction parameters
+# Replace the model section with:
+model:
+  architecture:
+    embedding_dim: 128
+    num_layers: 4
+    num_heads: 4
+    ff_dim: 256
+    dropout: 0.2
+    head_dropout: 0.2
+    attention_dropout: 0.1
+    activation: "gelu"  # Change from "sigmoid" to "gelu"
+    weight_decay: 0.0001
+  loss: "binary_crossentropy"
+  normalization_method: "minmax"
+  threshold_optimization: true
+  use_pretrained: false
+  pretrained_weights_path: ""
+
+# Update fit section to include:
+fit:
+  compile:
+    optimizer: "adam"
+    learning_rate: 0.0005  # Reduced learning rate for transformer
+    loss: "binary_crossentropy"
+    metrics: ["accuracy"]
+    weighted_metrics: ["accuracy"]
+  epochs: 200
+  batch_size: 32  # Reduced batch size for transformer
+  shuffle: True
+  validation_split: 0.1
+  verbose: 1
+  early_stopping:
+    enabled: true
+    monitor: "val_loss"
+    patience: 15
+    min_delta: 0.001
+    restore_best_weights: true
+  reduce_lr:
+    enabled: true
+    monitor: "val_loss"
+    factor: 0.1
+    patience: 10
+    min_delta: 0.0001
+    min_lr: 0.00000001
+  model_checkpoint:
+    enabled: true
+    monitor: "val_accuracy"
+    mode: "max"
+    save_best_only: true
+  weight_factor: 1.5
+  special_case_weights:
+    fan_id_00: 2.0
+    fan_id_04: 2.0
+
+# Update feature section for transformer-appropriate spectrogram settings:
+feature:
+  n_mels: 128  # Increase from 48 to 128
+  frames: 8    # Increase from 4 to 8 for better sequence modeling
+  n_fft: 1024
+  hop_length: 512  # Changed back from 1024 to 512 for finer resolution
+  stride: 1  # Reduced from 4 to 1
+  power: 2.0
+  sr: 16000
+  time_dim: 500  # Maximum time dimension (pad/crop to this size)
+  augmentation:
+    enabled: true
+    max_mask_freq: 20
+    max_mask_time: 20
+    n_freq_masks: 2
+    n_time_masks: 2
+    noise_level: 0.01
+
+# Dataset generation parameters
+dataset:
+  split_ratio: [0.8, 0.1, 0.1]  # [train, validation, test]
+  file_extension: "wav"
+  default_prediction: 0.5  # Default value for error cases
+
+# Visualization parameters
+visualization:
+  figure_size: [30, 20]
+  history_plots: ["loss", "accuracy"]
+
+# Directory paths
+base_directory: "./dataset"
+pickle_directory: "./pickle/pickle_AST"
+model_directory: "./model/AST"
+result_directory: "./result/result_AST"
+result_file: "result_AST.yaml"
+
+# Logging parameters
+logging:
+  level: "DEBUG"
+  file: "./logs/log_AST/baseline_AST.log"

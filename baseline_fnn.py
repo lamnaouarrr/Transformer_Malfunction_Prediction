@@ -912,6 +912,8 @@ def main():
 
     
     print("============== MODEL TRAINING ==============")
+    # Track model training time specifically
+    model_start_time = time.time()
     # Define model_file and history_img variables
     model_file = f"{param['model_directory']}/model_overall.keras"
     history_img = f"{param['result_directory']}/history_overall.png"
@@ -1006,6 +1008,11 @@ def main():
         val_pred = model.predict(val_data, verbose=0)
         val_pred_binary = (val_pred.flatten() >= 0.5).astype(int)
         val_accuracy = metrics.accuracy_score(val_labels_expanded, val_pred_binary)
+
+        # Calculate model training time
+        model_end_time = time.time()
+        model_training_time = model_end_time - model_start_time
+        logger.info(f"Model training time: {model_training_time:.2f} seconds")
         
         # Store these in the results dictionary
         evaluation_result["TrainAccuracy"] = float(train_accuracy)
@@ -1150,6 +1157,7 @@ def main():
     total_time = end_time - start_time
     logger.info(f"Total execution time: {total_time:.2f} seconds")
     results["execution_time_seconds"] = float(total_time)
+    results["model_training_time_seconds"] = float(model_training_time) if 'model_training_time' in locals() else 0.0
 
     print("\n===========================")
     logger.info(f"all results -> {result_file}")

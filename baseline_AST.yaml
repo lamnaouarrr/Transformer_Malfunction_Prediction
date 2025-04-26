@@ -1,75 +1,85 @@
 # Feature extraction parameters
-# Replace the model section with:
-model:
-  architecture:
-    embedding_dim: 128
-    num_layers: 4
-    num_heads: 4
-    ff_dim: 256
-    dropout: 0.2
-    head_dropout: 0.2
-    attention_dropout: 0.1
-    activation: "gelu"  # Change from "sigmoid" to "gelu"
-    weight_decay: 0.0001
-  loss: "binary_crossentropy"
-  normalization_method: "minmax"
-  threshold_optimization: true
-  use_pretrained: false
-  pretrained_weights_path: ""
+feature:
+  n_mels: 48           # Reduced from 64
+  frames: 4            # Reduced from 5
+  n_fft: 1024          # Keep as is
+  hop_length: 1024     # Doubled from 512
+  stride: 4 
+  power: 2.0
+  sr: 16000
+  augmentation:
+    enabled: true
+    max_mask_freq: 10
+    max_mask_time: 10
+    n_freq_masks: 2
+    n_time_masks: 2
+    noise_level: 0.01
 
-# Update fit section to include:
+# Fit algorithm parameters
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.0005  # Reduced learning rate for transformer
+    learning_rate: 0.0001  # Lower learning rate for transformer
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
-  epochs: 200
-  batch_size: 32  # Reduced batch size for transformer
+  epochs: 150
+  batch_size: 512
   shuffle: True
   validation_split: 0.1
   verbose: 1
   early_stopping:
     enabled: true
     monitor: "val_loss"
-    patience: 15
+    patience: 10
     min_delta: 0.001
     restore_best_weights: true
-  reduce_lr:
+  weight_factor: 1.5  # For non-problematic IDs
+  weighted_machine_ids: []  # Will handle id_00 and id_04 explicitly in code
+  apply_sample_weights: true  # Enable sample weighting
+  special_case_weights: # Special case weights for problematic machine IDs
+    fan_id_00: 2.0
+    fan_id_04: 2.0
+  lr_scheduler:
     enabled: true
     monitor: "val_loss"
     factor: 0.1
-    patience: 10
-    min_delta: 0.0001
+    patience: 5
+    min_delta: 0.001
+    cooldown: 2
     min_lr: 0.00000001
-  model_checkpoint:
+  checkpointing:
     enabled: true
     monitor: "val_accuracy"
     mode: "max"
     save_best_only: true
-  weight_factor: 1.5
-  special_case_weights:
-    fan_id_00: 2.0
-    fan_id_04: 2.0
 
-# Update feature section for transformer-appropriate spectrogram settings:
-feature:
-  n_mels: 128  # Increase from 48 to 128
-  frames: 8    # Increase from 4 to 8 for better sequence modeling
-  n_fft: 1024
-  hop_length: 512  # Changed back from 1024 to 512 for finer resolution
-  stride: 1  # Reduced from 4 to 1
-  power: 2.0
-  sr: 16000
-  time_dim: 500  # Maximum time dimension (pad/crop to this size)
-  augmentation:
-    enabled: true
-    max_mask_freq: 20
-    max_mask_time: 20
-    n_freq_masks: 2
-    n_time_masks: 2
-    noise_level: 0.01
+# Training optimizations
+training:
+  mixed_precision: true
+  xla_acceleration: true
+  gradient_accumulation_steps: 4  # Add gradient accumulation for larger effective batch size
+
+# Enhanced transformer model settings
+model:
+  architecture:
+    transformer:
+      num_heads: 8
+      dim_feedforward: 512
+      num_encoder_layers: 4
+      positional_encoding: true
+      use_pretrained: true
+      pretrained_model: "google/vit-base-patch16-224"
+      patch_size: 16
+      attention_dropout: 0.1
+      # New parameters
+      attention_type: "efficient"  # Options: "standard", "efficient", "linear"
+      pos_encoding_type: "sinusoidal"  # Options: "sinusoidal", "learned", "alibi", "rotary"
+      layer_norm_epsilon: 1e-6
+      activation_fn: "gelu"  # Options: "gelu", "relu", "swish"
+      ff_dim_multiplier: 4
+      enable_rotary: false
+
 
 # Dataset generation parameters
 dataset:

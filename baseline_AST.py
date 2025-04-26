@@ -1302,9 +1302,12 @@ def main():
     # Convert predictions to binary using optimal threshold
     y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
 
+
+
     # Plot and save confusion matrix
     visualizer.plot_confusion_matrix(y_true, y_pred_binary)
-    visualizer.save_figure(f"{param['result_directory_PIN: 763a8e47-6937-4f3a-a7fe-f8f5a5f8b172
+    visualizer.save_figure(f"{param['result_directory']}/confusion_matrix_{evaluation_result_key}.png")
+
 
     #debug####################################################################
     print(f"DEBUG - y_true values distribution: {np.unique(y_true, return_counts=True)}")
@@ -1350,6 +1353,10 @@ def main():
 
 
     ###########################################################################
+
+    # Calculate accuracy
+    accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+
     
     evaluation_result["TestAccuracy"] = float(accuracy)
 

@@ -756,10 +756,14 @@ def create_ast_model(input_shape, config=None):
             strides=patch_size,
             padding="valid"
         )(x)
-        
-        # Flatten patches to sequence
-        batch_size = tf.shape(x)[0]
-        x = Reshape((total_patches, dim_feedforward))(x)
+
+        # Get the actual dimensions after convolution
+        conv_shape = tf.shape(x)
+        height, width = conv_shape[1], conv_shape[2]
+        total_patches = height * width
+
+        # Flatten patches to sequence - dynamic reshape based on actual dimensions
+        x = tf.reshape(x, [-1, total_patches, dim_feedforward])
         
         # Add positional encoding
         if use_positional_encoding:

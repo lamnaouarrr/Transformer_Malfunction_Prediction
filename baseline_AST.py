@@ -23,22 +23,22 @@ import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
+import tensorflow_addons as tfa
 import seaborn as sns
 import math
-import tensorflow_addons as tfa
-from tensorflow.keras.mixed_precision import experimental as mixed_precision
 
 from tqdm import tqdm
 from sklearn import metrics
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.mixture import GaussianMixture
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Reshape, Permute, Concatenate, GlobalAveragePooling1D
 from tensorflow.keras.losses import mean_squared_error
 from tensorflow.keras.regularizers import l2
-from skimage.metrics import structural_similarity as ssim
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.mixture import GaussianMixture
-from pathlib import Path
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.mixed_precision import mixed_precision
+from skimage.metrics import structural_similarity as ssim
+from pathlib import Path
 from transformers import TFViTModel, ViTConfig
 ########################################################################
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
- @file   baseline_AST.py
+ @file   baseline_fnn.py
  @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025 with enhancements.
- @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr)
+ @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr), further modified by Grok
  Copyright (C) 2019 Hitachi, Ltd. All right reserved.
  [1] Harsh Purohit, Ryo Tanabe, Kenji Ichige, Takashi Endo, Yuki Nikaido, Kaori Suefusa, and Yohei Kawaguchi, "MIMII Dataset: Sound Dataset for Malfunctioning Industrial Machine Investigation and Inspection," arXiv preprint arXiv:1909.09347, 2019.
 """
@@ -23,22 +23,22 @@ import time
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
-import tensorflow_addons as tfa
 import seaborn as sns
 import math
-
+from tensorflow.keras import mixed_precision
 from tqdm import tqdm
 from sklearn import metrics
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.mixture import GaussianMixture
+from pathlib import Path
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Reshape, Permute, Concatenate, GlobalAveragePooling1D
 from tensorflow.keras.losses import mean_squared_error
 from tensorflow.keras.regularizers import l2
-from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
-from tensorflow.keras.mixed_precision import mixed_precision
 from skimage.metrics import structural_similarity as ssim
+from sklearn.metrics import classification_report, confusion_matrix
 from pathlib import Path
+from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from transformers import TFViTModel, ViTConfig
 ########################################################################
 
@@ -110,8 +110,8 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    os.makedirs("./logs/log_AST", exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline_AST.log")
+    os.makedirs("./logs/log_fnn", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_fnn/baseline_fnn.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -778,19 +778,12 @@ def create_ast_model(input_shape, config=None):
             attn_input = LayerNormalization(epsilon=layer_norm_epsilon)(x)
             
             # Multi-head attention
-            if attention_type == "standard":
+            if attention_type == "standard" or attention_type == "efficient":
+                # Use standard MultiHeadAttention for both types
                 attn_output = MultiHeadAttention(
                     num_heads=num_heads,
                     key_dim=key_dim,
                     dropout=attention_dropout
-                )(attn_input, attn_input)
-            elif attention_type == "efficient":
-                # Efficient attention using TensorFlow Addons
-                attn_output = tfa.layers.MultiHeadAttention(
-                    head_size=key_dim,
-                    num_heads=num_heads,
-                    dropout=attention_dropout,
-                    use_projection_bias=True
                 )(attn_input, attn_input)
             elif attention_type == "linear":
                 # Linear attention implementation (approximate attention)
@@ -806,8 +799,8 @@ def create_ast_model(input_shape, config=None):
                 value = tf.reshape(value, [batch_size, seq_length, num_heads, key_dim])
                 
                 # Linear attention calculation (ϕ(q)·ϕ(k)ᵀ·v)
-                query = tf.nn.elu(query) + 1.0  # ϕ function
-                key = tf.nn.elu(key) + 1.0  # ϕ function
+                query = tf.nn.elu(query) + 1.0
+                key = tf.nn.elu(key) + 1.0
                 
                 # Compute attention
                 kv = tf.einsum("bshd,bshv->bhdv", key, value)
@@ -1010,7 +1003,7 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = f"{param['result_directory']}/result_AST.yaml"
+    result_file = f"{param['result_directory']}/result_fnn.yaml"
 
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
@@ -1092,10 +1085,8 @@ def main():
     # Enable mixed precision training
     if param.get("training", {}).get("mixed_precision", False):
         logger.info("Enabling mixed precision training")
-        policy = mixed_precision.Policy('mixed_float16')
-        mixed_precision.set_global_policy(policy)
-        logger.info(f"Compute dtype: {policy.compute_dtype}")
-        logger.info(f"Variable dtype: {policy.variable_dtype}")
+        mixed_precision.set_global_policy('mixed_float16')
+        logger.info(f"Mixed precision policy enabled: {mixed_precision.global_policy()}")
 
     model_config = param.get("model", {}).get("architecture", {})
     model = create_ast_model(
@@ -1160,25 +1151,6 @@ def main():
         if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
             compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         
-        # Add gradient accumulation
-        if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
-            logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
-            
-            # Original batch size
-            original_batch_size = param["fit"]["batch_size"]
-            # Effective batch size after accumulation
-            effective_batch_size = original_batch_size * param["training"]["gradient_accumulation_steps"]
-            logger.info(f"Effective batch size: {effective_batch_size}")
-            
-            # Create optimizer with accumulation
-            optimizer = tfa.optimizers.AccumulateOptimizer(
-                optimizer=compile_params["optimizer"],
-                accum_steps=param["training"]["gradient_accumulation_steps"]
-            )
-            
-            # Update the optimizer in compile params
-            compile_params["optimizer"] = optimizer
-        
         compile_params["metrics"] = ['accuracy']
         model.compile(**compile_params)
         
@@ -1190,24 +1162,61 @@ def main():
             weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
             sample_weights *= weight_factor
         
-        # Enable XLA acceleration
-        if param.get("training", {}).get("xla_acceleration", False):
-            logger.info("Enabling XLA acceleration")
-            tf.config.optimizer.set_jit(True)  # Enable XLA
-        
-        print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
-        history = model.fit(
-            train_data,
-            train_labels_expanded,
-            epochs=param["fit"]["epochs"],
-            batch_size=param["fit"]["batch_size"],
-            shuffle=param["fit"]["shuffle"],
-            validation_data=(val_data, val_labels_expanded),
-            verbose=param["fit"]["verbose"],
-            callbacks=callbacks,
-            sample_weight=sample_weights,
-            **({'steps_per_execution': 10} if param.get("training", {}).get("xla_acceleration", False) else {})
-        )
+        if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
+            logger.info(f"Using manual gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
+            
+            # Create optimizer without accumulation
+            optimizer = compile_params["optimizer"]
+            
+            # Get the dataset
+            train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+            train_dataset = train_dataset.batch(param["fit"]["batch_size"])
+            
+            # Define variables to store accumulated gradients
+            accum_steps = param["training"]["gradient_accumulation_steps"]
+            
+            # Manual training loop
+            @tf.function
+            def train_step(x_batch, y_batch, step):
+                with tf.GradientTape() as tape:
+                    logits = model(x_batch, training=True)
+                    loss_value = compile_params["loss"](y_batch, logits)
+                    loss_value = loss_value / tf.cast(accum_steps, dtype=loss_value.dtype)
+                    
+                # Accumulate gradient
+                grads = tape.gradient(loss_value, model.trainable_variables)
+                if step == 0:
+                    accumulated_grads = [tf.Variable(tf.zeros_like(g)) for g in grads]
+                    
+                for i, g in enumerate(grads):
+                    accumulated_grads[i].assign_add(g)
+                    
+                # If we've accumulated enough gradients, apply them and reset
+                if (step + 1) % accum_steps == 0:
+                    optimizer.apply_gradients(zip(accumulated_grads, model.trainable_variables))
+                    for i in range(len(accumulated_grads)):
+                        accumulated_grads[i].assign(tf.zeros_like(accumulated_grads[i]))
+                        
+                return loss_value
+        else:
+            if param.get("training", {}).get("xla_acceleration", False):
+                logger.info("Enabling XLA acceleration")
+                tf.config.optimizer.set_jit(True)
+                os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
+            
+            print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
+            history = model.fit(
+                train_data,
+                train_labels_expanded,
+                epochs=param["fit"]["epochs"],
+                batch_size=param["fit"]["batch_size"],
+                shuffle=param["fit"]["shuffle"],
+                validation_data=(val_data, val_labels_expanded),
+                verbose=param["fit"]["verbose"],
+                callbacks=callbacks,
+                sample_weight=sample_weights,
+                **({'steps_per_execution': 10} if param.get("training", {}).get("xla_acceleration", False) else {})
+            )
         
         model.save(model_file)
         visualizer.loss_plot(history)
@@ -1295,10 +1304,7 @@ def main():
 
     # Plot and save confusion matrix
     visualizer.plot_confusion_matrix(y_true, y_pred_binary)
-    visualizer.save_figure(f"{param['result_directory']}/confusion_matrix_{evaluation_result_key}.png")
-
-    # Calculate metrics
-    accuracy = metrics.accuracy_score(y_true, y_pred_binary)
+    visualizer.save_figure(f"{param['result_directory_PIN: 763a8e47-6937-4f3a-a7fe-f8f5a5f8b172
 
     #debug####################################################################
     print(f"DEBUG - y_true values distribution: {np.unique(y_true, return_counts=True)}")

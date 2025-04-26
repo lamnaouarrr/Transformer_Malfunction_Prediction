@@ -1078,10 +1078,7 @@ def main():
             "0": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0},
             "1": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0}
         }
-
-    print(f"DEBUG - Classification report keys: {list(class_report.keys())}")
-        
-    if len(np.unique(y_pred_binary)) == 1:
+    elif len(np.unique(y_pred_binary)) == 1:
         logger.warning(f"All predictions are the same class: {np.unique(y_pred_binary)[0]}! Classification metrics will be 0.")
         # Create a more detailed class report with actual counts
         classes = np.unique(np.concatenate([y_true, y_pred_binary]))

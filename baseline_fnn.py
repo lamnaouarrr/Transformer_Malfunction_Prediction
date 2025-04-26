@@ -1151,35 +1151,6 @@ def main():
     logger.info(f"Total execution time: {total_time:.2f} seconds")
     results["execution_time_seconds"] = float(total_time)
 
-    if len(all_y_true) > 0 and len(all_y_pred) > 0:
-        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
-        results["overall_accuracy"] = float(overall_accuracy)
-        
-        # Generate overall classification report
-        overall_report = classification_report(all_y_true, all_y_pred, output_dict=True)
-        results["overall_metrics"] = {
-            "precision": {
-                "class_0": get_safe_metric(overall_report, "0.0", "precision"),
-                "class_1": get_safe_metric(overall_report, "1.0", "precision")
-            },
-            "recall": {
-                "class_0": get_safe_metric(overall_report, "0.0", "recall"),
-                "class_1": get_safe_metric(overall_report, "1.0", "recall")
-            },
-            "f1_score": {
-                "class_0": get_safe_metric(overall_report, "0.0", "f1-score"),
-                "class_1": get_safe_metric(overall_report, "1.0", "f1-score")
-            },
-            "support": {
-                "class_0": int(get_safe_metric(overall_report, "0.0", "support")),
-                "class_1": int(get_safe_metric(overall_report, "1.0", "support"))
-            }
-        }
-        
-        logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
-        logger.info("Overall Classification Report:")
-        logger.info("\n" + classification_report(all_y_true, all_y_pred))
-
     print("\n===========================")
     logger.info(f"all results -> {result_file}")
     with open(result_file, "w") as f:

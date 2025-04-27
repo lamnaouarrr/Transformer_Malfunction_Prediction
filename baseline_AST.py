@@ -1203,7 +1203,7 @@ def main():
             weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
             sample_weights *= weight_factor
         
-        if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
+        if False and param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
             logger.info(f"Using manual gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
             
             # Create optimizer without accumulation
@@ -1228,9 +1228,23 @@ def main():
                 'val_accuracy': []
             }
             
+            # Create accumulated gradients outside the function
+            accumulated_grads = None
+
+            def initialize_accumulated_grads(model):
+                """Initialize accumulated gradients with zeros for each trainable variable"""
+                global accumulated_grads
+                accumulated_grads = [tf.Variable(tf.zeros_like(var)) for var in model.trainable_variables]
+
+            # Initialize accumulated gradients
+            initialize_accumulated_grads(model)
+
+
             # Manual training loop
             @tf.function
             def train_step(x_batch, y_batch, step):
+                global accumulated_grads
+                
                 with tf.GradientTape() as tape:
                     logits = model(x_batch, training=True)
                     loss_value = compile_params["loss"](y_batch, logits)
@@ -1238,9 +1252,7 @@ def main():
                     
                 # Accumulate gradient
                 grads = tape.gradient(loss_value, model.trainable_variables)
-                if step == 0:
-                    accumulated_grads = [tf.Variable(tf.zeros_like(g)) for g in grads]
-                    
+                
                 for i, g in enumerate(grads):
                     accumulated_grads[i].assign_add(g)
                     
@@ -1257,6 +1269,7 @@ def main():
                 accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_float32, y_pred), tf.float32))
                         
                 return loss_value, accuracy
+
 
             
             @tf.function
@@ -1276,6 +1289,10 @@ def main():
             epochs = param["fit"]["epochs"]
             for epoch in range(epochs):
                 print(f"\nEpoch {epoch+1}/{epochs}")
+                
+                # Reset accumulated gradients at the beginning of each epoch
+                for i in range(len(accumulated_grads)):
+                    accumulated_grads[i].assign(tf.zeros_like(accumulated_grads[i]))
                 
                 # Training metrics
                 train_loss = tf.keras.metrics.Mean()

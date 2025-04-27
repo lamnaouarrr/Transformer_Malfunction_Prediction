@@ -988,6 +988,17 @@ def main():
 
     base_path = Path(param["base_directory"])
 
+    # Configure GPU memory growth
+    physical_devices = tf.config.list_physical_devices('GPU')
+    if physical_devices:
+        for device in physical_devices:
+            try:
+                tf.config.experimental.set_memory_growth(device, True)
+                logger.info(f"Memory growth enabled for {device}")
+            except Exception as e:
+                logger.warning(f"Could not set memory growth for {device}: {e}")
+
+
     print("============== COUNTING DATASET SAMPLES ==============")
     logger.info("Counting all samples in the dataset...")
     

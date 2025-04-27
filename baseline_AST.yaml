@@ -24,7 +24,7 @@ fit:
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
   epochs: 150
-  batch_size: 512
+  batch_size: 128
   shuffle: True
   validation_split: 0.1
   verbose: 1

@@ -411,12 +411,11 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                                               param=param)
                 
                 if spectrogram is not None:
-                    if is_frame_based and len(spectrogram.shape) == 3:  # Handle frame-based spectrograms
-                        for frame in spectrogram:
-                            spectrograms.append(frame)
-                            if labels is not None:
-                                processed_labels.append(batch_labels[idx])
-                    else:  # Handle regular spectrograms
+                    if is_frame_based and len(spectrogram.shape) == 3:
+                        spectrograms.append(spectrogram[0])
+                        if labels is not None:
+                            processed_labels.append(batch_labels[idx])
+                    else:
                         spectrograms.append(spectrogram)
                         if labels is not None:
                             processed_labels.append(batch_labels[idx])
@@ -937,6 +936,17 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 def main():
 
+    # Configure GPU memory growth
+    physical_devices = tf.config.list_physical_devices('GPU')
+    if physical_devices:
+        for device in physical_devices:
+            try:
+                tf.config.experimental.set_memory_growth(device, True)
+                logger.info(f"Memory growth enabled for {device}")
+            except Exception as e:
+                logger.warning(f"Could not set memory growth for {device}: {e}")
+
+
     with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
@@ -987,17 +997,6 @@ def main():
         print("DEBUG: No test files found to verify audio loading")
 
     base_path = Path(param["base_directory"])
-
-    # Configure GPU memory growth
-    physical_devices = tf.config.list_physical_devices('GPU')
-    if physical_devices:
-        for device in physical_devices:
-            try:
-                tf.config.experimental.set_memory_growth(device, True)
-                logger.info(f"Memory growth enabled for {device}")
-            except Exception as e:
-                logger.warning(f"Could not set memory growth for {device}: {e}")
-
 
     print("============== COUNTING DATASET SAMPLES ==============")
     logger.info("Counting all samples in the dataset...")
@@ -1358,6 +1357,34 @@ def main():
                 tf.config.optimizer.set_jit(True)
                 os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
             
+            # Check for data shape mismatch and fix it
+            if train_data.shape[0] != train_labels_expanded.shape[0]:
+                logger.warning(f"Data shape mismatch! X: {train_data.shape[0]} samples, y: {train_labels_expanded.shape[0]} labels")
+                
+                if train_data.shape[0] > train_labels_expanded.shape[0]:
+                    # Too many features, need to reduce
+                    train_data = train_data[:train_labels_expanded.shape[0]]
+                    sample_weights = sample_weights[:train_labels_expanded.shape[0]]
+                    logger.info(f"Reduced X to match y: {train_data.shape}")
+                else:
+                    # Too many labels, need to reduce
+                    train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
+                    logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
+
+            max_samples = 50000
+
+            if train_data.shape[0] > max_samples:
+                indices = np.random.choice(train_data.shape[0], max_samples, replace=False)
+                train_data_subset = train_data[indices]
+                train_labels_subset = train_labels_expanded[indices]
+                sample_weights_subset = sample_weights[indices]
+                logger.info(f"Using subset of data: {train_data_subset.shape}")
+            else:
+                train_data_subset = train_data
+                train_labels_subset = train_labels_expanded
+                sample_weights_subset = sample_weights
+
+
             print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
             history = model.fit(
                 train_data,

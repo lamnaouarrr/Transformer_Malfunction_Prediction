@@ -1250,22 +1250,27 @@ def main():
                     for i in range(len(accumulated_grads)):
                         accumulated_grads[i].assign(tf.zeros_like(accumulated_grads[i]))
                         
-                # Calculate accuracy
+                # Calculate accuracy - ensure consistent data types
+                # Convert both to the same data type (float32)
+                y_batch_float32 = tf.cast(y_batch, tf.float32)
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_float32, y_pred), tf.float32))
                         
                 return loss_value, accuracy
+
             
             @tf.function
             def val_step(x_batch, y_batch):
                 logits = model(x_batch, training=False)
                 loss_value = compile_params["loss"](y_batch, logits)
                 
-                # Calculate accuracy
+                # Calculate accuracy - ensure consistent data types
+                y_batch_float32 = tf.cast(y_batch, tf.float32)
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_float32, y_pred), tf.float32))
                 
                 return loss_value, accuracy
+
             
             # Training loop
             epochs = param["fit"]["epochs"]

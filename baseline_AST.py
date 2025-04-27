@@ -723,7 +723,7 @@ def create_ast_model(input_shape, config=None):
     attention_type = transformer_config.get("attention_type", "standard")
     key_dim = dim_feedforward // num_heads
     pos_encoding_type = transformer_config.get("pos_encoding_type", "sinusoidal")
-    layer_norm_epsilon = transformer_config.get("layer_norm_epsilon", 1e-6)
+    layer_norm_epsilon = float(transformer_config.get("layer_norm_epsilon", 1e-6))
     activation_fn = transformer_config.get("activation_fn", "gelu")
     ff_dim_multiplier = transformer_config.get("ff_dim_multiplier", 4)
     enable_rotary = transformer_config.get("enable_rotary", False)
@@ -815,7 +815,8 @@ def create_ast_model(input_shape, config=None):
         # Transformer encoder blocks
         for _ in range(num_encoder_layers):
             # Layer normalization
-            attn_input = LayerNormalization(epsilon=layer_norm_epsilon)(x)
+            attn_input = LayerNormalization(epsilon=float(layer_norm_epsilon))(x)
+
             
             # Multi-head attention
             if attention_type == "standard" or attention_type == "efficient":
@@ -861,7 +862,7 @@ def create_ast_model(input_shape, config=None):
             x = x + attn_output
             
             # Feed-forward network
-            ffn_input = LayerNormalization(epsilon=layer_norm_epsilon)(x)
+            ffn_input = LayerNormalization(epsilon=float(layer_norm_epsilon))(x)
             if activation_fn == "gelu":
                 ffn_output = Dense(dim_feedforward * ff_dim_multiplier, activation="gelu")(ffn_input)
             elif activation_fn == "relu":
@@ -881,7 +882,7 @@ def create_ast_model(input_shape, config=None):
             x = x + ffn_output
         
         # Final layer normalization
-        x = LayerNormalization(epsilon=1e-6)(x)
+        x = LayerNormalization(epsilon=float(1e-6))(x)
         
         # Global average pooling over sequence dimension
         x = GlobalAveragePooling1D()(x)

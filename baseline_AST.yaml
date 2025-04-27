@@ -75,7 +75,7 @@ model:
       # New parameters
       attention_type: "efficient"  # Options: "standard", "efficient", "linear"
       pos_encoding_type: "sinusoidal"  # Options: "sinusoidal", "learned", "alibi", "rotary"
-      layer_norm_epsilon: 1e-6
+      layer_norm_epsilon: 1.0e-6
       activation_fn: "gelu"  # Options: "gelu", "relu", "swish"
       ff_dim_multiplier: 4
       enable_rotary: false

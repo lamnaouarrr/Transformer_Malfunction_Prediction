@@ -1357,8 +1357,7 @@ def main():
                 validation_data=(val_data, val_labels_expanded),
                 verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
-                sample_weight=sample_weights,
-                **({'steps_per_execution': 10} if param.get("training", {}).get("xla_acceleration", False) else {})
+                sample_weight=sample_weights
             )
         
         model.save(model_file)

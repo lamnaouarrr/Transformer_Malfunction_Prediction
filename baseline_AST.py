@@ -2,7 +2,7 @@
 """
  @file   baseline_AST.py
  @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025 with enhancements.
- @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr), further modified by Grok
+ @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr)
  Copyright (C) 2019 Hitachi, Ltd. All right reserved.
  [1] Harsh Purohit, Ryo Tanabe, Kenji Ichige, Takashi Endo, Yuki Nikaido, Kaori Suefusa, and Yohei Kawaguchi, "MIMII Dataset: Sound Dataset for Malfunctioning Industrial Machine Investigation and Inspection," arXiv preprint arXiv:1909.09347, 2019.
 """
@@ -314,19 +314,7 @@ def file_to_spectrogram(file_name,
         
         # Convert to decibel scale
         log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=np.max)
-
-        if log_mel_spectrogram.shape[0] != target_shape[0] or log_mel_spectrogram.shape[1] != target_shape[1]:
-            from scipy.ndimage import zoom
-            
-            # Calculate zoom factors
-            zoom_factors = (target_shape[0] / log_mel_spectrogram.shape[0], 
-                            target_shape[1] / log_mel_spectrogram.shape[1])
-            
-            # Resize the spectrogram
-            log_mel_spectrogram = zoom(log_mel_spectrogram, zoom_factors, order=1)
         
-        return log_mel_spectrogram
-
         if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
             log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
         
@@ -378,6 +366,7 @@ def file_to_spectrogram(file_name,
     except Exception as e:
         logger.error(f"Error in file_to_spectrogram for {file_name}: {e}")
         return None
+
 
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=20):
     """
@@ -790,12 +779,8 @@ def create_ast_model(input_shape, config=None):
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
     
-    # Add a preprocessing layer to ensure consistent dimensions
-    # Just resize to the original dimensions instead of trying to expand
-    x = inputs
-    
     # Reshape to prepare for CNN (batch, freq, time, 1)
-    x = Reshape((input_shape[0], input_shape[1], 1))(x)
+    x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
     # Simple CNN feature extraction
     x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
@@ -817,6 +802,59 @@ def create_ast_model(input_shape, config=None):
     outputs = Dense(1, activation="sigmoid")(x)
     
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
+
+
+
+def preprocess_spectrograms(spectrograms, target_shape):
+    """
+    Resize all spectrograms to a consistent shape.
+    
+    Args:
+        spectrograms: Array of spectrograms with shape (batch_size, freq, time)
+        target_shape: Desired shape (freq, time)
+        
+    Returns:
+        Resized spectrograms with shape (batch_size, target_shape[0], target_shape[1])
+    """
+    if spectrograms.shape[0] == 0:
+        return spectrograms
+        
+    batch_size = spectrograms.shape[0]
+    processed = np.zeros((batch_size, target_shape[0], target_shape[1]), dtype=np.float32)
+    
+    for i in range(batch_size):
+        # Get current spectrogram
+        spec = spectrograms[i]
+        
+        # Skip if dimensions already match
+        if spec.shape[0] == target_shape[0] and spec.shape[1] == target_shape[1]:
+            processed[i] = spec
+            continue
+            
+        # Use scipy's resize function for consistent resizing
+        try:
+            from scipy.ndimage import zoom
+            
+            # Calculate zoom factors
+            zoom_factors = (target_shape[0] / spec.shape[0], 
+                             target_shape[1] / spec.shape[1])
+            
+            # Resize the spectrogram
+            resized_spec = zoom(spec, zoom_factors, order=1)
+            
+            # Store in the output array
+            processed[i] = resized_spec
+        except Exception as e:
+            logger.error(f"Error resizing spectrogram: {e}")
+            # If resize fails, use simple padding/cropping
+            temp_spec = np.zeros(target_shape)
+            # Copy as much as will fit
+            freq_dim = min(spec.shape[0], target_shape[0])
+            time_dim = min(spec.shape[1], target_shape[1])
+            temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+            processed[i] = temp_spec
+        
+    return processed
 
 
 
@@ -854,6 +892,58 @@ def normalize_spectrograms(spectrograms, method="minmax"):
     else:
         logger.warning(f"Unknown normalization method: {method}, returning original data")
         return spectrograms
+
+def configure_mixed_precision(enabled=True):
+    """
+    Configure mixed precision training with proper error handling.
+    
+    Args:
+        enabled: Whether to enable mixed precision
+        
+    Returns:
+        True if mixed precision was successfully enabled, False otherwise
+    """
+    if not enabled:
+        logger.info("Mixed precision training disabled")
+        return False
+    
+    try:
+        # Check if GPU is available
+        if not tf.config.list_physical_devices('GPU'):
+            logger.warning("No GPU found, disabling mixed precision")
+            return False
+        
+        # Import mixed precision module
+        from tensorflow.keras import mixed_precision
+        
+        # Configure policy
+        policy_name = 'mixed_float16'
+        logger.info(f"Enabling mixed precision with policy: {policy_name}")
+        mixed_precision.set_global_policy(policy_name)
+        
+        # Verify policy was set
+        current_policy = mixed_precision.global_policy()
+        logger.info(f"Mixed precision policy enabled: {current_policy}")
+        
+        # Check if policy was actually set to mixed_float16
+        if str(current_policy) != policy_name:
+            logger.warning(f"Failed to set mixed precision policy, got {current_policy}")
+            return False
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error configuring mixed precision: {e}")
+        # Reset to default policy
+        try:
+            from tensorflow.keras import mixed_precision
+            mixed_precision.set_global_policy('float32')
+            logger.info("Reset to float32 policy after error")
+        except:
+            pass
+        return False
+
+
 
 
 ########################################################################
@@ -1045,6 +1135,30 @@ def main():
     logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
     logger.info(f"Number of test files: {len(test_files)}")
 
+    # Define target shape for spectrograms
+    target_shape = (param["feature"]["n_mels"], 64)  # Adjust time dimension as needed
+    logger.info(f"Target spectrogram shape: {target_shape}")
+
+    # Preprocess to ensure consistent shapes
+    logger.info("Preprocessing training data...")
+    train_data = preprocess_spectrograms(train_data, target_shape)
+    logger.info(f"Preprocessed train data shape: {train_data.shape}")
+
+    logger.info("Preprocessing validation data...")
+    val_data = preprocess_spectrograms(val_data, target_shape)
+    logger.info(f"Preprocessed validation data shape: {val_data.shape}")
+
+    # Configure mixed precision
+    mixed_precision_enabled = configure_mixed_precision(
+        enabled=param.get("training", {}).get("mixed_precision", False)
+    )
+
+    # Create model with the correct input shape
+    model = create_ast_model(
+        input_shape=(target_shape[0], target_shape[1]),
+        config=param.get("model", {}).get("architecture", {})
+    )
+
     #debug
     normal_count = sum(1 for label in train_labels_expanded if label == 0)
     abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
@@ -1107,10 +1221,6 @@ def main():
         logger.info(f"Mixed precision policy enabled: {mixed_precision.global_policy()}")
 
     model_config = param.get("model", {}).get("architecture", {})
-    model = create_ast_model(
-        input_shape=(train_data.shape[1], train_data.shape[2]),
-        config=model_config
-    )
     model.summary()
 
     if os.path.exists(model_file):
@@ -1161,13 +1271,21 @@ def main():
         # Handle learning_rate separately for the optimizer
         learning_rate = compile_params.pop("learning_rate", 0.0001)
         
+        # Adjust optimizer for mixed precision if enabled
+        if mixed_precision_enabled and compile_params.get("optimizer") == "adam":
+            from tensorflow.keras.optimizers import Adam
+            
+            # In TF 2.4+, LossScaleOptimizer is automatically applied when using mixed_float16 policy
+            # So we just need to create the base optimizer
+            compile_params["optimizer"] = Adam(learning_rate=learning_rate)
+            logger.info("Using Adam optimizer with mixed precision")
+        else:
+            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
         if loss_type == "binary_crossentropy":
             compile_params["loss"] = binary_cross_entropy_loss
         else:
             compile_params["loss"] = "binary_crossentropy"
-        
-        if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         
         compile_params["metrics"] = ['accuracy']
         model.compile(**compile_params)
@@ -1459,10 +1577,13 @@ def main():
                                 power=param["feature"]["power"],
                                 augment=False,  # No augmentation during eval
                                 param=param)
-                                    
+                                
             if data is None:
                 logger.warning(f"No valid features extracted from file: {file_name}")
                 continue
+            
+            # Preprocess to match the target shape
+            data = preprocess_spectrograms(np.expand_dims(data, axis=0), target_shape)[0]
             
             # Reshape for batch prediction
             data = np.expand_dims(data, axis=0)

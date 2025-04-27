@@ -314,7 +314,19 @@ def file_to_spectrogram(file_name,
         
         # Convert to decibel scale
         log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=np.max)
+
+        if log_mel_spectrogram.shape[0] != target_shape[0] or log_mel_spectrogram.shape[1] != target_shape[1]:
+            from scipy.ndimage import zoom
+            
+            # Calculate zoom factors
+            zoom_factors = (target_shape[0] / log_mel_spectrogram.shape[0], 
+                            target_shape[1] / log_mel_spectrogram.shape[1])
+            
+            # Resize the spectrogram
+            log_mel_spectrogram = zoom(log_mel_spectrogram, zoom_factors, order=1)
         
+        return log_mel_spectrogram
+
         if augment and param is not None and param.get("feature", {}).get("augmentation", {}).get("enabled", False):
             log_mel_spectrogram = augment_spectrogram(log_mel_spectrogram, param)
         
@@ -701,6 +713,64 @@ def dataset_generator(target_dir, param=None):
 
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
+
+def configure_mixed_precision(enabled=True):
+    """
+    Configure mixed precision training with proper error handling.
+    
+    Args:
+        enabled: Whether to enable mixed precision
+        
+    Returns:
+        True if mixed precision was successfully enabled, False otherwise
+    """
+    if not enabled:
+        logger.info("Mixed precision training disabled")
+        return False
+    
+    try:
+        # Check if GPU is available
+        if not tf.config.list_physical_devices('GPU'):
+            logger.warning("No GPU found, disabling mixed precision")
+            return False
+        
+        # Check TensorFlow version
+        import tensorflow as tf
+        if tf.__version__.startswith('1.'):
+            logger.warning("Mixed precision requires TensorFlow 2.x, disabling")
+            return False
+        
+        # Import mixed precision module
+        from tensorflow.keras import mixed_precision
+        
+        # Configure policy
+        policy_name = 'mixed_float16'
+        logger.info(f"Enabling mixed precision with policy: {policy_name}")
+        mixed_precision.set_global_policy(policy_name)
+        
+        # Verify policy was set
+        current_policy = mixed_precision.global_policy()
+        logger.info(f"Mixed precision policy enabled: {current_policy}")
+        
+        # Check if policy was actually set to mixed_float16
+        if str(current_policy) != policy_name:
+            logger.warning(f"Failed to set mixed precision policy, got {current_policy}")
+            return False
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error configuring mixed precision: {e}")
+        # Reset to default policy
+        try:
+            from tensorflow.keras import mixed_precision
+            mixed_precision.set_global_policy('float32')
+            logger.info("Reset to float32 policy after error")
+        except:
+            pass
+        return False
+
+
 ########################################################################
 # model
 ########################################################################
@@ -712,23 +782,20 @@ def create_ast_model(input_shape, config=None):
         config = {}
     
     transformer_config = config.get("transformer", {})
-    num_heads = transformer_config.get("num_heads", 4)  # Reduced from 8
-    dim_feedforward = transformer_config.get("dim_feedforward", 256)  # Reduced from 512
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)  # Reduced from 4
+    num_heads = transformer_config.get("num_heads", 4)
+    dim_feedforward = transformer_config.get("dim_feedforward", 256)
+    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
     dropout_rate = config.get("dropout", 0.1)
-    patch_size = transformer_config.get("patch_size", 4)  # Reduced from 16
     
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
     
     # Add a preprocessing layer to ensure consistent dimensions
-    x = tf.keras.layers.Resizing(
-        input_shape[0], 
-        max(64, input_shape[1])  # Ensure minimum width of 64
-    )(inputs)
+    # Just resize to the original dimensions instead of trying to expand
+    x = inputs
     
-    # Reshape to prepare for transformer (batch, freq, time, 1)
-    x = Reshape((input_shape[0], max(64, input_shape[1]), 1))(x)
+    # Reshape to prepare for CNN (batch, freq, time, 1)
+    x = Reshape((input_shape[0], input_shape[1], 1))(x)
     
     # Simple CNN feature extraction
     x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
@@ -750,6 +817,7 @@ def create_ast_model(input_shape, config=None):
     outputs = Dense(1, activation="sigmoid")(x)
     
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
+
 
 
 def normalize_spectrograms(spectrograms, method="minmax"):
@@ -1006,6 +1074,23 @@ def main():
         
         if class_ratio > 10:
             logger.warning(f"Severe class imbalance detected! Consider using class weights or data augmentation.")
+
+    mixed_precision_enabled = configure_mixed_precision(
+        enabled=param.get("training", {}).get("mixed_precision", False)
+    )
+
+    # If mixed precision is enabled, adjust the optimizer
+    if mixed_precision_enabled and "optimizer" in compile_params:
+        # For mixed precision, it's recommended to use loss scaling with Adam
+        from tensorflow.keras.mixed_precision import LossScaleOptimizer
+        
+        # Get the base optimizer
+        base_optimizer = compile_params["optimizer"]
+        
+        # Wrap with loss scaling
+        compile_params["optimizer"] = LossScaleOptimizer(base_optimizer)
+        logger.info("Optimizer wrapped with LossScaleOptimizer for mixed precision")
+
 
 
     print("============== MODEL TRAINING ==============")

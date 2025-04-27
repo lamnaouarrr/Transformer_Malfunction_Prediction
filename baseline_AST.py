@@ -60,126 +60,78 @@ def binary_cross_entropy_loss(y_true, y_pred):
 
 def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
     """
-    Create positional encodings for the transformer model with multiple options
+    Create positional encodings for the transformer model
     
     Args:
         seq_len: sequence length (can be a tensor or int)
         d_model: depth of the model
-        encoding_type: type of positional encoding ('sinusoidal', 'learned', or 'alibi')
+        encoding_type: type of positional encoding
         
     Returns:
         Positional encoding matrix
     """
-    if encoding_type == "sinusoidal":
-        # Check if seq_len is a tensor or an integer
-        is_tensor = tf.is_tensor(seq_len)
+    # For dynamic tensors, use a simpler approach
+    if tf.is_tensor(seq_len):
+        # Create a fixed-size positional encoding that will work for any reasonable sequence length
+        max_len = 1024  # Large enough for most applications
         
-        if is_tensor:
-            # TensorFlow implementation for when seq_len is a tensor
-            seq_len_value = tf.cast(seq_len, tf.int32)
-            positions = tf.range(seq_len_value, dtype=tf.float32)
-            positions = tf.expand_dims(positions, axis=1)
-            
-            # Create range for dimension calculation
-            dim_range = tf.range(0, d_model, 2, dtype=tf.float32)
-            
-            # Calculate the division term
-            div_term = tf.math.exp(dim_range * (-tf.math.log(10000.0) / tf.cast(d_model, tf.float32)))
-            
-            # Create output tensor
-            pos_encoding = tf.zeros((seq_len_value, d_model))
-            
-            # Calculate sin positions
-            sin_indices = tf.range(0, d_model, 2)
-            sin_values = tf.math.sin(positions * div_term)
-            sin_positions = tf.scatter_nd(
-                tf.expand_dims(sin_indices, 1),
-                sin_values,
-                [d_model]
-            )
-            
-            # Calculate cos positions
-            cos_indices = tf.range(1, d_model, 2)
-            cos_values = tf.math.cos(positions * div_term)
-            cos_positions = tf.scatter_nd(
-                tf.expand_dims(cos_indices, 1),
-                cos_values,
-                [d_model]
-            )
-            
-            # Combine sin and cos
-            pos_encoding = sin_positions + cos_positions
-            
-            # Expand dims for batch dimension
-            pos_encoding = tf.expand_dims(pos_encoding, 0)
-            
-        else:
-            # NumPy implementation for when seq_len is a concrete value
-            positions = np.arange(seq_len)[:, np.newaxis]
-            div_term = np.exp(np.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
-            
-            pos_encoding = np.zeros((seq_len, d_model))
-            pos_encoding[:, 0::2] = np.sin(positions * div_term)
-            pos_encoding[:, 1::2] = np.cos(positions * div_term)
-            
-            pos_encoding = tf.cast(tf.expand_dims(pos_encoding, 0), dtype=tf.float32)
+        # Create position vector
+        position = tf.range(max_len, dtype=tf.float32)
+        position = tf.expand_dims(position, axis=1)  # (max_len, 1)
         
-        return pos_encoding
+        # Create dimension vector
+        div_term = tf.range(0, d_model, 2, dtype=tf.float32)
+        div_term = tf.math.pow(10000.0, div_term / tf.cast(d_model, tf.float32))
+        div_term = 1.0 / div_term  # (d_model/2,)
+        
+        # Compute angles
+        angles = tf.matmul(position, tf.expand_dims(div_term, axis=0))  # (max_len, d_model/2)
+        
+        # Create encoding
+        pe = tf.zeros([max_len, d_model], dtype=tf.float32)
+        
+        # Even indices: sin
+        pe_sin = tf.sin(angles)
+        # Odd indices: cos
+        pe_cos = tf.cos(angles)
+        
+        # Interleave sin and cos values
+        indices = tf.range(0, d_model, delta=2)
+        updates = tf.reshape(pe_sin, [-1])
+        pe = tf.tensor_scatter_nd_update(
+            pe, 
+            tf.stack([
+                tf.repeat(tf.range(max_len), tf.shape(indices)[0]),
+                tf.tile(indices, [max_len])
+            ], axis=1),
+            updates
+        )
+        
+        indices = tf.range(1, d_model, delta=2)
+        updates = tf.reshape(pe_cos, [-1])
+        pe = tf.tensor_scatter_nd_update(
+            pe, 
+            tf.stack([
+                tf.repeat(tf.range(max_len), tf.shape(indices)[0]),
+                tf.tile(indices, [max_len])
+            ], axis=1),
+            updates
+        )
+        
+        # Add batch dimension and slice to required length
+        pe = tf.expand_dims(pe[:seq_len], axis=0)
+        return pe
     
-    elif encoding_type == "learned":
-        # For learned position embeddings, we'll use Keras layers which handle tensors natively
-        if tf.is_tensor(seq_len):
-            seq_len_value = tf.cast(seq_len, tf.int32)
-        else:
-            seq_len_value = seq_len
-            
-        pos_embedding = tf.keras.layers.Embedding(
-            input_dim=seq_len_value, 
-            output_dim=d_model
-        )(tf.range(start=0, limit=seq_len_value, delta=1))
-        
-        return pos_embedding
+    # For concrete values, use the simpler NumPy implementation
+    positions = np.arange(seq_len)[:, np.newaxis]
+    div_term = np.exp(np.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
     
-    elif encoding_type == "alibi":
-        # ALiBi positional bias (simplified TF implementation)
-        if tf.is_tensor(seq_len):
-            seq_len_value = tf.cast(seq_len, tf.int32)
-            
-            # Create position indices
-            pos_indices = tf.range(seq_len_value)
-            
-            # Calculate distance matrix
-            i_mat = tf.expand_dims(pos_indices, 0)  # [1, seq_len]
-            j_mat = tf.expand_dims(pos_indices, 1)  # [seq_len, 1]
-            pos_bias = -tf.abs(i_mat - j_mat)  # [seq_len, seq_len]
-            
-            # Create scaling factors
-            scale_base = 2.0 ** (-(tf.range(1, d_model + 1, dtype=tf.float32) / tf.cast(d_model, tf.float32)))
-            
-            # Reshape for broadcasting
-            pos_bias_expanded = tf.expand_dims(pos_bias, -1)  # [seq_len, seq_len, 1]
-            scale_expanded = tf.reshape(scale_base, [1, 1, -1])  # [1, 1, d_model]
-            
-            # Compute ALiBi bias
-            alibi_bias = pos_bias_expanded * scale_expanded  # [seq_len, seq_len, d_model]
-            
-        else:
-            # NumPy implementation for concrete values
-            pos_bias = np.zeros((seq_len, seq_len))
-            for i in range(seq_len):
-                for j in range(seq_len):
-                    pos_bias[i, j] = -abs(i - j)
-            
-            scale = np.power(2, -(np.arange(1, d_model + 1) / d_model))
-            alibi_bias = pos_bias[..., np.newaxis] * scale
-            
-            alibi_bias = tf.cast(alibi_bias, dtype=tf.float32)
-        
-        return alibi_bias
+    pos_encoding = np.zeros((seq_len, d_model))
+    pos_encoding[:, 0::2] = np.sin(positions * div_term)
+    pos_encoding[:, 1::2] = np.cos(positions * div_term)
     
-    else:
-        # Default to sinusoidal
-        return positional_encoding(seq_len, d_model, "sinusoidal")
+    return tf.cast(tf.expand_dims(pos_encoding, 0), dtype=tf.float32)
+
 
 ########################################################################
 # setup STD I/O

@@ -879,6 +879,32 @@ def create_ast_model(input_shape, config=None):
         
         # Global average pooling over sequence dimension
         x = GlobalAveragePooling1D()(x)
+
+    if use_positional_encoding:
+        if pos_encoding_type == "rotary" and enable_rotary:
+            # Rotary embeddings are applied within attention calculation
+            pass
+        else:
+            # Use a fixed positional encoding
+            # Pre-compute for a reasonable maximum length
+            max_seq_len = 1024
+            positions = np.arange(max_seq_len)[:, np.newaxis]
+            div_term = np.exp(np.arange(0, dim_feedforward, 2) * -(math.log(10000.0) / dim_feedforward))
+            
+            pos_encoding = np.zeros((max_seq_len, dim_feedforward))
+            pos_encoding[:, 0::2] = np.sin(positions * div_term)
+            pos_encoding[:, 1::2] = np.cos(positions * div_term)
+            
+            # Convert to tensor and slice to the actual sequence length
+            pos_encoding_tensor = tf.constant(pos_encoding, dtype=tf.float32)
+            pos_encoding_tensor = tf.expand_dims(pos_encoding_tensor, 0)  # Add batch dimension
+            
+            # Get the actual sequence length
+            actual_seq_len = tf.shape(x)[1]
+            pos_encoding_tensor = pos_encoding_tensor[:, :actual_seq_len, :]
+            
+            # Add to input
+            x = x + pos_encoding_tensor
     
     # Output layers
     x = Dense(dim_feedforward // 2, activation="gelu")(x)

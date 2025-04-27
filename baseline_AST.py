@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
- @file   baseline_fnn.py
+ @file   baseline_AST.py
  @brief  Baseline code of simple AE-based anomaly detection used experiment in [1], updated for 2025 with enhancements.
  @author Ryo Tanabe and Yohei Kawaguchi (Hitachi Ltd.), updated by Lamnaouar Ayoub (Github: lamnaouarrr), further modified by Grok
  Copyright (C) 2019 Hitachi, Ltd. All right reserved.
@@ -138,8 +138,8 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    os.makedirs("./logs/log_fnn", exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_fnn/baseline_fnn.log")
+    os.makedirs("./logs/log_AST", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline_AST.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -411,10 +411,18 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                                               param=param)
                 
                 if spectrogram is not None:
+                    # CRITICAL FIX: Handle frame-based spectrograms properly
                     if is_frame_based and len(spectrogram.shape) == 3:
+                        # Option 1: Only use the first frame to avoid label duplication
                         spectrograms.append(spectrogram[0])
                         if labels is not None:
                             processed_labels.append(batch_labels[idx])
+                        
+                        # Option 2 (commented out): Use all frames but duplicate labels
+                        # for frame in spectrogram:
+                        #     spectrograms.append(frame)
+                        #     if labels is not None:
+                        #         processed_labels.append(batch_labels[idx])
                     else:
                         spectrograms.append(spectrogram)
                         if labels is not None:
@@ -698,196 +706,45 @@ def dataset_generator(target_dir, param=None):
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create an Audio Spectrogram Transformer model
-    
-    Args:
-        input_shape: Shape of input spectrograms (freq, time)
-        config: Model configuration parameters
-        
-    Returns:
-        Keras Model instance
+    Create a simpler Audio Spectrogram Transformer model
     """
     if config is None:
         config = {}
     
     transformer_config = config.get("transformer", {})
-    num_heads = transformer_config.get("num_heads", 8)
-    dim_feedforward = transformer_config.get("dim_feedforward", 512)
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 4)
+    num_heads = transformer_config.get("num_heads", 4)  # Reduced from 8
+    dim_feedforward = transformer_config.get("dim_feedforward", 256)  # Reduced from 512
+    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)  # Reduced from 4
     dropout_rate = config.get("dropout", 0.1)
-    use_positional_encoding = transformer_config.get("positional_encoding", True)
-    use_pretrained = transformer_config.get("use_pretrained", False)
-    patch_size = transformer_config.get("patch_size", 16)
-    attention_dropout = transformer_config.get("attention_dropout", 0.1)
-    attention_type = transformer_config.get("attention_type", "standard")
-    key_dim = dim_feedforward // num_heads
-    pos_encoding_type = transformer_config.get("pos_encoding_type", "sinusoidal")
-    layer_norm_epsilon = float(transformer_config.get("layer_norm_epsilon", 1e-6))
-    activation_fn = transformer_config.get("activation_fn", "gelu")
-    ff_dim_multiplier = transformer_config.get("ff_dim_multiplier", 4)
-    enable_rotary = transformer_config.get("enable_rotary", False)
+    patch_size = transformer_config.get("patch_size", 4)  # Reduced from 16
     
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
     
+    # Add a preprocessing layer to ensure consistent dimensions
+    x = tf.keras.layers.Resizing(
+        input_shape[0], 
+        max(64, input_shape[1])  # Ensure minimum width of 64
+    )(inputs)
+    
     # Reshape to prepare for transformer (batch, freq, time, 1)
-    x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
+    x = Reshape((input_shape[0], max(64, input_shape[1]), 1))(x)
     
-    if use_pretrained and K.image_data_format() == 'channels_last':
-        # Using pre-trained ViT model
-        try:
-            # Create configuration for the ViT model
-            vit_config = ViTConfig(
-                hidden_size=768,
-                num_hidden_layers=num_encoder_layers,
-                num_attention_heads=num_heads,
-                intermediate_size=dim_feedforward,
-                hidden_dropout_prob=dropout_rate,
-                attention_probs_dropout_prob=attention_dropout,
-                image_size=224,  # Standard for ViT
-                patch_size=patch_size
-            )
-            
-            # Resize input to fit pre-trained model
-            # This needs a fixed size input - adjust based on your specific needs
-            x = tf.keras.layers.experimental.preprocessing.Resizing(224, 224)(x)
-            
-            # Pre-trained model - you'll need to install transformers
-            vit_model = TFViTModel.from_pretrained(
-                transformer_config.get("pretrained_model", "google/vit-base-patch16-224"),
-                config=vit_config
-            )
-            
-            # Get the output from the ViT model
-            vit_output = vit_model(x).last_hidden_state
-            
-            # Global average pooling over the sequence dimension
-            x = GlobalAveragePooling1D()(vit_output)
-            
-        except Exception as e:
-            logger.warning(f"Failed to load pre-trained ViT model: {e}. Falling back to custom transformer.")
-            use_pretrained = False
+    # Simple CNN feature extraction
+    x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Conv2D(dim_feedforward, (3, 3), activation='relu', padding='same')(x)
     
-    if not use_pretrained:
-        # Custom transformer implementation
-        # Extract patches from the spectrogram
-        freq_patches = input_shape[0] // patch_size
-        time_patches = input_shape[1] // patch_size
-        total_patches = freq_patches * time_patches
-        patch_dim = patch_size * patch_size
-        
-        # Reshape into patches
-        x = tf.keras.layers.Conv2D(
-            filters=dim_feedforward,
-            kernel_size=patch_size,
-            strides=patch_size,
-            padding="valid"
-        )(x)
-
-        # Get the actual dimensions after convolution
-        conv_shape = tf.shape(x)
-        height, width = conv_shape[1], conv_shape[2]
-        total_patches = height * width
-
-        # Flatten patches to sequence - dynamic reshape based on actual dimensions
-        x = tf.reshape(x, [-1, total_patches, dim_feedforward])
-        
-        # Add positional encoding
-        if use_positional_encoding:
-            if pos_encoding_type == "rotary" and enable_rotary:
-                # Rotary embeddings are applied within attention calculation
-                # This is a flag to enable it, actual implementation would be in the attention mechanism
-                pass
-            else:
-                # Get a concrete value for seq_len based on the shape tensor
-                seq_len = tf.shape(x)[1]
-                pos_encoding = positional_encoding(seq_len, dim_feedforward, pos_encoding_type)
-                
-                # Cast positional encoding to match the data type of x
-                pos_encoding = tf.cast(pos_encoding, dtype=x.dtype)
-                
-                if pos_encoding_type != "alibi":  # alibi is used directly in attention
-                    x = x + pos_encoding
-
-
-        
-        # Transformer encoder blocks
-        for _ in range(num_encoder_layers):
-            # Layer normalization
-            attn_input = LayerNormalization(epsilon=float(layer_norm_epsilon))(x)
-
-            
-            # Multi-head attention
-            if attention_type == "standard" or attention_type == "efficient":
-                # Use standard MultiHeadAttention for both types
-                attn_output = MultiHeadAttention(
-                    num_heads=num_heads,
-                    key_dim=key_dim,
-                    dropout=attention_dropout
-                )(attn_input, attn_input)
-            elif attention_type == "linear":
-                # Linear attention implementation (approximate attention)
-                query = Dense(dim_feedforward)(attn_input)
-                key = Dense(dim_feedforward)(attn_input)
-                value = Dense(dim_feedforward)(attn_input)
-                
-                # Reshape for heads
-                batch_size = tf.shape(query)[0]
-                seq_length = tf.shape(query)[1]
-                query = tf.reshape(query, [batch_size, seq_length, num_heads, key_dim])
-                key = tf.reshape(key, [batch_size, seq_length, num_heads, key_dim])
-                value = tf.reshape(value, [batch_size, seq_length, num_heads, key_dim])
-                
-                # Linear attention calculation (ϕ(q)·ϕ(k)ᵀ·v)
-                query = tf.nn.elu(query) + 1.0
-                key = tf.nn.elu(key) + 1.0
-                
-                # Compute attention
-                kv = tf.einsum("bshd,bshv->bhdv", key, value)
-                attn_output = tf.einsum("bshd,bhdv->bshv", query, kv)
-                
-                # Reshape back
-                attn_output = tf.reshape(attn_output, [batch_size, seq_length, dim_feedforward])
-                attn_output = Dense(dim_feedforward)(attn_output)
-            else:
-                # Default to standard attention
-                attn_output = MultiHeadAttention(
-                    num_heads=num_heads,
-                    key_dim=key_dim,
-                    dropout=attention_dropout
-                )(attn_input, attn_input)
-            
-            # Skip connection
-            x = x + attn_output
-            
-            # Feed-forward network
-            ffn_input = LayerNormalization(epsilon=float(layer_norm_epsilon))(x)
-            if activation_fn == "gelu":
-                ffn_output = Dense(dim_feedforward * ff_dim_multiplier, activation="gelu")(ffn_input)
-            elif activation_fn == "relu":
-                ffn_output = Dense(dim_feedforward * ff_dim_multiplier, activation="relu")(ffn_input)
-            elif activation_fn == "swish":
-                ffn_output = Dense(dim_feedforward * ff_dim_multiplier)(ffn_input)
-                ffn_output = tf.keras.activations.swish(ffn_output)
-            else:
-                # Default to gelu
-                ffn_output = Dense(dim_feedforward * ff_dim_multiplier, activation="gelu")(ffn_input)
-            ffn_output = Dense(dim_feedforward)(ffn_output)
-            
-            if dropout_rate > 0:
-                ffn_output = Dropout(dropout_rate)(ffn_output)
-                
-            # Skip connection
-            x = x + ffn_output
-        
-        # Final layer normalization
-        x = LayerNormalization(epsilon=float(1e-6))(x)
-        
-        # Global average pooling over sequence dimension
-        x = GlobalAveragePooling1D()(x)
+    # Flatten for dense layers
+    x = tf.keras.layers.Flatten()(x)
     
-    # Output layers
-    x = Dense(dim_feedforward // 2, activation="gelu")(x)
+    # Dense layers
+    x = Dense(dim_feedforward, activation="relu")(x)
+    if dropout_rate > 0:
+        x = Dropout(dropout_rate)(x)
+    x = Dense(dim_feedforward // 2, activation="relu")(x)
     if dropout_rate > 0:
         x = Dropout(dropout_rate)(x)
     outputs = Dense(1, activation="sigmoid")(x)
@@ -1054,7 +911,7 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = f"{param['result_directory']}/result_fnn.yaml"
+    result_file = f"{param['result_directory']}/result_AST.yaml"
 
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
@@ -1126,6 +983,31 @@ def main():
     print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
 
     
+    # Check for data shape mismatch and fix it
+    if train_data.shape[0] != train_labels_expanded.shape[0]:
+        logger.warning(f"Data shape mismatch! X: {train_data.shape[0]} samples, y: {train_labels_expanded.shape[0]} labels")
+        
+        if train_data.shape[0] > train_labels_expanded.shape[0]:
+            # Too many features, need to reduce
+            train_data = train_data[:train_labels_expanded.shape[0]]
+            sample_weights = sample_weights[:train_labels_expanded.shape[0]]
+            logger.info(f"Reduced X to match y: {train_data.shape}")
+        else:
+            # Too many labels, need to reduce
+            train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
+            logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
+
+    # Check class distribution
+    class_distribution = np.bincount(train_labels_expanded.astype(int))
+    logger.info(f"Class distribution in training data: {class_distribution}")
+    if len(class_distribution) > 1:
+        class_ratio = class_distribution[0] / class_distribution[1] if class_distribution[1] > 0 else float('inf')
+        logger.info(f"Class ratio (normal:abnormal): {class_ratio:.2f}:1")
+        
+        if class_ratio > 10:
+            logger.warning(f"Severe class imbalance detected! Consider using class weights or data augmentation.")
+
+
     print("============== MODEL TRAINING ==============")
     # Track model training time specifically
     model_start_time = time.time()
@@ -1374,16 +1256,58 @@ def main():
             max_samples = 50000
 
             if train_data.shape[0] > max_samples:
-                indices = np.random.choice(train_data.shape[0], max_samples, replace=False)
-                train_data_subset = train_data[indices]
-                train_labels_subset = train_labels_expanded[indices]
-                sample_weights_subset = sample_weights[indices]
+                # Stratified sampling to maintain class distribution
+                normal_indices = np.where(train_labels_expanded == 0)[0]
+                abnormal_indices = np.where(train_labels_expanded == 1)[0]
+                
+                # Sample from each class
+                if len(normal_indices) > 0:
+                    normal_sample_size = min(int(max_samples * 0.8), len(normal_indices))
+                    sampled_normal = np.random.choice(normal_indices, normal_sample_size, replace=False)
+                else:
+                    sampled_normal = []
+                    
+                if len(abnormal_indices) > 0:
+                    abnormal_sample_size = min(int(max_samples * 0.2), len(abnormal_indices))
+                    sampled_abnormal = np.random.choice(abnormal_indices, abnormal_sample_size, replace=False)
+                else:
+                    sampled_abnormal = []
+                
+                # Combine indices
+                sampled_indices = np.concatenate([sampled_normal, sampled_abnormal])
+                np.random.shuffle(sampled_indices)
+                
+                train_data_subset = train_data[sampled_indices]
+                train_labels_subset = train_labels_expanded[sampled_indices]
+                sample_weights_subset = sample_weights[sampled_indices]
+                
                 logger.info(f"Using subset of data: {train_data_subset.shape}")
+                logger.info(f"Subset class distribution: {np.bincount(train_labels_subset.astype(int))}")
             else:
                 train_data_subset = train_data
                 train_labels_subset = train_labels_expanded
                 sample_weights_subset = sample_weights
 
+            # Calculate class weights
+            if param.get("fit", {}).get("class_weight_balancing", True):
+                # Count class occurrences
+                class_counts = np.bincount(train_labels_expanded.astype(int))
+                total_samples = np.sum(class_counts)
+                
+                # Calculate weights inversely proportional to class frequencies
+                class_weights = {
+                    0: total_samples / (class_counts[0] * 2) if class_counts[0] > 0 else 1.0,
+                    1: total_samples / (class_counts[1] * 2) if len(class_counts) > 1 and class_counts[1] > 0 else 1.0
+                }
+                
+                logger.info(f"Using class weights: {class_weights}")
+                
+                # Apply class weights to sample weights
+                sample_weights = np.ones(len(train_data))
+                for i, label in enumerate(train_labels_expanded):
+                    sample_weights[i] = class_weights[int(label)]
+            else:
+                sample_weights = np.ones(len(train_data))
 
             print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
             history = model.fit(

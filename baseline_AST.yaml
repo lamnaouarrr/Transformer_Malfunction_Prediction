@@ -1,10 +1,10 @@
 # Feature extraction parameters
 feature:
   n_mels: 48           # Reduced from 64
-  frames: 4            # Reduced from 5
+  frames: 1            # Reduced from 5
   n_fft: 1024          # Keep as is
   hop_length: 1024     # Doubled from 512
-  stride: 4 
+  stride: 1 
   power: 2.0
   sr: 16000
   augmentation:
@@ -19,12 +19,12 @@ feature:
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.0001  # Lower learning rate for transformer
+    learning_rate: 0.001  # Lower learning rate for transformer
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
   epochs: 150
-  batch_size: 128
+  batch_size: 64
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -53,6 +53,7 @@ fit:
     monitor: "val_accuracy"
     mode: "max"
     save_best_only: true
+  class_weight_balancing: true
 
 # Training optimizations
 training:
@@ -64,13 +65,13 @@ training:
 model:
   architecture:
     transformer:
-      num_heads: 8
-      dim_feedforward: 512
-      num_encoder_layers: 4
+      num_heads: 4
+      dim_feedforward: 256
+      num_encoder_layers: 2
       positional_encoding: true
       use_pretrained: true
       pretrained_model: "google/vit-base-patch16-224"
-      patch_size: 16
+      patch_size: 4
       attention_dropout: 0.1
       # New parameters
       attention_type: "efficient"  # Options: "standard", "efficient", "linear"

@@ -1213,8 +1213,20 @@ def main():
             train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
             train_dataset = train_dataset.batch(param["fit"]["batch_size"])
             
+            # Create validation dataset
+            val_dataset = tf.data.Dataset.from_tensor_slices((val_data, val_labels_expanded))
+            val_dataset = val_dataset.batch(param["fit"]["batch_size"])
+            
             # Define variables to store accumulated gradients
             accum_steps = param["training"]["gradient_accumulation_steps"]
+            
+            # Create a history object to store metrics
+            history = {
+                'loss': [],
+                'accuracy': [],
+                'val_loss': [],
+                'val_accuracy': []
+            }
             
             # Manual training loop
             @tf.function
@@ -1238,7 +1250,75 @@ def main():
                     for i in range(len(accumulated_grads)):
                         accumulated_grads[i].assign(tf.zeros_like(accumulated_grads[i]))
                         
-                return loss_value
+                # Calculate accuracy
+                y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                        
+                return loss_value, accuracy
+            
+            @tf.function
+            def val_step(x_batch, y_batch):
+                logits = model(x_batch, training=False)
+                loss_value = compile_params["loss"](y_batch, logits)
+                
+                # Calculate accuracy
+                y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                
+                return loss_value, accuracy
+            
+            # Training loop
+            epochs = param["fit"]["epochs"]
+            for epoch in range(epochs):
+                print(f"\nEpoch {epoch+1}/{epochs}")
+                
+                # Training metrics
+                train_loss = tf.keras.metrics.Mean()
+                train_accuracy = tf.keras.metrics.Mean()
+                
+                # Validation metrics
+                val_loss = tf.keras.metrics.Mean()
+                val_accuracy = tf.keras.metrics.Mean()
+                
+                # Training loop
+                step = 0
+                progress_bar = tqdm(train_dataset, desc=f"Training")
+                for x_batch, y_batch in progress_bar:
+                    batch_loss, batch_accuracy = train_step(x_batch, y_batch, step % accum_steps)
+                    train_loss.update_state(batch_loss)
+                    train_accuracy.update_state(batch_accuracy)
+                    step += 1
+                    
+                    # Update progress bar
+                    progress_bar.set_postfix({
+                        'loss': f'{train_loss.result():.4f}',
+                        'accuracy': f'{train_accuracy.result():.4f}'
+                    })
+                
+                # Validation loop
+                for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
+                    batch_loss, batch_accuracy = val_step(x_batch, y_batch)
+                    val_loss.update_state(batch_loss)
+                    val_accuracy.update_state(batch_accuracy)
+                
+                # Print epoch results
+                print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
+                print(f"Validation loss: {val_loss.result():.4f}, accuracy: {val_accuracy.result():.4f}")
+                
+                # Store metrics in history
+                history['loss'].append(float(train_loss.result()))
+                history['accuracy'].append(float(train_accuracy.result()))
+                history['val_loss'].append(float(val_loss.result()))
+                history['val_accuracy'].append(float(val_accuracy.result()))
+                
+                # Check for early stopping
+                if callbacks and any(isinstance(cb, tf.keras.callbacks.EarlyStopping) for cb in callbacks):
+                    # Implement early stopping logic here if needed
+                    pass
+            
+            # Convert history to a format compatible with Keras history
+            history = type('History', (), {'history': history})
+
         else:
             if param.get("training", {}).get("xla_acceleration", False):
                 logger.info("Enabling XLA acceleration")

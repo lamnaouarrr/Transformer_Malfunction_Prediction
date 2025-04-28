@@ -461,7 +461,7 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     max_time = 0
     
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
-    for idx, file_path in enumerate(tqdm(file_list[:min(100, len(file_list))], desc=f"{msg} (dimension check)")):
+    for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
         try:
             spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
             if spec is not None:
@@ -966,7 +966,12 @@ def create_ast_model(input_shape, config=None):
     x = Dropout(dropout_rate)(x)
     
     # Final classification layer
-    outputs = Dense(1, activation="sigmoid", kernel_regularizer=l2(l2_reg))(x)
+    x = Dense(32, kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = Dropout(dropout_rate)(x)
+    # Use a threshold-adjusted sigmoid for better sensitivity to abnormal class
+    outputs = Dense(1, activation="sigmoid", kernel_regularizer=l2(l2_reg), bias_initializer=tf.keras.initializers.Constant(-1.0))(x)
     
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
 
@@ -1362,6 +1367,40 @@ def main():
     logger.info("Balancing dataset...")
     train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
 
+    abnormal_indices = np.where(train_labels_expanded == 1)[0]
+    if len(abnormal_indices) > 0:
+        logger.info(f"Adding extra augmentation for {len(abnormal_indices)} abnormal samples")
+        
+        # Create copies with different noise patterns
+        augmented_abnormal = []
+        for idx in abnormal_indices:
+            # Create 3 variations of each abnormal sample
+            for i in range(3):
+                sample = train_data[idx].copy()
+                # Add stronger noise to make variations more distinct
+                noise_level = 0.15 + (i * 0.05)  # Increasing noise levels
+                noise = np.random.normal(0, noise_level, sample.shape)
+                augmented_sample = sample + noise
+                augmented_sample = np.clip(augmented_sample, 0, 1)
+                augmented_abnormal.append(augmented_sample)
+        
+        # Add the augmented samples to the training data
+        if augmented_abnormal:
+            augmented_abnormal = np.array(augmented_abnormal)
+            train_data = np.vstack([train_data, augmented_abnormal])
+            # Add corresponding labels (all 1 for abnormal)
+            train_labels_expanded = np.concatenate([
+                train_labels_expanded, 
+                np.ones(len(augmented_abnormal))
+            ])
+            
+            # Shuffle the combined dataset
+            shuffle_indices = np.random.permutation(len(train_data))
+            train_data = train_data[shuffle_indices]
+            train_labels_expanded = train_labels_expanded[shuffle_indices]
+            
+            logger.info(f"After abnormal augmentation: {len(train_data)} samples, {np.sum(train_labels_expanded == 1)} abnormal")
+
     # Configure mixed precision
     mixed_precision_enabled = configure_mixed_precision(
         enabled=param.get("training", {}).get("mixed_precision", False)
@@ -1418,6 +1457,11 @@ def main():
     # For class weights, check if they're already being calculated in your existing code
     # If you want to ensure abnormal class gets higher weight, you can adjust the calculation:
     if param.get("fit", {}).get("class_weight_balancing", True):
+        lass_weights = {
+            0: 1.0,  # Normal class
+            1: 10.0  # Abnormal class - increase weight significantly
+        }
+        logger.info(f"Using modified class weights to prioritize abnormal detection: {class_weights}")
         # Count class occurrences
         class_counts = np.bincount(train_labels_expanded.astype(int))
         total_samples = np.sum(class_counts)
@@ -1470,9 +1514,9 @@ def main():
         if early_stopping_config.get("enabled", False):
             callbacks.append(tf.keras.callbacks.EarlyStopping(
                 monitor=early_stopping_config.get("monitor", "val_loss"),
-                patience=early_stopping_config.get("patience", 10),
+                patience=20,  # Increase patience to allow more training
                 min_delta=early_stopping_config.get("min_delta", 0.001),
-                restore_best_weights=early_stopping_config.get("restore_best_weights", True)
+                restore_best_weights=True
             ))
 
         callbacks.append(TerminateOnNaN(patience=3))
@@ -1780,8 +1824,8 @@ def main():
 
 
             # Use a smaller batch size and more conservative approach
-            safe_batch_size = min(16, batch_size)  # Use at most 16 for stability
-            safe_epochs = min(50, epochs)  # Cap at 50 epochs to prevent OOM
+            safe_batch_size = min(16, batch_size)
+            safe_epochs = min(100, epochs)
 
             logger.info(f"Training with conservative settings: batch_size={safe_batch_size}, epochs={safe_epochs}")
             history = model.fit(
@@ -1830,9 +1874,12 @@ def main():
     if test_data.shape[0] > 0:
         # Predict on test set
         y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
-        y_pred_binary = (y_pred > 0.5).astype(int)
+        # Use a lower threshold to increase sensitivity to abnormal class
+        detection_threshold = 0.3  # Lower threshold to catch more abnormal samples
+        y_pred_binary = (y_pred > detection_threshold).astype(int)
+        logger.info(f"Using adjusted detection threshold: {detection_threshold}")
         gc.collect()
-        
+
         # Calculate metrics
         test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
         test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
@@ -1898,6 +1945,10 @@ def main():
             "overall_f1": float(overall_f1),
         }
         results.update(overall_results)
+        results["timing"] = {
+            "total_execution_time_seconds": float(total_time),
+            "model_training_time_seconds": float(training_time),
+        }
 
         logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
         logger.info(f"Overall Precision: {overall_precision:.4f}")

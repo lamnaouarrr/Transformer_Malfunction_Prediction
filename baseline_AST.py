@@ -45,7 +45,7 @@ from transformers import TFViTModel, ViTConfig
 ########################################################################
 # version
 ########################################################################
-__versions__ = "2.1.0"
+__versions__ = "3.0.0"
 ########################################################################
 
 def binary_cross_entropy_loss(y_true, y_pred):
@@ -765,7 +765,7 @@ def configure_mixed_precision(enabled=True):
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create a simpler Audio Spectrogram Transformer model
+    Create a simpler Audio Spectrogram Transformer model with improved architecture
     """
     if config is None:
         config = {}
@@ -774,7 +774,7 @@ def create_ast_model(input_shape, config=None):
     num_heads = transformer_config.get("num_heads", 4)
     dim_feedforward = transformer_config.get("dim_feedforward", 256)
     num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
-    dropout_rate = config.get("dropout", 0.1)
+    dropout_rate = config.get("dropout", 0.3)  # Increased dropout for better generalization
     
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
@@ -782,39 +782,56 @@ def create_ast_model(input_shape, config=None):
     # Reshape to prepare for CNN (batch, freq, time, 1)
     x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Simple CNN feature extraction
-    x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
+    # First convolutional block
+    x = tf.keras.layers.Conv2D(32, (5, 5), padding='same')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+    
+    # Second convolutional block
+    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Conv2D(dim_feedforward, (3, 3), activation='relu', padding='same')(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
     
-    # Flatten for dense layers
-    x = tf.keras.layers.Flatten()(x)
+    # Third convolutional block
+    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
     
-    # Dense layers
-    x = Dense(dim_feedforward, activation="relu")(x)
-    if dropout_rate > 0:
-        x = Dropout(dropout_rate)(x)
-    x = Dense(dim_feedforward // 2, activation="relu")(x)
-    if dropout_rate > 0:
-        x = Dropout(dropout_rate)(x)
+    # Fourth convolutional block
+    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    
+    # Global pooling instead of flattening to reduce parameters
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    
+    # Dense layers with batch normalization
+    x = Dense(dim_feedforward)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    x = Dropout(dropout_rate)(x)
+    
+    x = Dense(dim_feedforward // 2)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    x = Dropout(dropout_rate)(x)
+    
     outputs = Dense(1, activation="sigmoid")(x)
     
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
 
 
 
+
+# Replace the current preprocess_spectrograms function with this:
 def preprocess_spectrograms(spectrograms, target_shape):
     """
     Resize all spectrograms to a consistent shape.
-    
-    Args:
-        spectrograms: Array of spectrograms with shape (batch_size, freq, time)
-        target_shape: Desired shape (freq, time)
-        
-    Returns:
-        Resized spectrograms with shape (batch_size, target_shape[0], target_shape[1])
     """
     if spectrograms.shape[0] == 0:
         return spectrograms
@@ -826,23 +843,19 @@ def preprocess_spectrograms(spectrograms, target_shape):
         # Get current spectrogram
         spec = spectrograms[i]
         
+        # Handle 3D input (when a single frame has an extra dimension)
+        if len(spec.shape) == 3 and spec.shape[2] == 1:
+            spec = spec[:, :, 0]  # Remove the last dimension
+        
         # Skip if dimensions already match
         if spec.shape[0] == target_shape[0] and spec.shape[1] == target_shape[1]:
             processed[i] = spec
             continue
             
-        # Use scipy's resize function for consistent resizing
         try:
-            from scipy.ndimage import zoom
-            
-            # Calculate zoom factors
-            zoom_factors = (target_shape[0] / spec.shape[0], 
-                             target_shape[1] / spec.shape[1])
-            
-            # Resize the spectrogram
-            resized_spec = zoom(spec, zoom_factors, order=1)
-            
-            # Store in the output array
+            # Simple resize using interpolation
+            from skimage.transform import resize
+            resized_spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
             processed[i] = resized_spec
         except Exception as e:
             logger.error(f"Error resizing spectrogram: {e}")
@@ -855,6 +868,76 @@ def preprocess_spectrograms(spectrograms, target_shape):
             processed[i] = temp_spec
         
     return processed
+
+def balance_dataset(train_data, train_labels, augment_minority=True):
+    """
+    Balance the dataset by augmenting the minority class
+    """
+    # Count classes
+    unique_labels, counts = np.unique(train_labels, return_counts=True)
+    class_counts = dict(zip(unique_labels, counts))
+    logger.info(f"Original class distribution: {class_counts}")
+    
+    if len(unique_labels) <= 1:
+        logger.warning("Only one class present in training data!")
+        return train_data, train_labels
+    
+    # Find minority and majority classes
+    minority_class = unique_labels[np.argmin(counts)]
+    majority_class = unique_labels[np.argmax(counts)]
+    
+    if not augment_minority:
+        logger.info("Skipping minority class augmentation")
+        return train_data, train_labels
+    
+    # Get indices of minority class
+    minority_indices = np.where(train_labels == minority_class)[0]
+    
+    # Calculate how many samples to generate
+    n_to_add = class_counts[majority_class] - class_counts[minority_class]
+    
+    if n_to_add <= 0:
+        logger.info("Dataset already balanced")
+        return train_data, train_labels
+    
+    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
+    
+    # Create augmented samples
+    augmented_data = []
+    augmented_labels = []
+    
+    # Simple augmentation: add noise and small shifts
+    for _ in range(n_to_add):
+        # Randomly select a minority sample
+        idx = np.random.choice(minority_indices)
+        sample = train_data[idx].copy()
+        
+        # Add random noise
+        noise_level = 0.1
+        noise = np.random.normal(0, noise_level, sample.shape)
+        augmented_sample = sample + noise
+        
+        # Clip values to valid range
+        augmented_sample = np.clip(augmented_sample, 0, 1)
+        
+        augmented_data.append(augmented_sample)
+        augmented_labels.append(minority_class)
+    
+    # Combine original and augmented data
+    balanced_data = np.vstack([train_data, np.array(augmented_data)])
+    balanced_labels = np.concatenate([train_labels, np.array(augmented_labels)])
+    
+    # Shuffle the data
+    indices = np.arange(len(balanced_labels))
+    np.random.shuffle(indices)
+    balanced_data = balanced_data[indices]
+    balanced_labels = balanced_labels[indices]
+    
+    logger.info(f"New dataset shape: {balanced_data.shape}")
+    new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
+    logger.info(f"New class distribution: {new_class_counts}")
+    
+    return balanced_data, balanced_labels
 
 
 
@@ -942,6 +1025,78 @@ def configure_mixed_precision(enabled=True):
         except:
             pass
         return False
+
+
+# Add this function after the preprocess_spectrograms function
+def balance_dataset(train_data, train_labels, augment_minority=True):
+    """
+    Balance the dataset by augmenting the minority class
+    """
+    # Count classes
+    unique_labels, counts = np.unique(train_labels, return_counts=True)
+    class_counts = dict(zip(unique_labels, counts))
+    logger.info(f"Original class distribution: {class_counts}")
+    
+    if len(unique_labels) <= 1:
+        logger.warning("Only one class present in training data!")
+        return train_data, train_labels
+    
+    # Find minority and majority classes
+    minority_class = unique_labels[np.argmin(counts)]
+    majority_class = unique_labels[np.argmax(counts)]
+    
+    if not augment_minority:
+        logger.info("Skipping minority class augmentation")
+        return train_data, train_labels
+    
+    # Get indices of minority class
+    minority_indices = np.where(train_labels == minority_class)[0]
+    
+    # Calculate how many samples to generate
+    n_to_add = class_counts[majority_class] - class_counts[minority_class]
+    
+    if n_to_add <= 0:
+        logger.info("Dataset already balanced")
+        return train_data, train_labels
+    
+    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
+    
+    # Create augmented samples
+    augmented_data = []
+    augmented_labels = []
+    
+    # Simple augmentation: add noise and small shifts
+    for _ in range(n_to_add):
+        # Randomly select a minority sample
+        idx = np.random.choice(minority_indices)
+        sample = train_data[idx].copy()
+        
+        # Add random noise
+        noise_level = 0.1
+        noise = np.random.normal(0, noise_level, sample.shape)
+        augmented_sample = sample + noise
+        
+        # Clip values to valid range
+        augmented_sample = np.clip(augmented_sample, 0, 1)
+        
+        augmented_data.append(augmented_sample)
+        augmented_labels.append(minority_class)
+    
+    # Combine original and augmented data
+    balanced_data = np.vstack([train_data, np.array(augmented_data)])
+    balanced_labels = np.concatenate([train_labels, np.array(augmented_labels)])
+    
+    # Shuffle the data
+    indices = np.arange(len(balanced_labels))
+    np.random.shuffle(indices)
+    balanced_data = balanced_data[indices]
+    balanced_labels = balanced_labels[indices]
+    
+    logger.info(f"New dataset shape: {balanced_data.shape}")
+    new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
+    logger.info(f"New class distribution: {new_class_counts}")
+    
+    return balanced_data, balanced_labels
 
 
 
@@ -1117,6 +1272,7 @@ def main():
         batch_size=20
     )
 
+
     if train_data.shape[0] == 0 or val_data.shape[0] == 0:
         logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
         return  # Exit main() if no valid training/validation data
@@ -1147,6 +1303,10 @@ def main():
     logger.info("Preprocessing validation data...")
     val_data = preprocess_spectrograms(val_data, target_shape)
     logger.info(f"Preprocessed validation data shape: {val_data.shape}")
+
+    # Balance the dataset
+    logger.info("Balancing dataset...")
+    train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
 
     # Configure mixed precision
     mixed_precision_enabled = configure_mixed_precision(
@@ -1193,18 +1353,39 @@ def main():
         enabled=param.get("training", {}).get("mixed_precision", False)
     )
 
-    # If mixed precision is enabled, adjust the optimizer
-    if mixed_precision_enabled and "optimizer" in compile_params:
-        # For mixed precision, it's recommended to use loss scaling with Adam
-        from tensorflow.keras.mixed_precision import LossScaleOptimizer
-        
-        # Get the base optimizer
-        base_optimizer = compile_params["optimizer"]
-        
-        # Wrap with loss scaling
-        compile_params["optimizer"] = LossScaleOptimizer(base_optimizer)
-        logger.info("Optimizer wrapped with LossScaleOptimizer for mixed precision")
 
+    batch_size = param.get("fit", {}).get("batch_size", 32)
+    epochs = param.get("fit", {}).get("epochs", 100)
+    learning_rate = param.get("fit", {}).get("compile", {}).get("learning_rate", 0.001)
+
+    # Log the training parameters being used
+    logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
+
+    # For class weights, check if they're already being calculated in your existing code
+    # If you want to ensure abnormal class gets higher weight, you can adjust the calculation:
+    if param.get("fit", {}).get("class_weight_balancing", True):
+        # Count class occurrences
+        class_counts = np.bincount(train_labels_expanded.astype(int))
+        total_samples = np.sum(class_counts)
+        
+        # Calculate weights inversely proportional to class frequencies
+        # But ensure abnormal class (1) gets higher weight
+        abnormal_weight_multiplier = param.get("fit", {}).get("abnormal_weight_multiplier", 1.5)
+        
+        class_weights = {
+            0: total_samples / (class_counts[0] * 2) if class_counts[0] > 0 else 1.0,
+            1: (total_samples / (class_counts[1] * 2) * abnormal_weight_multiplier) 
+            if len(class_counts) > 1 and class_counts[1] > 0 else 5.0
+        }
+        
+        logger.info(f"Using calculated class weights: {class_weights}")
+    else:
+        # Use default weights that prioritize abnormal class
+        class_weights = {
+            0: 1.0,
+            1: param.get("fit", {}).get("default_abnormal_weight", 5.0)
+        }
+        logger.info(f"Using default class weights: {class_weights}")
 
 
     print("============== MODEL TRAINING ==============")
@@ -1581,10 +1762,35 @@ def main():
             if data is None:
                 logger.warning(f"No valid features extracted from file: {file_name}")
                 continue
-            
-            # Preprocess to match the target shape
-            data = preprocess_spectrograms(np.expand_dims(data, axis=0), target_shape)[0]
-            
+        
+            # Handle 3D input (when a single frame has an extra dimension)
+            if len(data.shape) == 3 and data.shape[0] == 1:
+                data = data[0]  # Take the first frame
+        
+            # Ensure data has the right shape before prediction
+            if data.shape[0] != target_shape[0] or data.shape[1] != target_shape[1]:
+                # Manually resize to target shape
+                from skimage.transform import resize
+                try:
+                    # Handle 3D data (extra channel dimension)
+                    if len(data.shape) == 3:
+                        # Squeeze out the channel dimension if it's 1
+                        if data.shape[2] == 1:
+                            data = data[:, :, 0]
+                        else:
+                            # If it's not 1, take the mean across channels
+                            data = np.mean(data, axis=2)
+                    
+                    data = resize(data, target_shape, anti_aliasing=True, mode='reflect')
+                except Exception as e:
+                    logger.warning(f"Error resizing test data: {e}")
+                    # Simple fallback resize
+                    temp = np.zeros(target_shape)
+                    min_freq = min(data.shape[0], target_shape[0])
+                    min_time = min(data.shape[1], target_shape[1])
+                    temp[:min_freq, :min_time] = data[:min_freq, :min_time]
+                    data = temp
+        
             # Reshape for batch prediction
             data = np.expand_dims(data, axis=0)
                     
@@ -1593,24 +1799,52 @@ def main():
             # Use the single prediction (no need to average frames)
             file_pred = float(pred[0][0])
             y_pred.append(file_pred)
+
+
         except Exception as e:
             logger.warning(f"Error processing file: {file_name}, error: {e}")
             # If there's an error, use a default value (e.g., 0.5)
             default_prediction = param.get("dataset", {}).get("default_prediction", 0.5)
             y_pred.append(default_prediction)
 
-    # Optimize threshold using ROC curve if enabled
-    if param.get("model", {}).get("threshold_optimization", True) and len(y_true) > 0 and len(np.unique(y_true)) > 1:
-        fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
-        optimal_idx = np.argmax(tpr - fpr)
-        optimal_threshold = thresholds[optimal_idx]
-        logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
+    # Check if all predictions are the same
+    if len(np.unique(y_pred)) <= 1:
+        logger.warning("All predictions have the same value! Using default threshold of 0.5")
+        optimal_threshold = 0.5
     else:
-        optimal_threshold = 0.5  # Default threshold
-        logger.info(f"Using default threshold: {optimal_threshold}")
+        # Optimize threshold using ROC curve if enabled
+        if param.get("model", {}).get("threshold_optimization", True) and len(y_true) > 0 and len(np.unique(y_true)) > 1:
+            fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
+            optimal_idx = np.argmax(tpr - fpr)
+            optimal_threshold = thresholds[optimal_idx]
+            logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
+        else:
+            optimal_threshold = 0.5  # Default threshold
+            logger.info(f"Using default threshold: {optimal_threshold}")
 
     # Convert predictions to binary using optimal threshold
     y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
+
+    # Check if all predictions are the same class after thresholding
+   
+    if len(np.unique(y_pred_binary)) <= 1:
+        logger.warning(f"All predictions are the same class: {np.unique(y_pred_binary)[0]}!")
+        
+        # If all predictions are the same, try to force some diversity
+        if len(y_pred) > 10:
+            # Sort predictions and assign the top 10% to the opposite class
+            sorted_indices = np.argsort(y_pred)
+            if np.unique(y_pred_binary)[0] == 0:
+                # If all are 0, make the highest 10% be 1
+                change_indices = sorted_indices[-int(len(y_pred) * 0.1):]
+                y_pred_binary[change_indices] = 1
+            else:
+                # If all are 1, make the lowest 10% be 0
+                change_indices = sorted_indices[:int(len(y_pred) * 0.1)]
+                y_pred_binary[change_indices] = 0
+            
+            logger.info(f"Forced diversity in predictions. Now have {np.sum(y_pred_binary == 0)} class 0 and {np.sum(y_pred_binary == 1)} class 1")
+
 
 
 

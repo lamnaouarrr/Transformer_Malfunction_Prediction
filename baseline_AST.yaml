@@ -54,6 +54,8 @@ fit:
     mode: "max"
     save_best_only: true
   class_weight_balancing: true
+  abnormal_weight_multiplier: 1.5
+  default_abnormal_weight: 5.0 
 
 # Training optimizations
 training:

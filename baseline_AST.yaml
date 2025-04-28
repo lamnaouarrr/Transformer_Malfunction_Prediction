@@ -36,7 +36,7 @@ feature:
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.001  # Lower learning rate for transformer
+    learning_rate: 0.0001
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
@@ -83,6 +83,7 @@ training:
   mixed_precision: true
   xla_acceleration: true
   gradient_accumulation_steps: 4  # Add gradient accumulation for larger effective batch size
+  gradient_clip_norm: 1.0
   mixup:
     enabled: true
     alpha: 0.2
@@ -106,10 +107,12 @@ model:
       activation_fn: "gelu"  # Options: "gelu", "relu", "swish"
       ff_dim_multiplier: 4
       enable_rotary: false
-  loss: "focal_loss"  # Options: "binary_crossentropy", "focal_loss"
+  loss: "binary_crossentropys"
+  l2_regularization: 0.00001
   focal_loss:
     gamma: 2.0
     alpha: 0.25
+    use_safe_implementation: true
 
 # Dataset generation parameters
 dataset:

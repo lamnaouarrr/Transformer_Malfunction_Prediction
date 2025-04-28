@@ -60,34 +60,26 @@ def binary_cross_entropy_loss(y_true, y_pred):
 
 def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
     """
-    Focal loss for addressing class imbalance
-    
-    Args:
-        y_true: Ground truth labels
-        y_pred: Predicted probabilities
-        gamma: Focusing parameter (higher values focus more on hard examples)
-        alpha: Weighting factor for the positive class
-        
-    Returns:
-        Focal loss value
+    Focal loss for addressing class imbalance with improved numerical stability
     """
     # Clip predictions to prevent numerical instability
     epsilon = K.epsilon()
     y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
     
-    # Calculate cross entropy
-    cross_entropy = -y_true * K.log(y_pred) - (1 - y_true) * K.log(1 - y_pred)
+    # Binary cross entropy
+    bce = K.binary_crossentropy(y_true, y_pred)
     
-    # Apply weighting for positive and negative classes
-    alpha_weight = y_true * alpha + (1 - y_true) * (1 - alpha)
+    # Focal weight
+    p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
+    alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
+    modulating_factor = K.pow(1.0 - p_t, gamma)
     
-    # Apply focusing parameter
-    focal_weight = K.pow(1 - y_true * y_pred - (1 - y_true) * (1 - y_pred), gamma)
+    # Apply weights
+    focal_loss = alpha_factor * modulating_factor * bce
     
-    # Combine all factors
-    loss = alpha_weight * focal_weight * cross_entropy
-    
-    return K.mean(loss)
+    return K.mean(focal_loss)
+
+
 
 def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
     """
@@ -885,21 +877,54 @@ class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
         
         return 0.5 * self.learning_rate_base * (1 + np.cos(np.pi * global_step / cosine_steps))
 
+# Add this class after your WarmUpCosineDecayScheduler class
+class TerminateOnNaN(tf.keras.callbacks.Callback):
+    """
+    Callback that terminates training when a NaN loss is encountered
+    and reduces learning rate to attempt recovery.
+    """
+    def __init__(self, patience=3):
+        super(TerminateOnNaN, self).__init__()
+        self.nan_epochs = 0
+        self.patience = patience
+        
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        loss = logs.get('loss')
+        
+        if loss is not None and (np.isnan(loss) or np.isinf(loss)):
+            self.nan_epochs += 1
+            logger.warning(f"NaN loss detected (occurrence {self.nan_epochs}/{self.patience})")
+            
+            if self.nan_epochs >= self.patience:
+                logger.error(f"NaN loss persisted for {self.patience} epochs, terminating training")
+                self.model.stop_training = True
+            else:
+                # Try to recover by reducing learning rate
+                current_lr = float(K.get_value(self.model.optimizer.lr))
+                new_lr = current_lr * 0.1
+                logger.warning(f"Attempting to recover by reducing learning rate: {current_lr:.6f} -> {new_lr:.6f}")
+                K.set_value(self.model.optimizer.lr, new_lr)
+        else:
+            # Reset counter if we see a valid loss
+            self.nan_epochs = 0
+
+
 ########################################################################
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
     Create a simpler Audio Spectrogram Transformer model with improved architecture
+    and numerical stability
     """
     if config is None:
         config = {}
     
     transformer_config = config.get("transformer", {})
-    num_heads = transformer_config.get("num_heads", 4)
     dim_feedforward = transformer_config.get("dim_feedforward", 256)
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
-    dropout_rate = config.get("dropout", 0.3)  # Increased dropout for better generalization
+    dropout_rate = config.get("dropout", 0.3)
+    l2_reg = config.get("l2_regularization", 1e-5)  # L2 regularization for stability
     
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
@@ -907,46 +932,40 @@ def create_ast_model(input_shape, config=None):
     # Reshape to prepare for CNN (batch, freq, time, 1)
     x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # First convolutional block
-    x = tf.keras.layers.Conv2D(32, (5, 5), padding='same')(x)
+    # First convolutional block with L2 regularization
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same', 
+                              kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)  # LeakyReLU for better gradient flow
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     x = tf.keras.layers.Dropout(dropout_rate/2)(x)
     
     # Second convolutional block
-    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same')(x)
+    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     x = tf.keras.layers.Dropout(dropout_rate/2)(x)
     
     # Third convolutional block
-    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same')(x)
+    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = tf.keras.layers.Dropout(dropout_rate/2)(x)
-    
-    # Fourth convolutional block
-    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation('relu')(x)
     
     # Global pooling instead of flattening to reduce parameters
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     
     # Dense layers with batch normalization
-    x = Dense(dim_feedforward)(x)
+    x = Dense(dim_feedforward, kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation('relu')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = Dropout(dropout_rate)(x)
     
-    x = Dense(dim_feedforward // 2)(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation('relu')(x)
-    x = Dropout(dropout_rate)(x)
-    
-    outputs = Dense(1, activation="sigmoid")(x)
+    # Final classification layer
+    outputs = Dense(1, activation="sigmoid", kernel_regularizer=l2(l2_reg))(x)
     
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
 
@@ -1066,28 +1085,29 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
 
 def mixup_data(x, y, alpha=0.2):
     """
-    Applies mixup augmentation to the data
-    
-    Args:
-        x: Input features
-        y: Target labels
-        alpha: Mixup interpolation strength
-        
-    Returns:
-        Mixed inputs, mixed targets, and lambda value
+    Applies mixup augmentation to the data with improved stability
     """
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-
+    if alpha <= 0:
+        return x, y
+        
+    # Generate mixing coefficient
     batch_size = x.shape[0]
+    lam = np.random.beta(alpha, alpha, batch_size)
+    lam = np.maximum(lam, 1-lam)  # Ensure lam is at least 0.5 for stability
+    lam = np.reshape(lam, (batch_size, 1, 1))  # Reshape for broadcasting
+    
+    # Create random permutation of the batch
     index = np.random.permutation(batch_size)
     
+    # Mix the data
     mixed_x = lam * x + (1 - lam) * x[index]
-    mixed_y = lam * y + (1 - lam) * y[index]
+    
+    # Mix the labels (reshape lam for labels)
+    lam_y = np.reshape(lam, (batch_size,))
+    mixed_y = lam_y * y + (1 - lam_y) * y[index]
     
     return mixed_x, mixed_y
+
 
 def normalize_spectrograms(spectrograms, method="minmax"):
     """
@@ -1568,7 +1588,10 @@ def main():
                 min_delta=early_stopping_config.get("min_delta", 0.001),
                 restore_best_weights=early_stopping_config.get("restore_best_weights", True)
             ))
-        
+
+        callbacks.append(TerminateOnNaN(patience=3))
+        logger.info("Added NaN detection callback")
+                
         # Reduce learning rate on plateau
         lr_config = param.get("fit", {}).get("lr_scheduler", {})
         if lr_config.get("enabled", False):
@@ -1623,24 +1646,41 @@ def main():
         learning_rate = compile_params.pop("learning_rate", 0.0001)
         
         # Adjust optimizer for mixed precision if enabled
+        clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
         if mixed_precision_enabled and compile_params.get("optimizer") == "adam":
             from tensorflow.keras.optimizers import Adam
             
             # In TF 2.4+, LossScaleOptimizer is automatically applied when using mixed_float16 policy
-            # So we just need to create the base optimizer
-            compile_params["optimizer"] = Adam(learning_rate=learning_rate)
-            logger.info("Using Adam optimizer with mixed precision")
+            # So we just need to create the base optimizer with gradient clipping
+            compile_params["optimizer"] = Adam(learning_rate=learning_rate, clipnorm=clipnorm)
+            logger.info(f"Using Adam optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
         else:
-            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=clipnorm)
+            logger.info(f"Using Adam optimizer with gradient clipping (clipnorm={clipnorm})")
 
+
+        # Use a more stable loss function
         if loss_type == "binary_crossentropy":
-            compile_params["loss"] = binary_cross_entropy_loss
+            compile_params["loss"] = "binary_crossentropy"  # Use TF's built-in implementation for stability
         elif loss_type == "focal_loss":
+            # Only use focal loss if explicitly requested and with safeguards
             gamma = param.get("model", {}).get("focal_loss", {}).get("gamma", 2.0)
             alpha = param.get("model", {}).get("focal_loss", {}).get("alpha", 0.25)
-            compile_params["loss"] = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
+            
+            # Check if we should use a safer implementation
+            use_safe_focal = param.get("model", {}).get("focal_loss", {}).get("use_safe_implementation", True)
+            if use_safe_focal:
+                logger.info("Using numerically stable focal loss implementation")
+                compile_params["loss"] = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
+            else:
+                logger.warning("Using standard focal loss - watch for NaN losses")
+                compile_params["loss"] = tf.keras.losses.BinaryFocalCrossentropy(
+                    gamma=gamma, alpha=alpha, from_logits=False
+                )
         else:
+            logger.info("Using standard binary crossentropy loss")
             compile_params["loss"] = "binary_crossentropy"
+
         
         compile_params["metrics"] = ['accuracy']
         model.compile(**compile_params)
@@ -1816,22 +1856,77 @@ def main():
             if param.get("training", {}).get("mixup", {}).get("enabled", False):
                 alpha = param["training"]["mixup"].get("alpha", 0.2)
                 logger.info(f"Applying mixup augmentation with alpha={alpha}")
-                train_data, train_labels_expanded = mixup_data(
-                    train_data, train_labels_expanded, alpha=alpha
-                )
+                
+                # Only apply mixup if we have enough samples
+                if train_data.shape[0] > 10:
+                    # Create a copy of the original data for safety
+                    orig_train_data = train_data.copy()
+                    orig_train_labels = train_labels_expanded.copy()
+                    
+                    # Apply mixup with controlled randomization
+                    np.random.seed(42)  # For reproducibility
+                    indices = np.random.permutation(train_data.shape[0])
+                    shuffled_data = train_data[indices]
+                    shuffled_labels = train_labels_expanded[indices]
+                    
+                    # Generate mixing coefficient
+                    lam = np.random.beta(alpha, alpha, size=train_data.shape[0])
+                    lam = np.maximum(lam, 1-lam)  # Ensure lambda is at least 0.5 for stability
+                    lam = np.reshape(lam, (train_data.shape[0], 1, 1))  # Reshape for broadcasting
+                    
+                    # Mix the data
+                    mixed_data = lam * train_data + (1 - lam) * shuffled_data
+                    
+                    # Mix the labels (reshape lambda for broadcasting)
+                    lam_labels = np.reshape(lam, (train_data.shape[0], 1))
+                    mixed_labels = lam_labels * train_labels_expanded + (1 - lam_labels) * shuffled_labels
+                    
+                    # Update the training data and labels
+                    train_data = mixed_data
+                    train_labels_expanded = mixed_labels
+                    
+                    logger.info(f"Applied mixup to {train_data.shape[0]} samples")
+                else:
+                    logger.warning("Not enough samples for mixup, skipping")
 
-            # Train the model
-            history = model.fit(
+
+            initial_batch_size = 32
+            initial_epochs = 5
+            logger.info(f"Starting with smaller batch size ({initial_batch_size}) and epochs ({initial_epochs}) for stability")
+
+            # Initial training with simpler settings
+            initial_history = model.fit(
                 train_data,
                 train_labels_expanded,
-                batch_size=batch_size,
-                epochs=epochs,
+                batch_size=initial_batch_size,
+                epochs=initial_epochs,
                 validation_data=(val_data, val_labels_expanded),
-                callbacks=callbacks,
-                class_weight=class_weights,
-                sample_weight=sample_weights,
                 verbose=1
             )
+
+            # Continue training with full settings if initial training was successful
+            if not np.isnan(initial_history.history['loss'][-1]):
+                logger.info("Initial training successful, continuing with full training")
+                history = model.fit(
+                    train_data,
+                    train_labels_expanded,
+                    batch_size=batch_size,
+                    epochs=epochs - initial_epochs,
+                    validation_data=(val_data, val_labels_expanded),
+                    callbacks=callbacks,
+                    class_weight=class_weights,
+                    sample_weight=sample_weights,
+                    initial_epoch=initial_epochs,
+                    verbose=1
+                )
+                
+                # Combine histories
+                for key in initial_history.history:
+                    history.history[key] = initial_history.history[key] + history.history[key]
+            else:
+                logger.warning("Initial training failed with NaN loss, using initial history only")
+                history = initial_history
+
 
             # Save the trained model
             model.save(model_file)

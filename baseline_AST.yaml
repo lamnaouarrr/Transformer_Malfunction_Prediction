@@ -14,6 +14,23 @@ feature:
     n_freq_masks: 2
     n_time_masks: 2
     noise_level: 0.01
+  audio_augmentation:
+    enabled: true
+    time_stretch:
+      enabled: true
+      probability: 0.5
+      min_factor: 0.8
+      max_factor: 1.2
+    pitch_shift:
+      enabled: true
+      probability: 0.5
+      min_steps: -3
+      max_steps: 3
+    background_noise:
+      enabled: true
+      probability: 0.5
+      min_factor: 0.001
+      max_factor: 0.02
 
 # Fit algorithm parameters
 fit:
@@ -56,12 +73,19 @@ fit:
   class_weight_balancing: true
   abnormal_weight_multiplier: 1.5
   default_abnormal_weight: 5.0 
+  warmup:
+    enabled: true
+    epochs: 5
+    hold_epochs: 0
 
 # Training optimizations
 training:
   mixed_precision: true
   xla_acceleration: true
   gradient_accumulation_steps: 4  # Add gradient accumulation for larger effective batch size
+  mixup:
+    enabled: true
+    alpha: 0.2
 
 # Enhanced transformer model settings
 model:
@@ -82,7 +106,10 @@ model:
       activation_fn: "gelu"  # Options: "gelu", "relu", "swish"
       ff_dim_multiplier: 4
       enable_rotary: false
-
+  loss: "focal_loss"  # Options: "binary_crossentropy", "focal_loss"
+  focal_loss:
+    gamma: 2.0
+    alpha: 0.25
 
 # Dataset generation parameters
 dataset:

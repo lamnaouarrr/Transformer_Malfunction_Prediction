@@ -58,6 +58,37 @@ def binary_cross_entropy_loss(y_true, y_pred):
     
     return tf.keras.losses.binary_crossentropy(y_true_normalized, y_pred_normalized)
 
+def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
+    """
+    Focal loss for addressing class imbalance
+    
+    Args:
+        y_true: Ground truth labels
+        y_pred: Predicted probabilities
+        gamma: Focusing parameter (higher values focus more on hard examples)
+        alpha: Weighting factor for the positive class
+        
+    Returns:
+        Focal loss value
+    """
+    # Clip predictions to prevent numerical instability
+    epsilon = K.epsilon()
+    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+    
+    # Calculate cross entropy
+    cross_entropy = -y_true * K.log(y_pred) - (1 - y_true) * K.log(1 - y_pred)
+    
+    # Apply weighting for positive and negative classes
+    alpha_weight = y_true * alpha + (1 - y_true) * (1 - alpha)
+    
+    # Apply focusing parameter
+    focal_weight = K.pow(1 - y_true * y_pred - (1 - y_true) * (1 - y_pred), gamma)
+    
+    # Combine all factors
+    loss = alpha_weight * focal_weight * cross_entropy
+    
+    return K.mean(loss)
+
 def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
     """
     Create positional encodings for the transformer model
@@ -279,6 +310,53 @@ def augment_spectrogram(spectrogram, param=None):
 
     return spectrogram
 
+def augment_audio(y, sr, param=None):
+    """
+    Apply advanced audio augmentations directly to the waveform
+    
+    Args:
+        y: Audio waveform
+        sr: Sample rate
+        param: Parameters dictionary
+        
+    Returns:
+        Augmented audio waveform
+    """
+    if param is None or not param.get("feature", {}).get("audio_augmentation", {}).get("enabled", False):
+        return y
+    
+    aug_config = param.get("feature", {}).get("audio_augmentation", {})
+    
+    # Make a copy of the input audio
+    y_aug = np.copy(y)
+    
+    # Apply random time stretching
+    if aug_config.get("time_stretch", {}).get("enabled", False) and np.random.rand() < aug_config.get("time_stretch", {}).get("probability", 0.5):
+        stretch_factor = np.random.uniform(
+            aug_config.get("time_stretch", {}).get("min_factor", 0.8),
+            aug_config.get("time_stretch", {}).get("max_factor", 1.2)
+        )
+        y_aug = librosa.effects.time_stretch(y_aug, rate=stretch_factor)
+    
+    # Apply random pitch shifting
+    if aug_config.get("pitch_shift", {}).get("enabled", False) and np.random.rand() < aug_config.get("pitch_shift", {}).get("probability", 0.5):
+        n_steps = np.random.uniform(
+            aug_config.get("pitch_shift", {}).get("min_steps", -3),
+            aug_config.get("pitch_shift", {}).get("max_steps", 3)
+        )
+        y_aug = librosa.effects.pitch_shift(y_aug, sr=sr, n_steps=n_steps)
+    
+    # Add background noise
+    if aug_config.get("background_noise", {}).get("enabled", False) and np.random.rand() < aug_config.get("background_noise", {}).get("probability", 0.5):
+        noise_factor = np.random.uniform(
+            aug_config.get("background_noise", {}).get("min_factor", 0.001),
+            aug_config.get("background_noise", {}).get("max_factor", 0.02)
+        )
+        noise = np.random.randn(len(y_aug))
+        y_aug = y_aug + noise_factor * noise
+    
+    return y_aug
+
 def file_to_spectrogram(file_name,
                         n_mels=64,
                         n_fft=1024,
@@ -296,6 +374,10 @@ def file_to_spectrogram(file_name,
             y = librosa.resample(y, orig_sr=sr, target_sr=param["feature"]["sr"])
             sr = param["feature"]["sr"]
             
+        # Apply audio augmentations if enabled
+        if augment and y is not None:
+            y = augment_audio(y, sr, param)
+
         if y is None:
             logger.error(f"Failed to load {file_name}")
             return None
@@ -759,6 +841,49 @@ def configure_mixed_precision(enabled=True):
             pass
         return False
 
+class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
+    """
+    Learning rate scheduler with warmup and cosine decay
+    """
+    def __init__(self, learning_rate_base, total_steps, warmup_steps, hold_base_rate_steps=0):
+        super(WarmUpCosineDecayScheduler, self).__init__()
+        self.learning_rate_base = learning_rate_base
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+        self.hold_base_rate_steps = hold_base_rate_steps
+        self.learning_rates = []
+        
+    def on_batch_begin(self, batch, logs=None):
+        # Calculate current learning rate
+        lr = self.calculate_learning_rate(self.global_step)
+        # Set learning rate
+        K.set_value(self.model.optimizer.lr, lr)
+        # Update global step
+        self.global_step += 1
+        # Store learning rate
+        self.learning_rates.append(lr)
+        
+    def on_train_begin(self, logs=None):
+        # Initialize global step
+        self.global_step = 0
+        
+    def calculate_learning_rate(self, global_step):
+        """
+        Calculate learning rate according to warmup and cosine decay schedule
+        """
+        # Warmup phase
+        if global_step < self.warmup_steps:
+            return self.learning_rate_base * (global_step / self.warmup_steps)
+        
+        # Hold phase
+        if self.hold_base_rate_steps > 0 and global_step < self.warmup_steps + self.hold_base_rate_steps:
+            return self.learning_rate_base
+        
+        # Cosine decay phase
+        cosine_steps = self.total_steps - self.warmup_steps - self.hold_base_rate_steps
+        global_step = global_step - self.warmup_steps - self.hold_base_rate_steps
+        
+        return 0.5 * self.learning_rate_base * (1 + np.cos(np.pi * global_step / cosine_steps))
 
 ########################################################################
 # model
@@ -939,7 +1064,30 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
     
     return balanced_data, balanced_labels
 
+def mixup_data(x, y, alpha=0.2):
+    """
+    Applies mixup augmentation to the data
+    
+    Args:
+        x: Input features
+        y: Target labels
+        alpha: Mixup interpolation strength
+        
+    Returns:
+        Mixed inputs, mixed targets, and lambda value
+    """
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
 
+    batch_size = x.shape[0]
+    index = np.random.permutation(batch_size)
+    
+    mixed_x = lam * x + (1 - lam) * x[index]
+    mixed_y = lam * y + (1 - lam) * y[index]
+    
+    return mixed_x, mixed_y
 
 def normalize_spectrograms(spectrograms, method="minmax"):
     """
@@ -1446,6 +1594,28 @@ def main():
                 verbose=1
             ))
         
+        # Add warmup learning rate scheduler if enabled
+        warmup_config = param.get("fit", {}).get("warmup", {})
+        if warmup_config.get("enabled", False):
+            # Calculate total steps
+            steps_per_epoch = len(train_data) // param["fit"]["batch_size"]
+            total_steps = steps_per_epoch * param["fit"]["epochs"]
+            
+            # Calculate warmup steps
+            warmup_epochs = warmup_config.get("epochs", 5)
+            warmup_steps = steps_per_epoch * warmup_epochs
+            
+            # Create scheduler
+            warmup_lr = WarmUpCosineDecayScheduler(
+                learning_rate_base=learning_rate,
+                total_steps=total_steps,
+                warmup_steps=warmup_steps,
+                hold_base_rate_steps=steps_per_epoch * warmup_config.get("hold_epochs", 0)
+            )
+            
+            callbacks.append(warmup_lr)
+            logger.info(f"Added warmup learning rate scheduler with {warmup_epochs} warmup epochs")
+
         compile_params = param["fit"]["compile"].copy()
         loss_type = param.get("model", {}).get("loss", "binary_crossentropy")
         
@@ -1465,6 +1635,10 @@ def main():
 
         if loss_type == "binary_crossentropy":
             compile_params["loss"] = binary_cross_entropy_loss
+        elif loss_type == "focal_loss":
+            gamma = param.get("model", {}).get("focal_loss", {}).get("gamma", 2.0)
+            alpha = param.get("model", {}).get("focal_loss", {}).get("alpha", 0.25)
+            compile_params["loss"] = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
         else:
             compile_params["loss"] = "binary_crossentropy"
         
@@ -1633,323 +1807,155 @@ def main():
                     sample_weights = sample_weights[:train_labels_expanded.shape[0]]
                     logger.info(f"Reduced X to match y: {train_data.shape}")
                 else:
-                    # Too many labels, need to reduce
+                                        # Too many labels, need to reduce
                     train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
+                    sample_weights = sample_weights[:train_data.shape[0]]
                     logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
 
-            max_samples = 50000
+            # Apply mixup augmentation if enabled
+            if param.get("training", {}).get("mixup", {}).get("enabled", False):
+                alpha = param["training"]["mixup"].get("alpha", 0.2)
+                logger.info(f"Applying mixup augmentation with alpha={alpha}")
+                train_data, train_labels_expanded = mixup_data(
+                    train_data, train_labels_expanded, alpha=alpha
+                )
 
-            if train_data.shape[0] > max_samples:
-                # Stratified sampling to maintain class distribution
-                normal_indices = np.where(train_labels_expanded == 0)[0]
-                abnormal_indices = np.where(train_labels_expanded == 1)[0]
-                
-                # Sample from each class
-                if len(normal_indices) > 0:
-                    normal_sample_size = min(int(max_samples * 0.8), len(normal_indices))
-                    sampled_normal = np.random.choice(normal_indices, normal_sample_size, replace=False)
-                else:
-                    sampled_normal = []
-                    
-                if len(abnormal_indices) > 0:
-                    abnormal_sample_size = min(int(max_samples * 0.2), len(abnormal_indices))
-                    sampled_abnormal = np.random.choice(abnormal_indices, abnormal_sample_size, replace=False)
-                else:
-                    sampled_abnormal = []
-                
-                # Combine indices
-                sampled_indices = np.concatenate([sampled_normal, sampled_abnormal])
-                np.random.shuffle(sampled_indices)
-                
-                train_data_subset = train_data[sampled_indices]
-                train_labels_subset = train_labels_expanded[sampled_indices]
-                sample_weights_subset = sample_weights[sampled_indices]
-                
-                logger.info(f"Using subset of data: {train_data_subset.shape}")
-                logger.info(f"Subset class distribution: {np.bincount(train_labels_subset.astype(int))}")
-            else:
-                train_data_subset = train_data
-                train_labels_subset = train_labels_expanded
-                sample_weights_subset = sample_weights
-
-            # Calculate class weights
-            if param.get("fit", {}).get("class_weight_balancing", True):
-                # Count class occurrences
-                class_counts = np.bincount(train_labels_expanded.astype(int))
-                total_samples = np.sum(class_counts)
-                
-                # Calculate weights inversely proportional to class frequencies
-                class_weights = {
-                    0: total_samples / (class_counts[0] * 2) if class_counts[0] > 0 else 1.0,
-                    1: total_samples / (class_counts[1] * 2) if len(class_counts) > 1 and class_counts[1] > 0 else 1.0
-                }
-                
-                logger.info(f"Using class weights: {class_weights}")
-                
-                # Apply class weights to sample weights
-                sample_weights = np.ones(len(train_data))
-                for i, label in enumerate(train_labels_expanded):
-                    sample_weights[i] = class_weights[int(label)]
-            else:
-                sample_weights = np.ones(len(train_data))
-
-            print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
+            # Train the model
             history = model.fit(
                 train_data,
                 train_labels_expanded,
-                epochs=param["fit"]["epochs"],
-                batch_size=param["fit"]["batch_size"],
-                shuffle=param["fit"]["shuffle"],
+                batch_size=batch_size,
+                epochs=epochs,
                 validation_data=(val_data, val_labels_expanded),
-                verbose=param["fit"]["verbose"],
                 callbacks=callbacks,
-                sample_weight=sample_weights
+                class_weight=class_weights,
+                sample_weight=sample_weights,
+                verbose=1
             )
-        
-        model.save(model_file)
-        visualizer.loss_plot(history)
+
+            # Save the trained model
+            model.save(model_file)
+            logger.info(f"Model saved to {model_file}")
+
+        # Visualize training history
+        visualizer.loss_plot(history, machine_type=machine_type, machine_id=machine_id, db=db)
         visualizer.save_figure(history_img)
-    
 
-    if not os.path.exists(model_file):
-        # Capture the final training and validation accuracies
-        train_accuracy = history.history['accuracy'][-1]
-        val_accuracy = history.history['val_accuracy'][-1]
-        
-        # Store these in the results dictionary
-        evaluation_result["TrainAccuracy"] = float(train_accuracy)
-        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
-        
-        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
-        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
-    else:
-        # If model was loaded from file and not trained, we need to evaluate on train and validation data
-        train_pred = model.predict(train_data, verbose=0)
-        train_pred_binary = (train_pred.flatten() >= 0.5).astype(int)
-        train_accuracy = metrics.accuracy_score(train_labels_expanded, train_pred_binary)
-        
-        val_pred = model.predict(val_data, verbose=0)
-        val_pred_binary = (val_pred.flatten() >= 0.5).astype(int)
-        val_accuracy = metrics.accuracy_score(val_labels_expanded, val_pred_binary)
-
-        # Calculate model training time
-        model_end_time = time.time()
-        model_training_time = model_end_time - model_start_time
-        logger.info(f"Model training time: {model_training_time:.2f} seconds")
-        
-        # Store these in the results dictionary
-        evaluation_result["TrainAccuracy"] = float(train_accuracy)
-        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
-        
-        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
-        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
-
+    # Log training time
+    training_time = time.time() - model_start_time
+    logger.info(f"Model training completed in {training_time:.2f} seconds")
 
     print("============== EVALUATION ==============")
-    y_pred = []
-    y_true = test_labels
+    # Evaluate on test set
+    test_data, test_labels_expanded = list_to_spectrograms(
+        test_files,
+        test_labels,
+        msg="generate test_dataset",
+        augment=False,
+        param=param,
+        batch_size=20
+    )
 
-    for num, file_name in tqdm(enumerate(test_files), total=len(test_files)):
-        try:
-            data = file_to_spectrogram(file_name,
-                                n_mels=param["feature"]["n_mels"],
-                                n_fft=param["feature"]["n_fft"],
-                                hop_length=param["feature"]["hop_length"],
-                                power=param["feature"]["power"],
-                                augment=False,  # No augmentation during eval
-                                param=param)
-                                
-            if data is None:
-                logger.warning(f"No valid features extracted from file: {file_name}")
-                continue
-        
-            # Handle 3D input (when a single frame has an extra dimension)
-            if len(data.shape) == 3 and data.shape[0] == 1:
-                data = data[0]  # Take the first frame
-        
-            # Ensure data has the right shape before prediction
-            if data.shape[0] != target_shape[0] or data.shape[1] != target_shape[1]:
-                # Manually resize to target shape
-                from skimage.transform import resize
-                try:
-                    # Handle 3D data (extra channel dimension)
-                    if len(data.shape) == 3:
-                        # Squeeze out the channel dimension if it's 1
-                        if data.shape[2] == 1:
-                            data = data[:, :, 0]
-                        else:
-                            # If it's not 1, take the mean across channels
-                            data = np.mean(data, axis=2)
-                    
-                    data = resize(data, target_shape, anti_aliasing=True, mode='reflect')
-                except Exception as e:
-                    logger.warning(f"Error resizing test data: {e}")
-                    # Simple fallback resize
-                    temp = np.zeros(target_shape)
-                    min_freq = min(data.shape[0], target_shape[0])
-                    min_time = min(data.shape[1], target_shape[1])
-                    temp[:min_freq, :min_time] = data[:min_freq, :min_time]
-                    data = temp
-        
-            # Reshape for batch prediction
-            data = np.expand_dims(data, axis=0)
-                    
-            # Get the predicted class probability
-            pred = model.predict(data, verbose=0)
-            # Use the single prediction (no need to average frames)
-            file_pred = float(pred[0][0])
-            y_pred.append(file_pred)
+    logger.info(f"Test data shape: {test_data.shape}")
+    logger.info(f"Test labels shape: {test_labels_expanded.shape}")
 
+    # Preprocess test data
+    test_data = preprocess_spectrograms(test_data, target_shape)
 
-        except Exception as e:
-            logger.warning(f"Error processing file: {file_name}, error: {e}")
-            # If there's an error, use a default value (e.g., 0.5)
-            default_prediction = param.get("dataset", {}).get("default_prediction", 0.5)
-            y_pred.append(default_prediction)
+    # Evaluate the model
+    if test_data.shape[0] > 0:
+        # Predict on test set
+        y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
+        y_pred_binary = (y_pred > 0.5).astype(int)
 
-    # Check if all predictions are the same
-    if len(np.unique(y_pred)) <= 1:
-        logger.warning("All predictions have the same value! Using default threshold of 0.5")
-        optimal_threshold = 0.5
-    else:
-        # Optimize threshold using ROC curve if enabled
-        if param.get("model", {}).get("threshold_optimization", True) and len(y_true) > 0 and len(np.unique(y_true)) > 1:
-            fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred)
-            optimal_idx = np.argmax(tpr - fpr)
-            optimal_threshold = thresholds[optimal_idx]
-            logger.info(f"Optimal threshold: {optimal_threshold:.6f}")
-        else:
-            optimal_threshold = 0.5  # Default threshold
-            logger.info(f"Using default threshold: {optimal_threshold}")
+        # Calculate metrics
+        test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
+        test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
+        test_recall = metrics.recall_score(test_labels_expanded, y_pred_binary, zero_division=0)
+        test_f1 = metrics.f1_score(test_labels_expanded, y_pred_binary, zero_division=0)
 
-    # Convert predictions to binary using optimal threshold
-    y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
+        # Log metrics
+        logger.info(f"Test Accuracy: {test_accuracy:.4f}")
+        logger.info(f"Test Precision: {test_precision:.4f}")
+        logger.info(f"Test Recall: {test_recall:.4f}")
+        logger.info(f"Test F1 Score: {test_f1:.4f}")
 
-    # Check if all predictions are the same class after thresholding
-   
-    if len(np.unique(y_pred_binary)) <= 1:
-        logger.warning(f"All predictions are the same class: {np.unique(y_pred_binary)[0]}!")
-        
-        # If all predictions are the same, try to force some diversity
-        if len(y_pred) > 10:
-            # Sort predictions and assign the top 10% to the opposite class
-            sorted_indices = np.argsort(y_pred)
-            if np.unique(y_pred_binary)[0] == 0:
-                # If all are 0, make the highest 10% be 1
-                change_indices = sorted_indices[-int(len(y_pred) * 0.1):]
-                y_pred_binary[change_indices] = 1
-            else:
-                # If all are 1, make the lowest 10% be 0
-                change_indices = sorted_indices[:int(len(y_pred) * 0.1)]
-                y_pred_binary[change_indices] = 0
-            
-            logger.info(f"Forced diversity in predictions. Now have {np.sum(y_pred_binary == 0)} class 0 and {np.sum(y_pred_binary == 1)} class 1")
+        # Detailed classification report
+        report = classification_report(
+            test_labels_expanded, y_pred_binary, target_names=["Normal", "Abnormal"], zero_division=0
+        )
+        logger.info(f"Classification Report:\n{report}")
 
+        # Plot confusion matrix
+        cm_img = f"{param['result_directory']}/confusion_matrix_overall_ast.png"
+        visualizer.plot_confusion_matrix(
+            test_labels_expanded,
+            y_pred_binary,
+            title=f"Confusion Matrix (Overall)",
+        )
+        visualizer.save_figure(cm_img)
 
-
-
-    # Plot and save confusion matrix
-    visualizer.plot_confusion_matrix(y_true, y_pred_binary)
-    visualizer.save_figure(f"{param['result_directory']}/confusion_matrix_{evaluation_result_key}.png")
-
-
-    #debug####################################################################
-    print(f"DEBUG - y_true values distribution: {np.unique(y_true, return_counts=True)}")
-    print(f"DEBUG - y_pred_binary values distribution: {np.unique(y_pred_binary, return_counts=True)}")
-    print(f"DEBUG - First 10 pairs of true and predicted values:")
-    for i in range(min(10, len(y_true))):
-        print(f"  True: {y_true[i]}, Predicted: {y_pred_binary[i]}")
-
-    if len(y_true) == 0:
-        logger.error("Test set is empty! No samples to evaluate.")
-        # Use placeholder values instead of generating a classification report
-        class_report = {
-            "0": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0},
-            "1": {"precision": 0, "recall": 0, "f1-score": 0, "support": 0}
+        # Store results
+        evaluation_result = {
+            "accuracy": float(test_accuracy),
+            "precision": float(test_precision),
+            "recall": float(test_recall),
+            "f1": float(test_f1),
         }
-    elif len(np.unique(y_pred_binary)) == 1:
-        logger.warning(f"All predictions are the same class: {np.unique(y_pred_binary)[0]}! Classification metrics will be 0.")
-        # Create a more detailed class report with actual counts
-        classes = np.unique(np.concatenate([y_true, y_pred_binary]))
-        class_report = {}
-        for cls in classes:
-            cls_support = np.sum(y_true == cls)
-            tp = np.sum((y_true == cls) & (y_pred_binary == cls))
-            precision = tp / np.sum(y_pred_binary == cls) if np.sum(y_pred_binary == cls) > 0 else 0
-            recall = tp / cls_support if cls_support > 0 else 0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-            class_report[str(cls)] = {
-                "precision": float(precision), 
-                "recall": float(recall), 
-                "f1-score": float(f1), 
-                "support": int(cls_support)
-            }
-        
-        # Ensure both 0 and 1 classes are present
-        for cls in [0, 1]:
-            if str(cls) not in class_report:
-                class_report[str(cls)] = {"precision": 0.0, "recall": 0.0, "f1-score": 0.0, "support": 0}
+
+        # Append to global results
+        all_y_true.extend(test_labels_expanded)
+        all_y_pred.extend(y_pred_binary)
+
     else:
-        # Generate and print classification report
-        class_report = classification_report(y_true, y_pred_binary, output_dict=True)
-        print("\nClassification Report:")
-        print(classification_report(y_true, y_pred_binary))
+        logger.warning("No test data available for evaluation")
+        evaluation_result = {
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+        }
 
-
-    ###########################################################################
-
-    # Calculate accuracy
-    accuracy = metrics.accuracy_score(y_true, y_pred_binary)
-
-    
-    evaluation_result["TestAccuracy"] = float(accuracy)
-
-    # Add this safety check function before accessing class_report
-    def get_safe_metric(report, class_label, metric, default=0.0):
-        """Safely retrieve a metric from classification report with a default fallback."""
-        if str(class_label) in report:
-            return float(report[str(class_label)][metric])
-        return default
-
-    # Then use it for all metrics
-    evaluation_result["Precision"] = {
-        "class_0": get_safe_metric(class_report, "0.0", "precision"),
-        "class_1": get_safe_metric(class_report, "1.0", "precision")
-    }
-    evaluation_result["Recall"] = {
-        "class_0": get_safe_metric(class_report, "0.0", "recall"),
-        "class_1": get_safe_metric(class_report, "1.0", "recall")
-    }
-    evaluation_result["F1Score"] = {
-        "class_0": get_safe_metric(class_report, "0.0", "f1-score"),
-        "class_1": get_safe_metric(class_report, "1.0", "f1-score")
-    }
-    evaluation_result["Support"] = {
-        "class_0": int(get_safe_metric(class_report, "0.0", "support")),
-        "class_1": int(get_safe_metric(class_report, "1.0", "support"))
-    }
-
-    logger.info(f"Test Accuracy: {accuracy:.4f}")
+    # Store evaluation results
     results[evaluation_result_key] = evaluation_result
 
+    # Calculate overall metrics
+    if all_y_true and all_y_pred:
+        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
+        overall_precision = metrics.precision_score(all_y_true, all_y_pred, zero_division=0)
+        overall_recall = metrics.recall_score(all_y_true, all_y_pred, zero_division=0)
+        overall_f1 = metrics.f1_score(all_y_true, all_y_pred, zero_division=0)
 
-    #add the machine's predictions and true labels to the overall collection
-    all_y_true.extend(y_true)
-    all_y_pred.extend(y_pred_binary)
+        overall_results = {
+            "overall_accuracy": float(overall_accuracy),
+            "overall_precision": float(overall_precision),
+            "overall_recall": float(overall_recall),
+            "overall_f1": float(overall_f1),
+        }
+        results.update(overall_results)
 
-    print("===========================")
+        logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
+        logger.info(f"Overall Precision: {overall_precision:.4f}")
+        logger.info(f"Overall Recall: {overall_recall:.4f}")
+        logger.info(f"Overall F1 Score: {overall_f1:.4f}")
 
-    end_time = time.time()
-    total_time = end_time - start_time
-    logger.info(f"Total execution time: {total_time:.2f} seconds")
-    results["execution_time_seconds"] = float(total_time)
-    results["model_training_time_seconds"] = float(model_training_time) if 'model_training_time' in locals() else 0.0
+        # Plot overall confusion matrix
+        overall_cm_img = f"{param['result_directory']}/confusion_matrix_overall_ast.png"
+        visualizer.plot_confusion_matrix(
+            all_y_true,
+            all_y_pred,
+            title="Overall Confusion Matrix",
+        )
+        visualizer.save_figure(overall_cm_img)
 
-    print("\n===========================")
-    logger.info(f"all results -> {result_file}")
+    # Save results to YAML
     with open(result_file, "w") as f:
-        yaml.dump(results, f, default_flow_style=False)
-    print("===========================")
+        yaml.safe_dump(results, f)
+    logger.info(f"Results saved to {result_file}")
+
+    # Log total execution time
+    total_time = time.time() - start_time
+    logger.info(f"Total execution time: {total_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()

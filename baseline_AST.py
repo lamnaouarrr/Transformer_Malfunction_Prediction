@@ -1807,7 +1807,7 @@ def main():
                     sample_weights = sample_weights[:train_labels_expanded.shape[0]]
                     logger.info(f"Reduced X to match y: {train_data.shape}")
                 else:
-                                        # Too many labels, need to reduce
+                    #Too many labels, need to reduce
                     train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
                     sample_weights = sample_weights[:train_data.shape[0]]
                     logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")

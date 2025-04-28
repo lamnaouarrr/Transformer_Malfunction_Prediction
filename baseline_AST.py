@@ -25,6 +25,9 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 import seaborn as sns
 import math
+import gc
+
+
 from tensorflow.keras import mixed_precision
 from tqdm import tqdm
 from sklearn import metrics
@@ -444,90 +447,94 @@ def file_to_spectrogram(file_name,
 
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=20):
     """
-    Process a list of files into spectrograms with optional labels
-    
-    Args:
-        file_list: List of audio file paths
-        labels: Optional labels for each file
-        msg: Progress message
-        augment: Whether to apply augmentation
-        param: Parameters dictionary
-        batch_size: Batch size for processing
-        
-    Returns:
-        Tuple of (spectrograms, labels) if labels provided, otherwise just spectrograms
+    Process a list of files into spectrograms with optional labels - memory optimized version
     """
     n_mels = param.get("feature", {}).get("n_mels", 64)
     n_fft = param.get("feature", {}).get("n_fft", 1024)
     hop_length = param.get("feature", {}).get("hop_length", 512)
     power = param.get("feature", {}).get("power", 2.0)
     
-    spectrograms = []
-    processed_labels = []
-    frames = param.get("feature", {}).get("frames", None)
-    is_frame_based = frames is not None and frames > 0
+    # First pass: determine dimensions and count valid files
+    valid_files = []
+    valid_labels = [] if labels is not None else None
+    max_freq = 0
+    max_time = 0
     
-    # Process files in batches to manage memory
-    for batch_start in tqdm(range(0, len(file_list), batch_size), desc=f"{msg} (in batches)"):
-        batch_end = min(batch_start + batch_size, len(file_list))
-        batch_files = file_list[batch_start:batch_end]
-        
-        if labels is not None:
-            batch_labels = labels[batch_start:batch_end]
-        
-        for idx, file_path in enumerate(batch_files):
-            try:
-                spectrogram = file_to_spectrogram(file_path,
-                                              n_mels=n_mels,
-                                              n_fft=n_fft,
-                                              hop_length=hop_length,
-                                              power=power,
-                                              augment=augment,
-                                              param=param)
+    logger.info(f"First pass: checking dimensions of {len(file_list)} files")
+    for idx, file_path in enumerate(tqdm(file_list[:min(100, len(file_list))], desc=f"{msg} (dimension check)")):
+        try:
+            spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+            if spec is not None:
+                # Handle 3D input
+                if len(spec.shape) == 3:
+                    spec = spec[0]
                 
-                if spectrogram is not None:
-                    # CRITICAL FIX: Handle frame-based spectrograms properly
-                    if is_frame_based and len(spectrogram.shape) == 3:
-                        # Option 1: Only use the first frame to avoid label duplication
-                        spectrograms.append(spectrogram[0])
-                        if labels is not None:
-                            processed_labels.append(batch_labels[idx])
-                        
-                        # Option 2 (commented out): Use all frames but duplicate labels
-                        # for frame in spectrogram:
-                        #     spectrograms.append(frame)
-                        #     if labels is not None:
-                        #         processed_labels.append(batch_labels[idx])
-                    else:
-                        spectrograms.append(spectrogram)
-                        if labels is not None:
-                            processed_labels.append(batch_labels[idx])
-                        
+                max_freq = max(max_freq, spec.shape[0])
+                max_time = max(max_time, spec.shape[1])
+                valid_files.append(file_path)
+                if labels is not None:
+                    valid_labels.append(labels[idx])
+        except Exception as e:
+            logger.error(f"Error checking dimensions for {file_path}: {e}")
+    
+    # Use target shape from parameters if available
+    target_shape = param.get("feature", {}).get("target_shape", None)
+    if target_shape:
+        max_freq, max_time = target_shape
+    else:
+        # Round up to nearest multiple of 8 for better GPU utilization
+        max_freq = ((max_freq + 7) // 8) * 8
+        max_time = ((max_time + 7) // 8) * 8
+    
+    logger.info(f"Using target shape: ({max_freq}, {max_time})")
+    
+    # Second pass: process files in batches
+    total_valid = len(valid_files)
+    spectrograms = np.zeros((total_valid, max_freq, max_time), dtype=np.float32)
+    processed_labels = np.array(valid_labels) if valid_labels else None
+    
+    for batch_start in tqdm(range(0, total_valid, batch_size), desc=f"{msg} (processing)"):
+        batch_end = min(batch_start + batch_size, total_valid)
+        batch_files = valid_files[batch_start:batch_end]
+        
+        for i, file_path in enumerate(batch_files):
+            try:
+                spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                
+                if spec is not None:
+                    # Handle 3D input
+                    if len(spec.shape) == 3:
+                        spec = spec[0]
+                    
+                    # Resize if needed
+                    if spec.shape[0] != max_freq or spec.shape[1] != max_time:
+                        try:
+                            from skimage.transform import resize
+                            spec = resize(spec, (max_freq, max_time), anti_aliasing=True, mode='reflect')
+                        except Exception as e:
+                            # Fall back to simple padding/cropping
+                            temp_spec = np.zeros((max_freq, max_time))
+                            freq_dim = min(spec.shape[0], max_freq)
+                            time_dim = min(spec.shape[1], max_time)
+                            temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+                            spec = temp_spec
+                    
+                    # Store in output array
+                    spectrograms[batch_start + i] = spec
+                    
+                    # Clear memory
+                    del spec
+                    
             except Exception as e:
                 logger.error(f"Error processing file {file_path}: {e}")
-                continue
-    
-    # Convert to numpy arrays
-    if not spectrograms:
-        if labels is not None:
-            return np.array([]), np.array([])
-        return np.array([])
-    
-    # Determine max dimensions
-    max_freq = max(spec.shape[0] for spec in spectrograms)
-    max_time = max(spec.shape[1] for spec in spectrograms)
-    
-    # Create output array with consistent dimensions
-    batch_spectrograms = np.zeros((len(spectrograms), max_freq, max_time), dtype=np.float32)
-    
-    # Fill the array
-    for i, spec in enumerate(spectrograms):
-        batch_spectrograms[i, :spec.shape[0], :spec.shape[1]] = spec
+                # Fill with zeros for failed files
+                spectrograms[batch_start + i] = np.zeros((max_freq, max_time))
+        
+        gc.collect()
     
     if labels is not None:
-        return batch_spectrograms, np.array(processed_labels)
-    return batch_spectrograms
-
+        return spectrograms, processed_labels
+    return spectrograms
 
 
 
@@ -780,12 +787,6 @@ def dataset_generator(target_dir, param=None):
 def configure_mixed_precision(enabled=True):
     """
     Configure mixed precision training with proper error handling.
-    
-    Args:
-        enabled: Whether to enable mixed precision
-        
-    Returns:
-        True if mixed precision was successfully enabled, False otherwise
     """
     if not enabled:
         logger.info("Mixed precision training disabled")
@@ -797,12 +798,6 @@ def configure_mixed_precision(enabled=True):
             logger.warning("No GPU found, disabling mixed precision")
             return False
         
-        # Check TensorFlow version
-        import tensorflow as tf
-        if tf.__version__.startswith('1.'):
-            logger.warning("Mixed precision requires TensorFlow 2.x, disabling")
-            return False
-        
         # Import mixed precision module
         from tensorflow.keras import mixed_precision
         
@@ -811,16 +806,23 @@ def configure_mixed_precision(enabled=True):
         logger.info(f"Enabling mixed precision with policy: {policy_name}")
         mixed_precision.set_global_policy(policy_name)
         
-        # Verify policy was set
+        # Verify policy was set - FIX: Don't check string equality, just log the policy
         current_policy = mixed_precision.global_policy()
         logger.info(f"Mixed precision policy enabled: {current_policy}")
         
-        # Check if policy was actually set to mixed_float16
-        if str(current_policy) != policy_name:
-            logger.warning(f"Failed to set mixed precision policy, got {current_policy}")
-            return False
-        
         return True
+    
+    except Exception as e:
+        logger.error(f"Error configuring mixed precision: {e}")
+        # Reset to default policy
+        try:
+            from tensorflow.keras import mixed_precision
+            mixed_precision.set_global_policy('float32')
+            logger.info("Reset to float32 policy after error")
+        except:
+            pass
+        return False
+
     
     except Exception as e:
         logger.error(f"Error configuring mixed precision: {e}")
@@ -877,7 +879,6 @@ class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
         
         return 0.5 * self.learning_rate_base * (1 + np.cos(np.pi * global_step / cosine_steps))
 
-# Add this class after your WarmUpCosineDecayScheduler class
 class TerminateOnNaN(tf.keras.callbacks.Callback):
     """
     Callback that terminates training when a NaN loss is encountered
@@ -910,13 +911,13 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
             self.nan_epochs = 0
 
 
+
 ########################################################################
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create a simpler Audio Spectrogram Transformer model with improved architecture
-    and numerical stability
+    Create a simpler Audio Spectrogram Transformer model with improved memory efficiency
     """
     if config is None:
         config = {}
@@ -924,7 +925,7 @@ def create_ast_model(input_shape, config=None):
     transformer_config = config.get("transformer", {})
     dim_feedforward = transformer_config.get("dim_feedforward", 256)
     dropout_rate = config.get("dropout", 0.3)
-    l2_reg = config.get("l2_regularization", 1e-5)  # L2 regularization for stability
+    l2_reg = config.get("l2_regularization", 1e-5)
     
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
@@ -932,24 +933,24 @@ def create_ast_model(input_shape, config=None):
     # Reshape to prepare for CNN (batch, freq, time, 1)
     x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # First convolutional block with L2 regularization
-    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same', 
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)  # LeakyReLU for better gradient flow
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
-    
-    # Second convolutional block
-    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
+    # First convolutional block with L2 regularization - use fewer filters
+    x = tf.keras.layers.Conv2D(16, (3, 3), padding='same', 
                               kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     x = tf.keras.layers.Dropout(dropout_rate/2)(x)
     
-    # Third convolutional block
-    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
+    # Second convolutional block - use fewer filters
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+    
+    # Third convolutional block - use fewer filters
+    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
                               kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
@@ -958,8 +959,8 @@ def create_ast_model(input_shape, config=None):
     # Global pooling instead of flattening to reduce parameters
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     
-    # Dense layers with batch normalization
-    x = Dense(dim_feedforward, kernel_regularizer=l2(l2_reg))(x)
+    # Dense layers with batch normalization - use smaller dimension
+    x = Dense(dim_feedforward // 2, kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = Dropout(dropout_rate)(x)
@@ -970,9 +971,6 @@ def create_ast_model(input_shape, config=None):
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
 
 
-
-
-# Replace the current preprocess_spectrograms function with this:
 def preprocess_spectrograms(spectrograms, target_shape):
     """
     Resize all spectrograms to a consistent shape.
@@ -1144,137 +1142,11 @@ def normalize_spectrograms(spectrograms, method="minmax"):
         logger.warning(f"Unknown normalization method: {method}, returning original data")
         return spectrograms
 
-def configure_mixed_precision(enabled=True):
-    """
-    Configure mixed precision training with proper error handling.
-    
-    Args:
-        enabled: Whether to enable mixed precision
-        
-    Returns:
-        True if mixed precision was successfully enabled, False otherwise
-    """
-    if not enabled:
-        logger.info("Mixed precision training disabled")
-        return False
-    
-    try:
-        # Check if GPU is available
-        if not tf.config.list_physical_devices('GPU'):
-            logger.warning("No GPU found, disabling mixed precision")
-            return False
-        
-        # Import mixed precision module
-        from tensorflow.keras import mixed_precision
-        
-        # Configure policy
-        policy_name = 'mixed_float16'
-        logger.info(f"Enabling mixed precision with policy: {policy_name}")
-        mixed_precision.set_global_policy(policy_name)
-        
-        # Verify policy was set
-        current_policy = mixed_precision.global_policy()
-        logger.info(f"Mixed precision policy enabled: {current_policy}")
-        
-        # Check if policy was actually set to mixed_float16
-        if str(current_policy) != policy_name:
-            logger.warning(f"Failed to set mixed precision policy, got {current_policy}")
-            return False
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error configuring mixed precision: {e}")
-        # Reset to default policy
-        try:
-            from tensorflow.keras import mixed_precision
-            mixed_precision.set_global_policy('float32')
-            logger.info("Reset to float32 policy after error")
-        except:
-            pass
-        return False
-
-
-# Add this function after the preprocess_spectrograms function
-def balance_dataset(train_data, train_labels, augment_minority=True):
-    """
-    Balance the dataset by augmenting the minority class
-    """
-    # Count classes
-    unique_labels, counts = np.unique(train_labels, return_counts=True)
-    class_counts = dict(zip(unique_labels, counts))
-    logger.info(f"Original class distribution: {class_counts}")
-    
-    if len(unique_labels) <= 1:
-        logger.warning("Only one class present in training data!")
-        return train_data, train_labels
-    
-    # Find minority and majority classes
-    minority_class = unique_labels[np.argmin(counts)]
-    majority_class = unique_labels[np.argmax(counts)]
-    
-    if not augment_minority:
-        logger.info("Skipping minority class augmentation")
-        return train_data, train_labels
-    
-    # Get indices of minority class
-    minority_indices = np.where(train_labels == minority_class)[0]
-    
-    # Calculate how many samples to generate
-    n_to_add = class_counts[majority_class] - class_counts[minority_class]
-    
-    if n_to_add <= 0:
-        logger.info("Dataset already balanced")
-        return train_data, train_labels
-    
-    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
-    
-    # Create augmented samples
-    augmented_data = []
-    augmented_labels = []
-    
-    # Simple augmentation: add noise and small shifts
-    for _ in range(n_to_add):
-        # Randomly select a minority sample
-        idx = np.random.choice(minority_indices)
-        sample = train_data[idx].copy()
-        
-        # Add random noise
-        noise_level = 0.1
-        noise = np.random.normal(0, noise_level, sample.shape)
-        augmented_sample = sample + noise
-        
-        # Clip values to valid range
-        augmented_sample = np.clip(augmented_sample, 0, 1)
-        
-        augmented_data.append(augmented_sample)
-        augmented_labels.append(minority_class)
-    
-    # Combine original and augmented data
-    balanced_data = np.vstack([train_data, np.array(augmented_data)])
-    balanced_labels = np.concatenate([train_labels, np.array(augmented_labels)])
-    
-    # Shuffle the data
-    indices = np.arange(len(balanced_labels))
-    np.random.shuffle(indices)
-    balanced_data = balanced_data[indices]
-    balanced_labels = balanced_labels[indices]
-    
-    logger.info(f"New dataset shape: {balanced_data.shape}")
-    new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
-    logger.info(f"New class distribution: {new_class_counts}")
-    
-    return balanced_data, balanced_labels
-
-
-
-
 ########################################################################
 # main
 ########################################################################
 def main():
-
-    # Configure GPU memory growth
+    # Set memory growth before any other TensorFlow operations
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
         for device in physical_devices:
@@ -1283,6 +1155,20 @@ def main():
                 logger.info(f"Memory growth enabled for {device}")
             except Exception as e:
                 logger.warning(f"Could not set memory growth for {device}: {e}")
+    
+    # Limit TensorFlow memory usage
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Limit TensorFlow to use only 80% of GPU memory
+            for gpu in gpus:
+                tf.config.experimental.set_virtual_device_configuration(
+                    gpu,
+                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 8)]  # 8GB limit
+                )
+            logger.info("GPU memory limit set")
+        except RuntimeError as e:
+            logger.error(f"Error setting GPU memory limit: {e}")
 
 
     with open("baseline_AST.yaml", "r") as stream:
@@ -1460,7 +1346,7 @@ def main():
     logger.info(f"Number of test files: {len(test_files)}")
 
     # Define target shape for spectrograms
-    target_shape = (param["feature"]["n_mels"], 64)  # Adjust time dimension as needed
+    target_shape = (param["feature"]["n_mels"], 48)
     logger.info(f"Target spectrogram shape: {target_shape}")
 
     # Preprocess to ensure consistent shapes
@@ -1806,12 +1692,15 @@ def main():
                         'loss': f'{train_loss.result():.4f}',
                         'accuracy': f'{train_accuracy.result():.4f}'
                     })
+
+                    gc.collect()
                 
                 # Validation loop
                 for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
                     batch_loss, batch_accuracy = val_step(x_batch, y_batch)
                     val_loss.update_state(batch_loss)
                     val_accuracy.update_state(batch_accuracy)
+                    gc.collect()
                 
                 # Print epoch results
                 print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
@@ -1853,7 +1742,7 @@ def main():
                     logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
 
             # Apply mixup augmentation if enabled
-            if param.get("training", {}).get("mixup", {}).get("enabled", False):
+            if False and param.get("training", {}).get("mixup", {}).get("enabled", False):
                 alpha = param["training"]["mixup"].get("alpha", 0.2)
                 logger.info(f"Applying mixup augmentation with alpha={alpha}")
                 
@@ -1890,42 +1779,22 @@ def main():
                     logger.warning("Not enough samples for mixup, skipping")
 
 
-            initial_batch_size = 32
-            initial_epochs = 5
-            logger.info(f"Starting with smaller batch size ({initial_batch_size}) and epochs ({initial_epochs}) for stability")
+            # Use a smaller batch size and more conservative approach
+            safe_batch_size = min(16, batch_size)  # Use at most 16 for stability
+            safe_epochs = min(50, epochs)  # Cap at 50 epochs to prevent OOM
 
-            # Initial training with simpler settings
-            initial_history = model.fit(
+            logger.info(f"Training with conservative settings: batch_size={safe_batch_size}, epochs={safe_epochs}")
+            history = model.fit(
                 train_data,
                 train_labels_expanded,
-                batch_size=initial_batch_size,
-                epochs=initial_epochs,
+                batch_size=safe_batch_size,
+                epochs=safe_epochs,
                 validation_data=(val_data, val_labels_expanded),
+                callbacks=callbacks,
+                class_weight=class_weights,
+                sample_weight=sample_weights,
                 verbose=1
             )
-
-            # Continue training with full settings if initial training was successful
-            if not np.isnan(initial_history.history['loss'][-1]):
-                logger.info("Initial training successful, continuing with full training")
-                history = model.fit(
-                    train_data,
-                    train_labels_expanded,
-                    batch_size=batch_size,
-                    epochs=epochs - initial_epochs,
-                    validation_data=(val_data, val_labels_expanded),
-                    callbacks=callbacks,
-                    class_weight=class_weights,
-                    sample_weight=sample_weights,
-                    initial_epoch=initial_epochs,
-                    verbose=1
-                )
-                
-                # Combine histories
-                for key in initial_history.history:
-                    history.history[key] = initial_history.history[key] + history.history[key]
-            else:
-                logger.warning("Initial training failed with NaN loss, using initial history only")
-                history = initial_history
 
 
             # Save the trained model
@@ -1962,7 +1831,8 @@ def main():
         # Predict on test set
         y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
         y_pred_binary = (y_pred > 0.5).astype(int)
-
+        gc.collect()
+        
         # Calculate metrics
         test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
         test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)

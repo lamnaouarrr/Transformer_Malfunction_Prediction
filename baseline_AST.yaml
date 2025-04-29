@@ -1,10 +1,10 @@
 # Feature extraction parameters
 feature:
-  n_mels: 32          # Reduced from 64
-  frames: 1            # Reduced from 5
-  n_fft: 1024          # Keep as is
-  hop_length: 1024     # Doubled from 512
-  stride: 1 
+  n_mels: 64
+  frames: 5
+  n_fft: 1024
+  hop_length: 512
+  stride: 2
   power: 2.0
   sr: 16000
   augmentation:
@@ -31,17 +31,23 @@ feature:
       probability: 0.5
       min_factor: 0.001
       max_factor: 0.02
+  preprocessing_batch_size: 64
+  dataset_chunking:
+    enabled: true
+    chunk_size: 5000  # Process 5000 files at a time
+    temp_directory: "./temp_chunks/temp_chunks_AST"
+
 
 # Fit algorithm parameters
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.0001
+    learning_rate: 0.0002
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
   epochs: 100
-  batch_size: 32
+  batch_size: 64
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -82,19 +88,25 @@ fit:
 training:
   mixed_precision: true
   xla_acceleration: true
-  gradient_accumulation_steps: 4  # Add gradient accumulation for larger effective batch size
+  gradient_accumulation_steps: 2
   gradient_clip_norm: 1.0
   mixup:
     enabled: true
     alpha: 0.2
+  checkpointing:
+    save_frequency: 1000  # Save every 1000 batches
+    keep_checkpoints: 5
+  memory_optimization:
+    clear_memory_frequency: 50  # Clear memory every 50 batches
+    prefetch_buffer_size: 4
 
 # Enhanced transformer model settings
 model:
   architecture:
     transformer:
-      num_heads: 2
-      dim_feedforward: 128
-      num_encoder_layers: 1
+      num_heads: 4
+      dim_feedforward: 512
+      num_encoder_layers: 2
       positional_encoding: true
       use_pretrained: true
       pretrained_model: "google/vit-base-patch16-224"

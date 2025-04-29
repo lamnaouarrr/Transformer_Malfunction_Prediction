@@ -53,13 +53,10 @@ __versions__ = "3.0.0"
 
 def binary_cross_entropy_loss(y_true, y_pred):
     """
-    Binary cross-entropy loss for autoencoder
+    Binary cross-entropy loss for autoencoder with improved memory efficiency
     """
-    # Normalize inputs if needed (values between 0 and 1)
-    y_true_normalized = (y_true - K.min(y_true)) / (K.max(y_true) - K.min(y_true) + K.epsilon())
-    y_pred_normalized = (y_pred - K.min(y_pred)) / (K.max(y_pred) - K.min(y_pred) + K.epsilon())
-    
-    return tf.keras.losses.binary_crossentropy(y_true_normalized, y_pred_normalized)
+    # Use TF's built-in binary_crossentropy for better memory efficiency
+    return tf.keras.losses.binary_crossentropy(y_true, y_pred)
 
 def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
     """
@@ -381,7 +378,9 @@ def file_to_spectrogram(file_name,
         if len(y) < n_fft:
             logger.warning(f"File too short: {file_name}")
             return None
-            
+        
+        # For V100, we can use more efficient computation
+        # Use more efficient computation for mel spectrogram
         mel_spectrogram = librosa.feature.melspectrogram(y=y,
                                                         sr=sr,
                                                         n_fft=n_fft,
@@ -425,15 +424,15 @@ def file_to_spectrogram(file_name,
         if np.max(log_mel_spectrogram) > np.min(log_mel_spectrogram):
             log_mel_spectrogram = (log_mel_spectrogram - np.min(log_mel_spectrogram)) / (np.max(log_mel_spectrogram) - np.min(log_mel_spectrogram))
         
-        # Ensure minimum size for transformer input
+        # Ensure minimum size for transformer input - increased for V100
         min_time_dim = param.get("model", {}).get("architecture", {}).get("transformer", {}).get("patch_size", 16) * 4
         if log_mel_spectrogram.shape[1] < min_time_dim:
             # Pad if too short
             pad_width = min_time_dim - log_mel_spectrogram.shape[1]
             log_mel_spectrogram = np.pad(log_mel_spectrogram, ((0, 0), (0, pad_width)), mode='constant')
         
-        # Trim or sample if too long
-        max_time_dim = 512  # Maximum time dimension
+        # Trim or sample if too long - increased for V100
+        max_time_dim = 1024  # Increased from 512 for V100
         if log_mel_spectrogram.shape[1] > max_time_dim:
             start = np.random.randint(0, log_mel_spectrogram.shape[1] - max_time_dim)
             log_mel_spectrogram = log_mel_spectrogram[:, start:start+max_time_dim]
@@ -445,7 +444,9 @@ def file_to_spectrogram(file_name,
         return None
 
 
-def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=20):
+
+def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
+
     """
     Process a list of files into spectrograms with optional labels - memory optimized version
     """
@@ -786,7 +787,7 @@ def dataset_generator(target_dir, param=None):
 
 def configure_mixed_precision(enabled=True):
     """
-    Configure mixed precision training with proper error handling.
+    Configure mixed precision training optimized for V100 GPU.
     """
     if not enabled:
         logger.info("Mixed precision training disabled")
@@ -801,12 +802,12 @@ def configure_mixed_precision(enabled=True):
         # Import mixed precision module
         from tensorflow.keras import mixed_precision
         
-        # Configure policy
+        # Configure policy - V100 works well with mixed_float16
         policy_name = 'mixed_float16'
         logger.info(f"Enabling mixed precision with policy: {policy_name}")
         mixed_precision.set_global_policy(policy_name)
         
-        # Verify policy was set - FIX: Don't check string equality, just log the policy
+        # Verify policy was set
         current_policy = mixed_precision.global_policy()
         logger.info(f"Mixed precision policy enabled: {current_policy}")
         
@@ -823,17 +824,6 @@ def configure_mixed_precision(enabled=True):
             pass
         return False
 
-    
-    except Exception as e:
-        logger.error(f"Error configuring mixed precision: {e}")
-        # Reset to default policy
-        try:
-            from tensorflow.keras import mixed_precision
-            mixed_precision.set_global_policy('float32')
-            logger.info("Reset to float32 policy after error")
-        except:
-            pass
-        return False
 
 class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
     """
@@ -879,6 +869,13 @@ class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
         
         return 0.5 * self.learning_rate_base * (1 + np.cos(np.pi * global_step / cosine_steps))
 
+def get_scaled_learning_rate(base_lr, batch_size, base_batch_size=32):
+    """
+    Scale learning rate linearly with batch size
+    """
+    return base_lr * (batch_size / base_batch_size)
+
+
 class TerminateOnNaN(tf.keras.callbacks.Callback):
     """
     Callback that terminates training when a NaN loss is encountered
@@ -917,15 +914,16 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create a simpler Audio Spectrogram Transformer model with improved memory efficiency
+    Create an enhanced Audio Spectrogram Transformer model optimized for V100 GPU
     """
     if config is None:
         config = {}
     
     transformer_config = config.get("transformer", {})
-    dim_feedforward = transformer_config.get("dim_feedforward", 256)
+    dim_feedforward = transformer_config.get("dim_feedforward", 512)  # Increased from 256
     dropout_rate = config.get("dropout", 0.3)
     l2_reg = config.get("l2_regularization", 1e-5)
+
     
     # Input layer expects (freq, time) format
     inputs = Input(shape=input_shape)
@@ -933,43 +931,59 @@ def create_ast_model(input_shape, config=None):
     # Reshape to prepare for CNN (batch, freq, time, 1)
     x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # First convolutional block with L2 regularization - use fewer filters
-    x = tf.keras.layers.Conv2D(16, (3, 3), padding='same', 
+    # First convolutional block with L2 regularization - increased filters for V100
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same', 
                               kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     x = tf.keras.layers.Dropout(dropout_rate/2)(x)
     
-    # Second convolutional block - use fewer filters
-    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
-    
-    # Third convolutional block - use fewer filters
+    # Second convolutional block - increased filters
     x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
                               kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+    
+    # Third convolutional block - increased filters
+    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+    
+    # Fourth convolutional block - new for V100
+    x = tf.keras.layers.Conv2D(256, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+
     
     # Global pooling instead of flattening to reduce parameters
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     
-    # Dense layers with batch normalization - use smaller dimension
+    # Dense layers with batch normalization - increased dimensions for V100
+    x = Dense(dim_feedforward, kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = Dropout(dropout_rate)(x)
+    
+    # Additional dense layer for V100
     x = Dense(dim_feedforward // 2, kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = Dropout(dropout_rate)(x)
     
     # Final classification layer
-    x = Dense(32, kernel_regularizer=l2(l2_reg))(x)
+    x = Dense(64, kernel_regularizer=l2(l2_reg))(x)  # Increased from 32
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = Dropout(dropout_rate)(x)
+
     # Use a threshold-adjusted sigmoid for better sensitivity to abnormal class
     outputs = Dense(1, activation="sigmoid", kernel_regularizer=l2(l2_reg), bias_initializer=tf.keras.initializers.Constant(-1.0))(x)
     
@@ -1147,6 +1161,139 @@ def normalize_spectrograms(spectrograms, method="minmax"):
         logger.warning(f"Unknown normalization method: {method}, returning original data")
         return spectrograms
 
+
+def monitor_gpu_usage():
+    """
+    Monitor GPU memory usage and log it
+    """
+    try:
+        import subprocess
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], 
+                               stdout=subprocess.PIPE, text=True)
+        memory_info = result.stdout.strip().split(',')
+        used_memory = int(memory_info[0])
+        total_memory = int(memory_info[1])
+        usage_percent = (used_memory / total_memory) * 100
+        
+        logger.info(f"GPU Memory: {used_memory}MB / {total_memory}MB ({usage_percent:.1f}%)")
+        return used_memory, total_memory, usage_percent
+    except Exception as e:
+        logger.warning(f"Failed to monitor GPU usage: {e}")
+        return None, None, None
+
+
+def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=None):
+    """
+    Process a large dataset in chunks to avoid memory issues
+    """
+    if param is None:
+        param = {}
+    
+    chunking_config = param.get("feature", {}).get("dataset_chunking", {})
+    if not chunking_config.get("enabled", False):
+        # Process normally if chunking is disabled
+        return list_to_spectrograms(file_list, labels, msg="Processing dataset", augment=False, param=param)
+    
+    # Use configured chunk size or default
+    chunk_size = chunking_config.get("chunk_size", chunk_size)
+    logger.info(f"Processing dataset in chunks of {chunk_size} files")
+    
+    # Create temporary directory if needed
+    temp_dir = chunking_config.get("temp_directory", "./temp_chunks")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Split dataset into chunks
+    num_chunks = (len(file_list) + chunk_size - 1) // chunk_size
+    all_spectrograms = []
+    all_labels = []
+    
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, len(file_list))
+        
+        chunk_files = file_list[start_idx:end_idx]
+        chunk_labels = labels[start_idx:end_idx] if labels is not None else None
+        
+        logger.info(f"Processing chunk {i+1}/{num_chunks} ({len(chunk_files)} files)")
+        
+        # Process this chunk
+        chunk_spectrograms, chunk_labels_expanded = list_to_spectrograms(
+            chunk_files, 
+            chunk_labels, 
+            msg=f"Chunk {i+1}/{num_chunks}", 
+            augment=False, 
+            param=param
+        )
+        
+        # Save chunk to disk to free memory
+        chunk_file = f"{temp_dir}/chunk_{i}.npz"
+        np.savez_compressed(
+            chunk_file, 
+            spectrograms=chunk_spectrograms, 
+            labels=chunk_labels_expanded if chunk_labels_expanded is not None else np.array([])
+        )
+        
+        # Clear memory
+        del chunk_spectrograms, chunk_labels_expanded
+        gc.collect()
+        
+        # Monitor GPU usage
+        monitor_gpu_usage()
+    
+    # Now load and combine all chunks
+    target_shape = param.get("feature", {}).get("target_shape", None)
+    if target_shape is None:
+        # Determine target shape from first chunk
+        first_chunk = np.load(f"{temp_dir}/chunk_0.npz")
+        if len(first_chunk["spectrograms"]) > 0:
+            spec_shape = first_chunk["spectrograms"][0].shape
+            target_shape = (spec_shape[0], spec_shape[1])
+        else:
+            target_shape = (param.get("feature", {}).get("n_mels", 64), 128)
+    
+    # Count total samples
+    total_samples = 0
+    for i in range(num_chunks):
+        chunk_file = f"{temp_dir}/chunk_{i}.npz"
+        chunk_data = np.load(chunk_file)
+        total_samples += len(chunk_data["spectrograms"])
+    
+    # Pre-allocate arrays
+    all_spectrograms = np.zeros((total_samples, target_shape[0], target_shape[1]), dtype=np.float32)
+    all_labels = np.zeros(total_samples, dtype=np.float32) if labels is not None else None
+    
+    # Fill arrays
+    sample_idx = 0
+    for i in range(num_chunks):
+        chunk_file = f"{temp_dir}/chunk_{i}.npz"
+        chunk_data = np.load(chunk_file)
+        chunk_spectrograms = chunk_data["spectrograms"]
+        chunk_labels = chunk_data["labels"]
+        
+        # Resize spectrograms if needed
+        for j in range(len(chunk_spectrograms)):
+            spec = chunk_spectrograms[j]
+            if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
+                from skimage.transform import resize
+                spec = resize(spec, target_shape, anti_aliasing=True)
+            
+            all_spectrograms[sample_idx] = spec
+            if labels is not None:
+                all_labels[sample_idx] = chunk_labels[j]
+            
+            sample_idx += 1
+        
+        # Clean up
+        os.remove(chunk_file)
+    
+    # Remove temporary directory if empty
+    if not os.listdir(temp_dir):
+        os.rmdir(temp_dir)
+    
+    return all_spectrograms, all_labels
+
+
+
 ########################################################################
 # main
 ########################################################################
@@ -1156,24 +1303,25 @@ def main():
     if physical_devices:
         for device in physical_devices:
             try:
-                tf.config.experimental.set_memory_growth(device, True)
-                logger.info(f"Memory growth enabled for {device}")
+                tf.config.experimental.set_memory_growth(device, False)
+                logger.info(f"Using dynamic memory allocation for {device}")
             except Exception as e:
-                logger.warning(f"Could not set memory growth for {device}: {e}")
+                logger.warning(f"Could not configure memory allocation for {device}: {e}")
     
-    # Limit TensorFlow memory usage
+        # Configure GPU memory for V100 32GB
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
-            # Limit TensorFlow to use only 80% of GPU memory
+            # Allow TensorFlow to use most of the V100's 32GB memory
             for gpu in gpus:
                 tf.config.experimental.set_virtual_device_configuration(
                     gpu,
-                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 8)]  # 8GB limit
+                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 28)]  # 28GB limit (leaving some headroom)
                 )
-            logger.info("GPU memory limit set")
+            logger.info("GPU memory limit set to 28GB for V100")
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory limit: {e}")
+
 
 
     with open("baseline_AST.yaml", "r") as stream:
@@ -1312,24 +1460,67 @@ def main():
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
 
-    train_data, train_labels_expanded = list_to_spectrograms(
-        train_files,
-        train_labels,
-        msg="generate train_dataset",
-        augment=True,
-        param=param,
-        batch_size=20
-    )
-    print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
+    preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
+    chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
+    chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
 
-    val_data, val_labels_expanded = list_to_spectrograms(
-        val_files,
-        val_labels,
-        msg="generate validation_dataset",
-        augment=False,
-        param=param,
-        batch_size=20
-    )
+    # For training data
+    if chunking_enabled and len(train_files) > chunk_size:
+        logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
+        train_data, train_labels_expanded = process_dataset_in_chunks(
+            train_files,
+            train_labels,
+            chunk_size=chunk_size,
+            param=param
+        )
+    else:
+        train_data, train_labels_expanded = list_to_spectrograms(
+            train_files,
+            train_labels,
+            msg="generate train_dataset",
+            augment=True,
+            param=param,
+            batch_size=preprocessing_batch_size
+        )
+
+    # For validation data
+    if chunking_enabled and len(val_files) > chunk_size:
+        logger.info(f"Processing validation data in chunks (dataset size: {len(val_files)} files)")
+        val_data, val_labels_expanded = process_dataset_in_chunks(
+            val_files,
+            val_labels,
+            chunk_size=chunk_size,
+            param=param
+        )
+    else:
+        val_data, val_labels_expanded = list_to_spectrograms(
+            val_files,
+            val_labels,
+            msg="generate validation_dataset",
+            augment=False,
+            param=param,
+            batch_size=preprocessing_batch_size
+        )
+
+    # For test data
+    if chunking_enabled and len(test_files) > chunk_size:
+        logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
+        test_data, test_labels_expanded = process_dataset_in_chunks(
+            test_files,
+            test_labels,
+            chunk_size=chunk_size,
+            param=param
+        )
+    else:
+        test_data, test_labels_expanded = list_to_spectrograms(
+            test_files,
+            test_labels,
+            msg="generate test_dataset",
+            augment=False,
+            param=param,
+            batch_size=preprocessing_batch_size
+        )
+
 
 
     if train_data.shape[0] == 0 or val_data.shape[0] == 0:
@@ -1406,11 +1597,15 @@ def main():
         enabled=param.get("training", {}).get("mixed_precision", False)
     )
 
+    monitor_gpu_usage()
+
     # Create model with the correct input shape
     model = create_ast_model(
         input_shape=(target_shape[0], target_shape[1]),
         config=param.get("model", {}).get("architecture", {})
     )
+
+    monitor_gpu_usage()
 
     #debug
     normal_count = sum(1 for label in train_labels_expanded if label == 0)
@@ -1449,7 +1644,12 @@ def main():
 
     batch_size = param.get("fit", {}).get("batch_size", 32)
     epochs = param.get("fit", {}).get("epochs", 100)
-    learning_rate = param.get("fit", {}).get("compile", {}).get("learning_rate", 0.001)
+    base_learning_rate = param.get("fit", {}).get("compile", {}).get("learning_rate", 0.001)
+
+    # Scale learning rate based on batch size
+    learning_rate = get_scaled_learning_rate(base_learning_rate, batch_size)
+    logger.info(f"Scaled learning rate from {base_learning_rate} to {learning_rate} for batch size {batch_size}")
+
 
     # Log the training parameters being used
     logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
@@ -1623,11 +1823,12 @@ def main():
             weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
             sample_weights *= weight_factor
         
-        if False and param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
-            logger.info(f"Using manual gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
+        if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
+            logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
             
-            # Create optimizer without accumulation
+            # Create optimizer
             optimizer = compile_params["optimizer"]
+            loss_fn = compile_params["loss"]
             
             # Get the dataset
             train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
@@ -1648,71 +1849,72 @@ def main():
                 'val_accuracy': []
             }
             
-            # Create accumulated gradients outside the function
-            accumulated_grads = None
-
-            def initialize_accumulated_grads(model):
-                """Initialize accumulated gradients with zeros for each trainable variable"""
-                global accumulated_grads
-                accumulated_grads = [tf.Variable(tf.zeros_like(var)) for var in model.trainable_variables]
-
             # Initialize accumulated gradients
-            initialize_accumulated_grads(model)
-
-
-            # Manual training loop
+            accumulated_gradients = [tf.Variable(tf.zeros_like(var), trainable=False) 
+                                    for var in model.trainable_variables]
+            
+            # Define training step function
             @tf.function
-            def train_step(x_batch, y_batch, step):
-                global accumulated_grads
-                
+            def train_step(x_batch, y_batch, first_batch):
                 with tf.GradientTape() as tape:
                     logits = model(x_batch, training=True)
-                    loss_value = compile_params["loss"](y_batch, logits)
-                    loss_value = loss_value / tf.cast(accum_steps, dtype=loss_value.dtype)
+                    if isinstance(loss_fn, str):
+                        if loss_fn == "binary_crossentropy":
+                            loss_value = tf.keras.losses.binary_crossentropy(y_batch, logits)
+                        else:
+                            loss_value = tf.keras.losses.get(loss_fn)(y_batch, logits)
+                    else:
+                        loss_value = loss_fn(y_batch, logits)
                     
-                # Accumulate gradient
-                grads = tape.gradient(loss_value, model.trainable_variables)
+                    # Scale the loss to account for gradient accumulation
+                    scaled_loss = loss_value / tf.cast(accum_steps, dtype=loss_value.dtype)
                 
-                for i, g in enumerate(grads):
-                    accumulated_grads[i].assign_add(g)
-                    
-                # If we've accumulated enough gradients, apply them and reset
-                if (step + 1) % accum_steps == 0:
-                    optimizer.apply_gradients(zip(accumulated_grads, model.trainable_variables))
-                    for i in range(len(accumulated_grads)):
-                        accumulated_grads[i].assign(tf.zeros_like(accumulated_grads[i]))
-                        
-                # Calculate accuracy - ensure consistent data types
-                # Convert both to the same data type (float32)
-                y_batch_float32 = tf.cast(y_batch, tf.float32)
+                # Calculate gradients
+                gradients = tape.gradient(scaled_loss, model.trainable_variables)
+                
+                # If this is the first batch in an accumulation cycle, reset the accumulators
+                if first_batch:
+                    for i, grad in enumerate(gradients):
+                        if grad is not None:
+                            accumulated_gradients[i].assign(grad)
+                        else:
+                            accumulated_gradients[i].assign(tf.zeros_like(model.trainable_variables[i]))
+                else:
+                    # Otherwise add to the accumulated gradients
+                    for i, grad in enumerate(gradients):
+                        if grad is not None:
+                            accumulated_gradients[i].assign_add(grad)
+                
+                # Calculate accuracy
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_float32, y_pred), tf.float32))
-                        
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                
                 return loss_value, accuracy
-
-
             
+            # Define validation step function
             @tf.function
             def val_step(x_batch, y_batch):
                 logits = model(x_batch, training=False)
-                loss_value = compile_params["loss"](y_batch, logits)
                 
-                # Calculate accuracy - ensure consistent data types
-                y_batch_float32 = tf.cast(y_batch, tf.float32)
+                if isinstance(loss_fn, str):
+                    if loss_fn == "binary_crossentropy":
+                        loss_value = tf.keras.losses.binary_crossentropy(y_batch, logits)
+                    else:
+                        loss_value = tf.keras.losses.get(loss_fn)(y_batch, logits)
+                else:
+                    loss_value = loss_fn(y_batch, logits)
+                
+                # Calculate accuracy
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_float32, y_pred), tf.float32))
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
                 
                 return loss_value, accuracy
-
             
+
             # Training loop
             epochs = param["fit"]["epochs"]
             for epoch in range(epochs):
                 print(f"\nEpoch {epoch+1}/{epochs}")
-                
-                # Reset accumulated gradients at the beginning of each epoch
-                for i in range(len(accumulated_grads)):
-                    accumulated_grads[i].assign(tf.zeros_like(accumulated_grads[i]))
                 
                 # Training metrics
                 train_loss = tf.keras.metrics.Mean()
@@ -1726,25 +1928,36 @@ def main():
                 step = 0
                 progress_bar = tqdm(train_dataset, desc=f"Training")
                 for x_batch, y_batch in progress_bar:
-                    batch_loss, batch_accuracy = train_step(x_batch, y_batch, step % accum_steps)
+                    # Determine if this is the first batch in an accumulation cycle
+                    first_batch = (step % accum_steps == 0)
+                    
+                    # Perform training step
+                    batch_loss, batch_accuracy = train_step(x_batch, y_batch, first_batch)
                     train_loss.update_state(batch_loss)
                     train_accuracy.update_state(batch_accuracy)
+                    
+                    # If we've accumulated enough gradients, apply them
+                    if (step + 1) % accum_steps == 0 or (step + 1 == len(train_dataset)):
+                        # Apply accumulated gradients
+                        optimizer.apply_gradients(zip(accumulated_gradients, model.trainable_variables))
+                        
+                        # Log progress
+                        progress_bar.set_postfix({
+                            'loss': f'{train_loss.result():.4f}',
+                            'accuracy': f'{train_accuracy.result():.4f}'
+                        })
+                    
                     step += 1
                     
-                    # Update progress bar
-                    progress_bar.set_postfix({
-                        'loss': f'{train_loss.result():.4f}',
-                        'accuracy': f'{train_accuracy.result():.4f}'
-                    })
-
-                    gc.collect()
+                    # Clear memory periodically
+                    if step % 50 == 0:
+                        gc.collect()
                 
                 # Validation loop
                 for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
                     batch_loss, batch_accuracy = val_step(x_batch, y_batch)
                     val_loss.update_state(batch_loss)
                     val_accuracy.update_state(batch_accuracy)
-                    gc.collect()
                 
                 # Print epoch results
                 print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
@@ -1758,11 +1971,51 @@ def main():
                 
                 # Check for early stopping
                 if callbacks and any(isinstance(cb, tf.keras.callbacks.EarlyStopping) for cb in callbacks):
-                    # Implement early stopping logic here if needed
-                    pass
+                    early_stopping_callback = next(cb for cb in callbacks if isinstance(cb, tf.keras.callbacks.EarlyStopping))
+                    
+                    # Get the monitored value
+                    if early_stopping_callback.monitor == 'val_loss':
+                        current = float(val_loss.result())
+                    elif early_stopping_callback.monitor == 'val_accuracy':
+                        current = float(val_accuracy.result())
+                    
+                    # Check if we should stop
+                    if hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_loss':
+                        if early_stopping_callback.best is None or current < early_stopping_callback.best:
+                            early_stopping_callback.best = current
+                            early_stopping_callback.wait = 0
+                            # Save best model
+                            model.save(model_file)
+                            logger.info(f"Saved best model at epoch {epoch+1}")
+                        else:
+                            early_stopping_callback.wait += 1
+                            if early_stopping_callback.wait >= early_stopping_callback.patience:
+                                print(f"Early stopping triggered at epoch {epoch+1}")
+                                break
+                    elif hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_accuracy':
+                        if early_stopping_callback.best is None or current > early_stopping_callback.best:
+                            early_stopping_callback.best = current
+                            early_stopping_callback.wait = 0
+                            # Save best model
+                            model.save(model_file)
+                            logger.info(f"Saved best model at epoch {epoch+1}")
+                        else:
+                            early_stopping_callback.wait += 1
+                            if early_stopping_callback.wait >= early_stopping_callback.patience:
+                                print(f"Early stopping triggered at epoch {epoch+1}")
+                                break
+                
+                # Save model periodically
+                if (epoch + 1) % 5 == 0:
+                    model.save(f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras")
+                    logger.info(f"Saved model checkpoint at epoch {epoch+1}")
+                
+                # Clear memory between epochs
+                gc.collect()
             
             # Convert history to a format compatible with Keras history
             history = type('History', (), {'history': history})
+
 
         else:
             if param.get("training", {}).get("xla_acceleration", False):
@@ -1824,7 +2077,7 @@ def main():
 
 
             # Use a smaller batch size and more conservative approach
-            safe_batch_size = min(16, batch_size)
+            safe_batch_size = min(64, batch_size)
             safe_epochs = min(100, epochs)
 
             logger.info(f"Training with conservative settings: batch_size={safe_batch_size}, epochs={safe_epochs}")

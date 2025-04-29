@@ -36,7 +36,7 @@ from sklearn.mixture import GaussianMixture
 from pathlib import Path
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Reshape, Permute, Concatenate, GlobalAveragePooling1D
-from tensorflow.keras.losses import mean_squared_error
+from tensorflow.keras.losses import mse as mean_squared_error
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import classification_report, confusion_matrix

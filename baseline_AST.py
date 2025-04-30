@@ -872,7 +872,7 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """Create an Audio Spectrogram Transformer (AST) model"""
+    """Create an Audio Spectrogram Transformer (AST) model with improved stability"""
     if config is None:
         config = {}
     
@@ -885,7 +885,6 @@ def create_ast_model(input_shape, config=None):
     attention_dropout = transformer_config.get("attention_dropout", 0.1)
     
     # Calculate sequence length and embedding dimension based on input shape and patch size
-    # Use static values instead of dynamic ones
     h_patches = input_shape[0] // patch_size
     w_patches = input_shape[1] // patch_size
     seq_len = h_patches * w_patches
@@ -897,53 +896,79 @@ def create_ast_model(input_shape, config=None):
     # Reshape for patching
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Patch embedding using Conv2D
+    # Patch embedding using Conv2D with smaller initial values
     x = tf.keras.layers.Conv2D(
         filters=embed_dim,
         kernel_size=patch_size,
         strides=patch_size,
         padding='same',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),  # Stable initialization
         name='patch_embedding'
     )(x)
+    
+    # Add batch normalization for stability
+    x = tf.keras.layers.BatchNormalization()(x)
     
     # Reshape to sequence format for transformer
     x = tf.keras.layers.Reshape((seq_len, embed_dim))(x)
     
+    # Layer normalization before adding positional encoding
+    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+    
     # Add positional encoding
-    # Create a static positional encoding
     pos_encoding = positional_encoding(seq_len, embed_dim, encoding_type="sinusoidal")
     x = tf.keras.layers.Add()([x, pos_encoding])
     
     # Apply transformer encoder layers
     for i in range(num_encoder_layers):
-        # Multi-head attention block
+        # Layer normalization before attention (pre-norm formulation)
+        attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        
+        # Multi-head attention block with smaller key_dim
         attn_output = tf.keras.layers.MultiHeadAttention(
             num_heads=num_heads,
-            key_dim=embed_dim // num_heads,
+            key_dim=max(16, embed_dim // num_heads),  # Ensure key_dim is not too small
             dropout=attention_dropout,
             name=f'encoder_mha_{i}'
-        )(x, x)
+        )(attn_input, attn_input)
         
-        # Add & Norm
+        # Residual connection
         x = tf.keras.layers.Add()([x, attn_output])
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Feed-forward network
-        ffn_output = tf.keras.layers.Dense(dim_feedforward * 4, activation='gelu')(x)
-        ffn_output = tf.keras.layers.Dense(embed_dim)(ffn_output)
+        # Layer normalization before FFN
+        ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Add & Norm
+        # Feed-forward network with smaller dimensions
+        ffn_output = tf.keras.layers.Dense(
+            min(dim_feedforward * 2, 1024),  # Limit size for stability
+            activation='relu',  # Use ReLU instead of GELU for stability
+            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
+        )(ffn_input)
+        
+        # Add dropout for regularization
+        ffn_output = tf.keras.layers.Dropout(0.1)(ffn_output)
+        
+        # Second dense layer
+        ffn_output = tf.keras.layers.Dense(
+            embed_dim,
+            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
+        )(ffn_output)
+        
+        # Residual connection
         x = tf.keras.layers.Add()([x, ffn_output])
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+    
+    # Final layer normalization
+    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
     
     # Global average pooling
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Final classification head
-    x = tf.keras.layers.Dropout(0.1)(x)
+    # Final classification head with dropout
+    x = tf.keras.layers.Dropout(0.2)(x)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+
 
 
 
@@ -1892,7 +1917,6 @@ def main():
                 monitor=checkpoint_config.get("monitor", "val_accuracy"),
                 mode=checkpoint_config.get("mode", "max"),
                 save_best_only=checkpoint_config.get("save_best_only", True),
-                save_format='tf',
                 verbose=1
             ))
 
@@ -1902,6 +1926,10 @@ def main():
                 create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50)
             )
         )
+
+        # Add callback to detect and handle NaN values
+        callbacks.append(tf.keras.callbacks.TerminateOnNaN())
+
         
         # Add warmup learning rate scheduler if enabled
         warmup_config = param.get("fit", {}).get("warmup", {})
@@ -2132,7 +2160,7 @@ def main():
                             early_stopping_callback.best = current
                             early_stopping_callback.wait = 0
                             # Save best model
-                            model.save(model_file, save_format='tf')
+                            model.save(model_file)
                             logger.info(f"Saved best model at epoch {epoch+1}")
                         else:
                             early_stopping_callback.wait += 1
@@ -2144,7 +2172,7 @@ def main():
                             early_stopping_callback.best = current
                             early_stopping_callback.wait = 0
                             # Save best model
-                            model.save(model_file, save_format='tf')
+                            model.save(model_file)
                             logger.info(f"Saved best model at epoch {epoch+1}")
                         else:
                             early_stopping_callback.wait += 1
@@ -2212,9 +2240,13 @@ def main():
 
 
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                loss=lambda y_true, y_pred: weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0),  # Use focal loss
-                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]  # Track more metrics
+                optimizer=tf.keras.optimizers.Adam(
+                    learning_rate=0.0001,
+                    clipnorm=1.0,
+                    epsilon=1e-7
+                ),
+                loss='binary_crossentropy',
+                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]
             )
 
             # Train with improved settings

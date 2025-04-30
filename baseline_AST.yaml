@@ -42,11 +42,11 @@ feature:
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.005
+    learning_rate: 0.001
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
-  epochs: 100
+  epochs: 30
   batch_size: 32
   shuffle: True
   validation_split: 0.1

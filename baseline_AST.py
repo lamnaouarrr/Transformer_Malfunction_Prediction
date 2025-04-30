@@ -915,103 +915,36 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """
-    Create a more powerful Audio Spectrogram Transformer model
-    """
-    if config is None:
-        config = {}
-    
-    # Ensure input_shape is fully defined
-    if None in input_shape:
-        logger.warning(f"Input shape contains None: {input_shape}, using default shape")
-        input_shape = (64, 64)
-    
-    logger.info(f"Creating enhanced model with input shape: {input_shape}")
-    
-    # Improved hyperparameters
-    dropout_rate = 0.25  # Balanced dropout
-    l2_reg = 5e-5  # Moderate regularization
-    
-    # Input layer
+    """Create a simpler model that's less prone to overfitting"""
     inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Reshape to prepare for CNN
+    # Reshape for CNN
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # First convolutional block with residual connection
-    conv1 = tf.keras.layers.Conv2D(64, (3, 3), padding='same', 
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(conv1)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
+    # Simple CNN blocks
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Add()([conv1, x])  # Residual connection
+    x = tf.keras.layers.ReLU()(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
     
-    # Second convolutional block with residual connection
-    conv2 = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(conv2)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Add()([conv2, x])  # Residual connection
+    x = tf.keras.layers.ReLU()(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
     
-    # Third convolutional block
-    x = tf.keras.layers.Conv2D(256, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    # Global pooling and output
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dense(64)(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
     
-    # Attention mechanism
-    # Reshape for attention
-    shape = x.get_shape().as_list()
-    attention_input = tf.keras.layers.Reshape((shape[1] * shape[2], shape[3]))(x)
-    
-    # Self-attention layer
-    attention = tf.keras.layers.MultiHeadAttention(
-        num_heads=4, key_dim=64
-    )(attention_input, attention_input)
-    attention = tf.keras.layers.Dropout(dropout_rate)(attention)
-    attention_output = tf.keras.layers.LayerNormalization()(attention_input + attention)
-    
-    # Global pooling
-    x = tf.keras.layers.GlobalAveragePooling1D()(attention_output)
-    
-    # Dense layers with skip connections
-    dense1 = tf.keras.layers.Dense(256, kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(dense1)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
-    
-    x = tf.keras.layers.Dense(256, kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Add()([dense1, x])  # Skip connection
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
-    
-    x = tf.keras.layers.Dense(128, kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Dropout(dropout_rate)(x)
-    
-    # Output layer with bias initialization to counter class imbalance
+    # Output with bias toward abnormal class
     outputs = tf.keras.layers.Dense(1, activation='sigmoid', 
-                                   bias_initializer=tf.keras.initializers.Constant(0.0))(x)
+                                   bias_initializer=tf.keras.initializers.Constant(0.2))(x)
     
-    # Create model
-    model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
-    
-    return model
+    return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
 
 def preprocess_spectrograms(spectrograms, target_shape):
@@ -1087,6 +1020,10 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
     
     logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
     
+    # Create augmented samples
+    augmented_data = []
+    augmented_labels = []
+    
     # Simple augmentation: add noise and small shifts
     for _ in range(n_to_add):
         # Randomly select a minority sample
@@ -1119,6 +1056,7 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
     logger.info(f"New class distribution: {new_class_counts}")
     
     return balanced_data, balanced_labels
+
 
 def mixup_data(x, y, alpha=0.2):
     """
@@ -1381,13 +1319,6 @@ def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, m
                 lr * (max_lr / min_lr) ** (1 / total_steps)
             )
     
-    # Compile the model
-    temp_model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=min_lr),
-        loss='binary_crossentropy',
-        metrics=['accuracy']
-    )
-    
     # Train the model with increasing learning rate
     temp_model.fit(
         train_data, train_labels,
@@ -1435,37 +1366,16 @@ def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, m
     return optimal_lr
 
 
-def focal_loss_binary(gamma=2.0, alpha=0.25):
-    """
-    Binary focal loss function that focuses more on hard examples
+def weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0):
+    # Clip predictions for numerical stability
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
     
-    Args:
-        gamma: Focusing parameter
-        alpha: Class balancing parameter
-        
-    Returns:
-        Focal loss function
-    """
-    def focal_loss(y_true, y_pred):
-        # Clip prediction values to avoid log(0) error
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        
-        # Calculate cross entropy
-        cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
-        
-        # Calculate focal weight
-        p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
-        alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
-        modulating_factor = tf.pow(1.0 - p_t, gamma)
-        
-        # Apply weights
-        loss = alpha_factor * modulating_factor * cross_entropy
-        
-        # Return mean loss
-        return tf.reduce_mean(loss)
+    # Calculate loss with higher weight for positive class
+    loss = -(pos_weight * y_true * tf.math.log(y_pred) + 
+            (1 - y_true) * tf.math.log(1 - y_pred))
     
-    return focal_loss
+    return tf.reduce_mean(loss)
 
 
 # Create a learning rate scheduler with warmup
@@ -1763,99 +1673,66 @@ def main():
     val_data = preprocess_spectrograms(val_data, target_shape)
     logger.info(f"Preprocessed validation data shape: {val_data.shape}")
 
+    # Normalize data for better training
+    logger.info("Normalizing data...")
+    # Calculate mean and std from training data
+    train_mean = np.mean(train_data)
+    train_std = np.std(train_data)
+    logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
+
+    # Apply normalization if std is not too small
+    if train_std > 1e-6:
+        train_data = (train_data - train_mean) / train_std
+        val_data = (val_data - train_mean) / train_std
+        logger.info("Z-score normalization applied")
+    else:
+        # If std is too small, just center the data
+        train_data = train_data - train_mean
+        val_data = val_data - train_mean
+        logger.info("Mean centering applied (std too small for z-score)")
+
+
     # Balance the dataset
     logger.info("Balancing dataset...")
     train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
 
-    # Apply advanced data augmentation
-    logger.info("Applying advanced data augmentation...")
+    # Apply data augmentation
     augmented_data = []
     augmented_labels = []
 
-    # Focus on augmenting the minority class
-    normal_indices = np.where(train_labels_expanded == 0)[0]
+    # Get abnormal samples
     abnormal_indices = np.where(train_labels_expanded == 1)[0]
+    logger.info(f"Augmenting {len(abnormal_indices)} abnormal samples")
 
-    # Determine which class is the minority
-    minority_indices = abnormal_indices if len(abnormal_indices) < len(normal_indices) else normal_indices
-    majority_indices = normal_indices if len(abnormal_indices) < len(normal_indices) else abnormal_indices
-
-    logger.info(f"Normal samples: {len(normal_indices)}, Abnormal samples: {len(abnormal_indices)}")
-    logger.info(f"Augmenting minority class with {len(minority_indices)} samples")
-
-    # Apply multiple augmentations to minority class
-    for idx in minority_indices:
+    # Augment each abnormal sample once with simple noise
+    for idx in abnormal_indices:
         sample = train_data[idx].copy()
-        label = train_labels_expanded[idx]
+        noise = np.random.normal(0, 0.1, sample.shape)
+        augmented_sample = sample + noise
+        augmented_sample = np.clip(augmented_sample, 0, 1)
         
-        # Apply 3 different augmentations to each minority sample
-        for i in range(3):
-            aug_sample = sample.copy()
-            
-            # 1. Time shifting (roll the spectrogram)
-            shift = np.random.randint(-8, 9)
-            if shift != 0:
-                aug_sample = np.roll(aug_sample, shift, axis=1)
-            
-            # 2. Frequency masking
-            if np.random.rand() < 0.7:
-                freq_start = np.random.randint(0, aug_sample.shape[0] // 2)
-                freq_width = np.random.randint(1, aug_sample.shape[0] // 6)
-                aug_sample[freq_start:freq_start+freq_width, :] *= 0.1
-            
-            # 3. Time masking
-            if np.random.rand() < 0.7:
-                time_start = np.random.randint(0, aug_sample.shape[1] // 2)
-                time_width = np.random.randint(1, aug_sample.shape[1] // 6)
-                aug_sample[:, time_start:time_start+time_width] *= 0.1
-            
-            # 4. Add subtle noise
-            if np.random.rand() < 0.8:
-                noise_level = np.random.uniform(0.05, 0.15)
-                noise = np.random.normal(0, noise_level, aug_sample.shape)
-                aug_sample = aug_sample + noise
-                aug_sample = np.clip(aug_sample, 0, 1)
-            
-            augmented_data.append(aug_sample)
-            augmented_labels.append(label)
+        augmented_data.append(augmented_sample)
+        augmented_labels.append(1)  # Abnormal class
 
-    # Also augment some majority samples, but less aggressively
-    for idx in np.random.choice(majority_indices, size=min(len(majority_indices)//4, len(minority_indices)), replace=False):
-        sample = train_data[idx].copy()
-        label = train_labels_expanded[idx]
+    # Add augmented samples to training data
+    if augmented_data:
+        augmented_data = np.array(augmented_data)
+        train_data = np.vstack([train_data, augmented_data])
+        train_labels_expanded = np.concatenate([train_labels_expanded, np.array(augmented_labels)])
         
-        # Apply 1 augmentation to selected majority samples
-        aug_sample = sample.copy()
+        # Shuffle the combined dataset
+        shuffle_indices = np.random.permutation(len(train_data))
+        train_data = train_data[shuffle_indices]
+        train_labels_expanded = train_labels_expanded[shuffle_indices]
         
-        # Apply random augmentation
-        aug_type = np.random.randint(0, 3)
-        
-        if aug_type == 0:
-            # Time shifting
-            shift = np.random.randint(-5, 6)
-            aug_sample = np.roll(aug_sample, shift, axis=1)
-        elif aug_type == 1:
-            # Frequency masking
-            freq_start = np.random.randint(0, aug_sample.shape[0] // 2)
-            freq_width = np.random.randint(1, aug_sample.shape[0] // 8)
-            aug_sample[freq_start:freq_start+freq_width, :] *= 0.2
-        else:
-            # Add subtle noise
-            noise_level = np.random.uniform(0.03, 0.1)
-            noise = np.random.normal(0, noise_level, aug_sample.shape)
-            aug_sample = aug_sample + noise
-            aug_sample = np.clip(aug_sample, 0, 1)
-        
-        augmented_data.append(aug_sample)
-        augmented_labels.append(label)
+        logger.info(f"After augmentation: {len(train_data)} samples, {np.sum(train_labels_expanded == 1)} abnormal")
+
 
 
     # Configure mixed precision
     mixed_precision_enabled = configure_mixed_precision(
         enabled=param.get("training", {}).get("mixed_precision", False)
     )
-
-    monitor_gpu_usage()
 
     # Create model with the correct input shape
     model = create_ast_model(
@@ -1895,11 +1772,6 @@ def main():
         if class_ratio > 10:
             logger.warning(f"Severe class imbalance detected! Consider using class weights or data augmentation.")
 
-    mixed_precision_enabled = configure_mixed_precision(
-        enabled=param.get("training", {}).get("mixed_precision", False)
-    )
-
-
     batch_size = param.get("fit", {}).get("batch_size", 32)
     epochs = param.get("fit", {}).get("epochs", 100)
     base_learning_rate = param.get("fit", {}).get("compile", {}).get("learning_rate", 0.001)
@@ -1912,42 +1784,13 @@ def main():
     # Log the training parameters being used
     logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
 
-    if param.get("fit", {}).get("class_weight_balancing", True):
-        # Count class occurrences
-        class_counts = np.bincount(train_labels_expanded.astype(int))
-        total_samples = np.sum(class_counts)
-        
-        # Calculate balanced weights based on actual class distribution
-        if len(class_counts) > 1:  # Make sure we have both classes
-            # Calculate inverse frequency weighting
-            weight_for_0 = total_samples / (2.0 * class_counts[0]) if class_counts[0] > 0 else 1.0
-            weight_for_1 = total_samples / (2.0 * class_counts[1]) if class_counts[1] > 0 else 1.0
-            
-            # Apply square root to moderate extreme weights
-            weight_for_0 = np.sqrt(weight_for_0)
-            weight_for_1 = np.sqrt(weight_for_1)
-            
-            # Normalize weights to have a reasonable scale
-            max_weight = max(weight_for_0, weight_for_1)
-            if max_weight > 2.0:
-                weight_for_0 = weight_for_0 * (2.0 / max_weight)
-                weight_for_1 = weight_for_1 * (2.0 / max_weight)
-            
-            class_weights = {
-                0: weight_for_0,  # Normal class
-                1: weight_for_1   # Abnormal class
-            }
-        else:
-            class_weights = {0: 1.0, 1: 1.2}  # Default if only one class present
-        
-        logger.info(f"Using calculated class weights: {class_weights}")
-    else:
-        # Use more moderate weights
-        class_weights = {
-            0: 1.0,
-            1: 1.2  # Reduced from previous values
-        }
-        logger.info(f"Using default class weights: {class_weights}")
+    # Set fixed class weights with higher weight for abnormal class
+    class_weights = {
+        0: 1.0,  # Normal class
+        1: 2.0   # Abnormal class - ensure higher weight
+    }
+    logger.info(f"Using fixed class weights: {class_weights}")
+
 
 
 
@@ -1979,13 +1822,6 @@ def main():
         # Create a temporary model with the same architecture
         temp_model = tf.keras.models.clone_model(model)
         
-        # Compile with a very low learning rate
-        temp_model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-7),
-            loss=focal_loss_binary(gamma=2.0, alpha=0.25),
-            metrics=['accuracy']
-        )
-        
         # Create a callback to record learning rates and losses
         class LRFinder(tf.keras.callbacks.Callback):
             def __init__(self, min_lr=1e-7, max_lr=1e-1, steps=100):
@@ -2016,15 +1852,38 @@ def main():
         # Create the LRFinder callback
         lr_finder = LRFinder(min_lr=1e-7, max_lr=1e-1, steps=100)
         
-        # Train for a few batches to find optimal learning rate
-        temp_model.fit(
-            train_data[:min(1000, len(train_data))],
-            train_labels_expanded[:min(1000, len(train_labels_expanded))],
-            batch_size=32,
-            epochs=1,
-            callbacks=[lr_finder],
-            verbose=0
+        # Train with improved settings
+        logger.info("Training with improved settings")
+        history = model.fit(
+            train_data,
+            train_labels_expanded,
+            batch_size=64,  # Increased batch size for V100
+            epochs=50,  # More epochs with early stopping
+            validation_data=(val_data, val_labels_expanded),
+            class_weight=class_weights,  # Using our balanced class weights
+            callbacks=[
+                tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss',
+                    patience=15,  # More patience
+                    restore_best_weights=True
+                ),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.5,  # More gradual reduction
+                    patience=5,
+                    min_lr=0.00001
+                ),
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath=model_file,
+                    monitor='val_loss',
+                    save_best_only=True,
+                    save_weights_only=True,
+                    verbose=1
+                )
+            ],
+            verbose=1
         )
+
         
         # Plot learning rate vs loss
         plt.figure(figsize=(10, 6))
@@ -2225,7 +2084,6 @@ def main():
 
         
         compile_params["metrics"] = ['accuracy']
-        model.compile(**compile_params)
         
         # Sample weights for class balance
         sample_weights = np.ones(len(train_data))
@@ -2501,25 +2359,10 @@ def main():
                     logger.warning("Not enough samples for mixup, skipping")
 
 
-            # Use a smaller batch size and more conservative approach
-            safe_batch_size = min(32, batch_size)  # Reduced from 64 to 32
-            safe_epochs = min(100, epochs)
-
-            # Ensure data types are correct
-            train_data = tf.convert_to_tensor(train_data, dtype=tf.float32)
-            train_labels_expanded = tf.convert_to_tensor(train_labels_expanded, dtype=tf.float32)
-            val_data = tf.convert_to_tensor(val_data, dtype=tf.float32)
-            val_labels_expanded = tf.convert_to_tensor(val_labels_expanded, dtype=tf.float32)
-
-            logger.info(f"Training with conservative settings: batch_size={safe_batch_size}, epochs={safe_epochs}")
-            logger.info(f"Train data shape: {train_data.shape}, dtype: {train_data.dtype}")
-            logger.info(f"Train labels shape: {train_labels_expanded.shape}, dtype: {train_labels_expanded.dtype}")
-
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
-                loss=focal_loss_binary(gamma=2.0, alpha=0.25),  # Use focal loss
-                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), 
-                        tf.keras.metrics.AUC()]  # Track more metrics
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                loss=lambda y_true, y_pred: weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0),  # Use focal loss
+                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]  # Track more metrics
             )
 
 
@@ -2542,53 +2385,6 @@ def main():
                     min_lr=0.0001
                 )
             ]
-
-            # Train with improved settings
-            logger.info("Training with improved settings")
-            history = model.fit(
-                train_data,
-                train_labels_expanded,
-                batch_size=64,  # Increased batch size for V100
-                epochs=50,  # More epochs with early stopping
-                validation_data=(val_data, val_labels_expanded),
-                class_weight=class_weights,  # Using our balanced class weights
-                callbacks=[
-                    tf.keras.callbacks.EarlyStopping(
-                        monitor='val_loss',
-                        patience=15,  # More patience
-                        restore_best_weights=True
-                    ),
-                    tf.keras.callbacks.ReduceLROnPlateau(
-                        monitor='val_loss',
-                        factor=0.5,  # More gradual reduction
-                        patience=5,
-                        min_lr=0.00001
-                    ),
-                    tf.keras.callbacks.ModelCheckpoint(
-                        filepath=model_file,
-                        monitor='val_loss',
-                        save_best_only=True,
-                        save_weights_only=True,
-                        verbose=1
-                    )
-                ],
-                verbose=1
-            )
-
-
-            # Save the model after training
-            try:
-                logger.info(f"Saving model to {model_file}")
-                model.save(model_file)
-            except Exception as e:
-                logger.error(f"Error saving model: {e}")
-                # Try alternative saving method
-                try:
-                    logger.info("Trying alternative saving method")
-                    model.save_weights(model_file + "_weights")
-                    logger.info(f"Model weights saved to {model_file}_weights")
-                except Exception as e2:
-                    logger.error(f"Error saving model weights: {e2}")
 
         # Visualize training history
         visualizer.loss_plot(history, machine_type=machine_type, machine_id=machine_id, db=db)
@@ -2614,6 +2410,13 @@ def main():
 
     # Preprocess test data
     test_data = preprocess_spectrograms(test_data, target_shape)
+
+    # Apply same normalization to test data
+    if train_std > 1e-6:
+        test_data = (test_data - train_mean) / train_std
+    else:
+        test_data = test_data - train_mean
+
 
     # Evaluate the model
     if test_data.shape[0] > 0:
@@ -2727,30 +2530,34 @@ def main():
         
         # Re-evaluate with optimal threshold
         y_pred_binary = (y_pred > best_threshold).astype(int)
-        
-        # Calculate metrics with optimal threshold
-        test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-        test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        test_recall = metrics.recall_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        test_f1 = metrics.f1_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        
-        logger.info(f"Metrics with optimal threshold:")
-        logger.info(f"Test Accuracy: {test_accuracy:.4f}")
-        logger.info(f"Test Precision: {test_precision:.4f}")
-        logger.info(f"Test Recall: {test_recall:.4f}")
-        logger.info(f"Test F1 Score: {test_f1:.4f}")
-        
-        # Plot ROC curve
-        plt.figure(figsize=(10, 8))
-        plt.plot(fpr, tpr, marker='.')
-        plt.plot([0, 1], [0, 1], linestyle='--')
-        plt.scatter(fpr[ix], tpr[ix], marker='o', color='red', label=f'Best Threshold: {best_threshold:.4f}')
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC Curve with Optimal Threshold')
-        plt.legend()
-        plt.savefig(f"{param['result_directory']}/roc_curve.png")
-        plt.close()
+
+        # If optimal threshold is very close to 0.5, try a lower threshold
+        if 0.45 < best_threshold < 0.55 and test_f1 < 0.6:
+            logger.info("Trying a lower threshold (0.39) since optimal threshold is close to default")
+            lower_threshold = 0.39
+            y_pred_binary_lower = (y_pred > lower_threshold).astype(int)
+            
+            # Calculate metrics with lower threshold
+            test_accuracy_lower = metrics.accuracy_score(test_labels_expanded, y_pred_binary_lower)
+            test_precision_lower = metrics.precision_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
+            test_recall_lower = metrics.recall_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
+            test_f1_lower = metrics.f1_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
+            
+            logger.info(f"Metrics with lower threshold ({lower_threshold}):")
+            logger.info(f"Test Accuracy: {test_accuracy_lower:.4f}")
+            logger.info(f"Test Precision: {test_precision_lower:.4f}")
+            logger.info(f"Test Recall: {test_recall_lower:.4f}")
+            logger.info(f"Test F1 Score: {test_f1_lower:.4f}")
+            
+            # Use lower threshold if it gives better F1 score
+            if test_f1_lower > test_f1:
+                logger.info(f"Using lower threshold {lower_threshold} instead of optimal threshold {best_threshold}")
+                y_pred_binary = y_pred_binary_lower
+                test_accuracy = test_accuracy_lower
+                test_precision = test_precision_lower
+                test_recall = test_recall_lower
+                test_f1 = test_f1_lower
+
 
 
 

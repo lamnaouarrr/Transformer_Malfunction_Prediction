@@ -28,20 +28,19 @@ import math
 import gc
 
 
-from tensorflow.keras import mixed_precision
+
+from pathlib import Path
 from tqdm import tqdm
 from sklearn import metrics
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.mixture import GaussianMixture
-from pathlib import Path
+from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Reshape, Permute, Concatenate, GlobalAveragePooling1D
 from tensorflow.keras.losses import mse as mean_squared_error
 from tensorflow.keras.regularizers import l2
-from skimage.metrics import structural_similarity as ssim
-from sklearn.metrics import classification_report, confusion_matrix
-from pathlib import Path
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
+from skimage.metrics import structural_similarity as ssim
 from transformers import TFViTModel, ViTConfig
 ########################################################################
 
@@ -915,36 +914,85 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """Create a simpler model that's less prone to overfitting"""
+    """Create an Audio Spectrogram Transformer (AST) model"""
+    if config is None:
+        config = {}
+    
+    # Get transformer configuration
+    transformer_config = config.get("transformer", {})
+    num_heads = transformer_config.get("num_heads", 4)
+    dim_feedforward = transformer_config.get("dim_feedforward", 512)
+    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
+    patch_size = transformer_config.get("patch_size", 4)
+    attention_dropout = transformer_config.get("attention_dropout", 0.1)
+    
+    # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Reshape for CNN
+    # Reshape for patching
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Simple CNN blocks
-    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.ReLU()(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    # Patch embedding
+    # First, use Conv2D to create patches
+    patch_dim = dim_feedforward // 2
+    x = tf.keras.layers.Conv2D(
+        filters=patch_dim,
+        kernel_size=patch_size,
+        strides=patch_size,
+        padding='same',
+        name='patch_embedding'
+    )(x)
     
-    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.ReLU()(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    # Reshape for transformer: (batch_size, seq_len, dim)
+    batch_size = tf.shape(x)[0]
+    h = tf.shape(x)[1]
+    w = tf.shape(x)[2]
+    c = tf.shape(x)[3]
     
-    # Global pooling and output
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dense(64)(x)
-    x = tf.keras.layers.ReLU()(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    # Calculate sequence length and embedding dimension
+    seq_len = h * w
+    embed_dim = c
     
-    # Output with bias toward abnormal class
-    outputs = tf.keras.layers.Dense(1, activation='sigmoid', 
-                                   bias_initializer=tf.keras.initializers.Constant(0.2))(x)
+    # Reshape to (batch_size, seq_len, embed_dim)
+    x = tf.keras.layers.Reshape((seq_len, embed_dim))(x)
+    
+    # Add positional encoding
+    pos_encoding = positional_encoding(seq_len, embed_dim)
+    x = x + pos_encoding
+    
+    # Apply transformer encoder layers
+    for _ in range(num_encoder_layers):
+        # Multi-head attention
+        attn_output = tf.keras.layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=embed_dim // num_heads,
+            dropout=attention_dropout
+        )(x, x)
+        
+        # Add & Norm
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x + attn_output)
+        
+        # Feed-forward network
+        ffn = tf.keras.Sequential([
+            tf.keras.layers.Dense(dim_feedforward, activation='gelu'),
+            tf.keras.layers.Dropout(0.1),
+            tf.keras.layers.Dense(embed_dim)
+        ])
+        
+        # Add & Norm
+        ffn_output = ffn(x)
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x + ffn_output)
+    
+    # Global average pooling
+    x = tf.keras.layers.GlobalAveragePooling1D()(x)
+    
+    # Final classification head
+    x = tf.keras.layers.Dense(256, activation='gelu')(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+
 
 
 def preprocess_spectrograms(spectrograms, target_shape):
@@ -1288,84 +1336,6 @@ def create_small_dataset(files, labels, max_files=100):
         indices = np.random.choice(len(files), min(max_files, len(files)), replace=False)
         return [files[i] for i in indices], labels[indices] if labels is not None else None
 
-
-def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, min_lr=1e-6, max_lr=1e-2, epochs=1):
-    """
-    Find the optimal learning rate by training with exponentially increasing learning rate
-    """
-    # Number of batches in one epoch
-    num_batches = max(1, len(train_data) // batch_size)
-    # Total number of steps
-    total_steps = max(1, num_batches * epochs)
-    
-    # Create a list to store learning rates and losses
-    learning_rates = []
-    losses = []
-    
-    # Create a new model with the same architecture
-    temp_model = tf.keras.models.clone_model(model)
-    
-    # Define a callback to record learning rates and losses
-    class LRFinder(tf.keras.callbacks.Callback):
-        def on_batch_end(self, batch, logs=None):
-            # Get the current learning rate
-            lr = tf.keras.backend.get_value(self.model.optimizer.lr)
-            # Record the learning rate and loss
-            learning_rates.append(lr)
-            losses.append(logs['loss'])
-            # Update the learning rate
-            tf.keras.backend.set_value(
-                self.model.optimizer.lr, 
-                lr * (max_lr / min_lr) ** (1 / total_steps)
-            )
-    
-    # Train the model with increasing learning rate
-    temp_model.fit(
-        train_data, train_labels,
-        batch_size=batch_size,
-        epochs=epochs,
-        callbacks=[LRFinder()],
-        verbose=1
-    )
-    
-    # Plot the learning rate vs loss
-    plt.figure(figsize=(10, 6))
-    plt.plot(learning_rates, losses)
-    plt.xscale('log')
-    plt.xlabel('Learning Rate')
-    plt.ylabel('Loss')
-    plt.title('Learning Rate Finder')
-    plt.savefig('./result/result_AST/learning_rate_finder.png')
-    
-    # Find the optimal learning rate (where loss is still decreasing but before it explodes)
-    # Smooth the loss curve
-    window_size = min(5, len(losses) // 5)
-    if window_size > 0:
-        smoothed_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
-        # Find the point of steepest descent
-        gradients = np.gradient(smoothed_losses)
-        optimal_idx = np.argmin(gradients)
-        # Map back to original array
-        optimal_idx = min(optimal_idx + window_size // 2, len(learning_rates) - 1)
-    else:
-        # If we don't have enough points, just use a reasonable default
-        optimal_idx = len(learning_rates) // 2
-    
-    # Ensure we have a valid index
-    if optimal_idx >= len(learning_rates):
-        optimal_idx = len(learning_rates) - 1
-    
-    optimal_lr = learning_rates[optimal_idx]
-    # Ensure the learning rate is reasonable
-    if optimal_lr < 1e-5:
-        logger.warning(f"Optimal learning rate too small: {optimal_lr}, using default")
-        optimal_lr = 0.0005  # Use a reasonable default
-    
-    logger.info(f"Optimal learning rate found: {optimal_lr:.6f}")
-    
-    return optimal_lr
-
-
 def weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0):
     # Clip predictions for numerical stability
     epsilon = tf.keras.backend.epsilon()
@@ -1414,19 +1384,17 @@ def main():
         logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
         logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
     
-        # Configure GPU memory for V100 32GB
+    # Configure GPU memory for V100 32GB
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
-            # Allow TensorFlow to use most of the V100's 32GB memory
+            # Allow TensorFlow to allocate memory as needed, but set a growth limit
             for gpu in gpus:
-                tf.config.experimental.set_virtual_device_configuration(
-                    gpu,
-                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 28)]  # 28GB limit (leaving some headroom)
-                )
-            logger.info("GPU memory limit set to 28GB for V100")
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info("GPU memory growth enabled for V100")
         except RuntimeError as e:
-            logger.error(f"Error setting GPU memory limit: {e}")
+            logger.error(f"Error setting GPU memory growth: {e}")
+
 
 
     with open("baseline_AST.yaml", "r") as stream:
@@ -1934,10 +1902,12 @@ def main():
         if early_stopping_config.get("enabled", False):
             callbacks.append(tf.keras.callbacks.EarlyStopping(
                 monitor=early_stopping_config.get("monitor", "val_loss"),
-                patience=20,  # Increase patience to allow more training
+                patience=20,
                 min_delta=early_stopping_config.get("min_delta", 0.001),
-                restore_best_weights=True
+                restore_best_weights=True,
+                verbose=1
             ))
+
 
         callbacks.append(TerminateOnNaN(patience=3))
         logger.info("Added NaN detection callback")
@@ -1969,6 +1939,7 @@ def main():
                 monitor=checkpoint_config.get("monitor", "val_accuracy"),
                 mode=checkpoint_config.get("mode", "max"),
                 save_best_only=checkpoint_config.get("save_best_only", True),
+                save_format='tf',
                 verbose=1
             ))
 
@@ -2208,7 +2179,7 @@ def main():
                             early_stopping_callback.best = current
                             early_stopping_callback.wait = 0
                             # Save best model
-                            model.save(model_file)
+                            model.save(model_file, save_format='tf')
                             logger.info(f"Saved best model at epoch {epoch+1}")
                         else:
                             early_stopping_callback.wait += 1
@@ -2220,7 +2191,7 @@ def main():
                             early_stopping_callback.best = current
                             early_stopping_callback.wait = 0
                             # Save best model
-                            model.save(model_file)
+                            model.save(model_file, save_format='tf')
                             logger.info(f"Saved best model at epoch {epoch+1}")
                         else:
                             early_stopping_callback.wait += 1

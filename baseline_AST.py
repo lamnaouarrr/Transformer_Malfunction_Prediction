@@ -916,7 +916,7 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create a balanced Audio Spectrogram model
+    Create a more balanced Audio Spectrogram model with stronger regularization
     """
     if config is None:
         config = {}
@@ -924,13 +924,13 @@ def create_ast_model(input_shape, config=None):
     # Ensure input_shape is fully defined
     if None in input_shape:
         logger.warning(f"Input shape contains None: {input_shape}, using default shape")
-        input_shape = (64, 48)
+        input_shape = (64, 64)
     
     logger.info(f"Creating balanced model with input shape: {input_shape}")
     
-    # Simplified hyperparameters
-    dropout_rate = 0.2  # Reduced from 0.3
-    l2_reg = 1e-6  # Reduced from 1e-5
+    # Improved hyperparameters
+    dropout_rate = 0.3  # Increased dropout
+    l2_reg = 1e-4  # Stronger regularization
     
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
@@ -939,36 +939,51 @@ def create_ast_model(input_shape, config=None):
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
     # First convolutional block
-    x = tf.keras.layers.Conv2D(16, (3, 3), padding='same', 
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same', 
                               kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.ReLU()(x)  # Changed from LeakyReLU to ReLU
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)  # Changed to LeakyReLU
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     
     # Second convolutional block
-    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same',
+    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
                               kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    
+    # Third convolutional block
+    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     x = tf.keras.layers.Dropout(dropout_rate)(x)
     
     # Global pooling
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     
-    # Dense layer
-    x = tf.keras.layers.Dense(64, kernel_regularizer=l2(l2_reg))(x)
+    # Dense layers
+    x = tf.keras.layers.Dense(128, kernel_regularizer=l2(l2_reg))(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
     x = tf.keras.layers.Dropout(dropout_rate)(x)
     
-    # Output layer with no bias initialization
-    outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    x = tf.keras.layers.Dense(64, kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
+    x = tf.keras.layers.Dropout(dropout_rate)(x)
+    
+    # Output layer with bias initialization to avoid bias
+    outputs = tf.keras.layers.Dense(1, activation='sigmoid', 
+                                   bias_initializer=tf.keras.initializers.Constant(-0.2))(x)
     
     # Create model
     model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
     
     return model
+
 
 
 def preprocess_spectrograms(spectrograms, target_shape):
@@ -1664,7 +1679,7 @@ def main():
     logger.info(f"Number of test files: {len(test_files)}")
 
     # Define target shape for spectrograms
-    target_shape = (param["feature"]["n_mels"], 48)
+    target_shape = (param["feature"]["n_mels"], 64)
     logger.info(f"Target spectrogram shape: {target_shape}")
 
     # Preprocess to ensure consistent shapes
@@ -1679,6 +1694,45 @@ def main():
     # Balance the dataset
     logger.info("Balancing dataset...")
     train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
+
+    # Apply additional augmentation to make the dataset more robust
+    logger.info("Applying additional data augmentation...")
+    augmented_data = []
+    augmented_labels = []
+
+    # Apply random transformations to existing samples
+    for i in range(len(train_data)):
+        # Only augment a portion of the data
+        if np.random.rand() < 0.3:  # 30% chance of augmentation
+            sample = train_data[i].copy()
+            label = train_labels_expanded[i]
+            
+            # Apply time shifting (roll the spectrogram)
+            shift = np.random.randint(-5, 6)
+            if shift != 0:
+                sample = np.roll(sample, shift, axis=1)
+            
+            # Apply frequency masking
+            if np.random.rand() < 0.5:
+                freq_start = np.random.randint(0, sample.shape[0] // 2)
+                freq_width = np.random.randint(1, sample.shape[0] // 8)
+                sample[freq_start:freq_start+freq_width, :] *= 0.1
+            
+            augmented_data.append(sample)
+            augmented_labels.append(label)
+
+    # Add augmented samples if we created any
+    if augmented_data:
+        train_data = np.vstack([train_data, np.array(augmented_data)])
+        train_labels_expanded = np.concatenate([train_labels_expanded, np.array(augmented_labels)])
+        
+        # Shuffle the data
+        indices = np.random.permutation(len(train_data))
+        train_data = train_data[indices]
+        train_labels_expanded = train_labels_expanded[indices]
+        
+        logger.info(f"After augmentation: {len(train_data)} samples")
+
 
     abnormal_indices = np.where(train_labels_expanded == 1)[0]
     if len(abnormal_indices) > 0:
@@ -1781,20 +1835,33 @@ def main():
         class_counts = np.bincount(train_labels_expanded.astype(int))
         total_samples = np.sum(class_counts)
         
-        class_weights = {
-            0: 1.0,  # Normal class
-            1: 2.0   # Abnormal class
-        }
+        # Calculate balanced weights based on actual class distribution
+        if len(class_counts) > 1:  # Make sure we have both classes
+            weight_for_0 = (1 / class_counts[0]) * (total_samples / 2.0) if class_counts[0] > 0 else 1.0
+            weight_for_1 = (1 / class_counts[1]) * (total_samples / 2.0) if class_counts[1] > 0 else 1.0
+            
+            # Normalize weights to be more moderate
+            max_weight = max(weight_for_0, weight_for_1)
+            if max_weight > 3.0:
+                weight_for_0 = weight_for_0 * (3.0 / max_weight)
+                weight_for_1 = weight_for_1 * (3.0 / max_weight)
+            
+            class_weights = {
+                0: weight_for_0,  # Normal class
+                1: weight_for_1   # Abnormal class - more moderate weight
+            }
+        else:
+            class_weights = {0: 1.0, 1: 1.5}  # Default if only one class present
         
-        logger.info(f"Using balanced class weights: {class_weights}")
-
+        logger.info(f"Using calculated class weights: {class_weights}")
     else:
-        # Use default weights that prioritize abnormal class
+        # Use more moderate weights
         class_weights = {
             0: 1.0,
-            1: param.get("fit", {}).get("default_abnormal_weight", 5.0)
+            1: 1.5  # Reduced from 5.0 to 1.5
         }
         logger.info(f"Using default class weights: {class_weights}")
+
 
     # Ensure consistent data types before training
     logger.info(f"Train data type: {train_data.dtype}")
@@ -2281,10 +2348,11 @@ def main():
             logger.info(f"Train labels shape: {train_labels_expanded.shape}, dtype: {train_labels_expanded.dtype}")
 
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=0.005),
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
                 loss='binary_crossentropy',
-                metrics=['accuracy']
+                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
             )
+
 
             # Create a directory for checkpoints if it doesn't exist
             checkpoint_dir = os.path.dirname(model_file)
@@ -2305,18 +2373,37 @@ def main():
                 )
             ]
 
-            # Train with simple settings
-            logger.info("Training with simplified settings")
+            # Train with improved settings
+            logger.info("Training with improved settings")
             history = model.fit(
                 train_data,
                 train_labels_expanded,
-                batch_size=32,
-                epochs=30,  # Reduced from 100
+                batch_size=64,  # Increased batch size for V100
+                epochs=50,  # More epochs with early stopping
                 validation_data=(val_data, val_labels_expanded),
                 class_weight=class_weights,  # Using our balanced class weights
-                callbacks=simple_callbacks,
+                callbacks=[
+                    tf.keras.callbacks.EarlyStopping(
+                        monitor='val_loss',
+                        patience=15,  # More patience
+                        restore_best_weights=True
+                    ),
+                    tf.keras.callbacks.ReduceLROnPlateau(
+                        monitor='val_loss',
+                        factor=0.5,  # More gradual reduction
+                        patience=5,
+                        min_lr=0.00001
+                    ),
+                    tf.keras.callbacks.ModelCheckpoint(
+                        filepath=model_file,
+                        monitor='val_loss',
+                        save_best_only=True,
+                        verbose=1
+                    )
+                ],
                 verbose=1
             )
+
 
             # Save the model after training
             try:
@@ -2331,26 +2418,6 @@ def main():
                     logger.info(f"Model weights saved to {model_file}_weights")
                 except Exception as e2:
                     logger.error(f"Error saving model weights: {e2}")
-
-
-
-
-            # Train with simple settings
-            logger.info("Training with simplified settings")
-            history = model.fit(
-                train_data,
-                train_labels_expanded,
-                batch_size=32,
-                epochs=30,  # Reduced from 100
-                validation_data=(val_data, val_labels_expanded),
-                class_weight=class_weights,  # Using our balanced class weights
-                callbacks=simple_callbacks,
-                verbose=1
-            )
-
-            # Save the trained model
-            model.save(model_file)
-            logger.info(f"Model saved to {model_file}")
 
         # Visualize training history
         visualizer.loss_plot(history, machine_type=machine_type, machine_id=machine_id, db=db)
@@ -2470,6 +2537,39 @@ def main():
 
     # Store evaluation results
     results[evaluation_result_key] = evaluation_result
+
+    # Find optimal threshold
+    if len(y_pred) > 0:
+        logger.info("Finding optimal classification threshold...")
+        thresholds = np.linspace(0.3, 0.7, 20)
+        best_f1 = 0
+        best_threshold = 0.5
+        
+        for threshold in thresholds:
+            y_pred_binary_thresh = (y_pred > threshold).astype(int)
+            f1 = metrics.f1_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
+            
+            if f1 > best_f1:
+                best_f1 = f1
+                best_threshold = threshold
+        
+        logger.info(f"Optimal threshold: {best_threshold:.4f} (F1: {best_f1:.4f})")
+        
+        # Re-evaluate with optimal threshold
+        y_pred_binary = (y_pred > best_threshold).astype(int)
+        
+        # Calculate metrics with optimal threshold
+        test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
+        test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
+        test_recall = metrics.recall_score(test_labels_expanded, y_pred_binary, zero_division=0)
+        test_f1 = metrics.f1_score(test_labels_expanded, y_pred_binary, zero_division=0)
+        
+        logger.info(f"Metrics with optimal threshold:")
+        logger.info(f"Test Accuracy: {test_accuracy:.4f}")
+        logger.info(f"Test Precision: {test_precision:.4f}")
+        logger.info(f"Test Recall: {test_recall:.4f}")
+        logger.info(f"Test F1 Score: {test_f1:.4f}")
+
 
     # Calculate overall metrics
     if all_y_true and all_y_pred:

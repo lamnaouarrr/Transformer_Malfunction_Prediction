@@ -2290,7 +2290,7 @@ def main():
             checkpoint_dir = os.path.dirname(model_file)
             os.makedirs(checkpoint_dir, exist_ok=True)
 
-            # Define callbacks with fixed ModelCheckpoint
+            # Define callbacks without ModelCheckpoint
             simple_callbacks = [
                 tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss',
@@ -2302,15 +2302,42 @@ def main():
                     factor=0.5,
                     patience=3,
                     min_lr=0.0001
-                ),
-                # Fix the ModelCheckpoint callback
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=model_file,
-                    monitor='val_accuracy',
-                    save_best_only=True,
-                    save_weights_only=False  # Save the entire model
                 )
             ]
+
+            # Add a custom callback to save the model
+            class SaveModelCallback(tf.keras.callbacks.Callback):
+                def __init__(self, filepath, monitor='val_loss', mode='min'):
+                    super(SaveModelCallback, self).__init__()
+                    self.filepath = filepath
+                    self.monitor = monitor
+                    self.best = float('inf') if mode == 'min' else -float('inf')
+                    self.mode = mode
+                    
+                def on_epoch_end(self, epoch, logs=None):
+                    logs = logs or {}
+                    current = logs.get(self.monitor)
+                    if current is None:
+                        return
+                        
+                    if (self.mode == 'min' and current < self.best) or (self.mode == 'max' and current > self.best):
+                        logger.info(f"Epoch {epoch+1}: {self.monitor} improved from {self.best} to {current}, saving model")
+                        self.best = current
+                        try:
+                            # Save the model without options
+                            self.model.save(self.filepath)
+                        except Exception as e:
+                            logger.error(f"Error saving model: {e}")
+
+            # Add the custom callback
+            if param.get("fit", {}).get("checkpointing", {}).get("enabled", True):
+                mode = 'max' if 'accuracy' in param.get("fit", {}).get("checkpointing", {}).get("monitor", "val_accuracy") else 'min'
+                simple_callbacks.append(SaveModelCallback(
+                    filepath=model_file,
+                    monitor=param.get("fit", {}).get("checkpointing", {}).get("monitor", "val_accuracy"),
+                    mode=mode
+                ))
+
 
 
             # Train with simple settings

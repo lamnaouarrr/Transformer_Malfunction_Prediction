@@ -1654,12 +1654,10 @@ def main():
     # Log the training parameters being used
     logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
 
-    # For class weights, check if they're already being calculated in your existing code
-    # If you want to ensure abnormal class gets higher weight, you can adjust the calculation:
     if param.get("fit", {}).get("class_weight_balancing", True):
-        lass_weights = {
+        lass_weights = {  # <-- This is the typo
             0: 1.0,  # Normal class
-            1: 10.0  # Abnormal class - increase weight significantly
+            1: 10.0  # Abnormal class
         }
         logger.info(f"Using modified class weights to prioritize abnormal detection: {class_weights}")
         # Count class occurrences
@@ -1677,6 +1675,7 @@ def main():
         }
         
         logger.info(f"Using calculated class weights: {class_weights}")
+
     else:
         # Use default weights that prioritize abnormal class
         class_weights = {

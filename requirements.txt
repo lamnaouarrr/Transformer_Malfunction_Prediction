@@ -1,6 +1,6 @@
 # Minimal package to use MIMII dataset baseline
 #tensorflow==2.10.0  # Updated for compatibility with newer NumPy
-numpy==1.23.5  # Compatible with both TF 2.10.0 and Numba
+numpy==1.23.5
 protobuf
 matplotlib>=3.7.0
 PyYAML==6.0
@@ -16,3 +16,4 @@ tensorflow-addons>=0.23.0
 transformers
 tensorflow>=2.13.0
 tensorflow-addons
+tf-keras

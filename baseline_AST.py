@@ -85,74 +85,32 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
     Create positional encodings for the transformer model
     
     Args:
-        seq_len: sequence length (can be a tensor or int)
-        d_model: depth of the model
+        seq_len: sequence length (int)
+        d_model: depth of the model (int)
         encoding_type: type of positional encoding
         
     Returns:
-        Positional encoding matrix
+        Positional encoding tensor with shape (1, seq_len, d_model)
     """
-    # For dynamic tensors, use a simpler approach
-    if tf.is_tensor(seq_len):
-        # Create a fixed-size positional encoding that will work for any reasonable sequence length
-        max_len = 1024  # Large enough for most applications
-        
-        # Create position vector
-        position = tf.range(max_len, dtype=tf.float32)
-        position = tf.expand_dims(position, axis=1)  # (max_len, 1)
-        
-        # Create dimension vector
-        div_term = tf.range(0, d_model, 2, dtype=tf.float32)
-        div_term = tf.math.pow(10000.0, div_term / tf.cast(d_model, tf.float32))
-        div_term = 1.0 / div_term  # (d_model/2,)
-        
-        # Compute angles
-        angles = tf.matmul(position, tf.expand_dims(div_term, axis=0))  # (max_len, d_model/2)
-        
-        # Create encoding
-        pe = tf.zeros([max_len, d_model], dtype=tf.float32)
-        
-        # Even indices: sin
-        pe_sin = tf.sin(angles)
-        # Odd indices: cos
-        pe_cos = tf.cos(angles)
-        
-        # Interleave sin and cos values
-        indices = tf.range(0, d_model, delta=2)
-        updates = tf.reshape(pe_sin, [-1])
-        pe = tf.tensor_scatter_nd_update(
-            pe, 
-            tf.stack([
-                tf.repeat(tf.range(max_len), tf.shape(indices)[0]),
-                tf.tile(indices, [max_len])
-            ], axis=1),
-            updates
-        )
-        
-        indices = tf.range(1, d_model, delta=2)
-        updates = tf.reshape(pe_cos, [-1])
-        pe = tf.tensor_scatter_nd_update(
-            pe, 
-            tf.stack([
-                tf.repeat(tf.range(max_len), tf.shape(indices)[0]),
-                tf.tile(indices, [max_len])
-            ], axis=1),
-            updates
-        )
-        
-        # Add batch dimension and slice to required length
-        pe = tf.expand_dims(pe[:seq_len], axis=0)
-        return pe
-    
-    # For concrete values, use the simpler NumPy implementation
+    # Create position vector
     positions = np.arange(seq_len)[:, np.newaxis]
-    div_term = np.exp(np.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
     
-    pos_encoding = np.zeros((seq_len, d_model))
-    pos_encoding[:, 0::2] = np.sin(positions * div_term)
-    pos_encoding[:, 1::2] = np.cos(positions * div_term)
+    # Create dimension vector
+    div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
     
-    return tf.cast(tf.expand_dims(pos_encoding, 0), dtype=tf.float32)
+    # Create encoding
+    pe = np.zeros((seq_len, d_model))
+    
+    # Apply sin to even indices
+    pe[:, 0::2] = np.sin(positions * div_term)
+    
+    # Apply cos to odd indices
+    pe[:, 1::2] = np.cos(positions * div_term)
+    
+    # Add batch dimension and convert to tensor
+    pe = np.expand_dims(pe, axis=0)
+    
+    return tf.cast(pe, dtype=tf.float32)
 
 
 
@@ -926,72 +884,67 @@ def create_ast_model(input_shape, config=None):
     patch_size = transformer_config.get("patch_size", 4)
     attention_dropout = transformer_config.get("attention_dropout", 0.1)
     
+    # Calculate sequence length and embedding dimension based on input shape and patch size
+    # Use static values instead of dynamic ones
+    h_patches = input_shape[0] // patch_size
+    w_patches = input_shape[1] // patch_size
+    seq_len = h_patches * w_patches
+    embed_dim = dim_feedforward
+    
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
     # Reshape for patching
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Patch embedding
-    # First, use Conv2D to create patches
-    patch_dim = dim_feedforward // 2
+    # Patch embedding using Conv2D
     x = tf.keras.layers.Conv2D(
-        filters=patch_dim,
+        filters=embed_dim,
         kernel_size=patch_size,
         strides=patch_size,
         padding='same',
         name='patch_embedding'
     )(x)
     
-    # Reshape for transformer: (batch_size, seq_len, dim)
-    batch_size = tf.shape(x)[0]
-    h = tf.shape(x)[1]
-    w = tf.shape(x)[2]
-    c = tf.shape(x)[3]
-    
-    # Calculate sequence length and embedding dimension
-    seq_len = h * w
-    embed_dim = c
-    
-    # Reshape to (batch_size, seq_len, embed_dim)
+    # Reshape to sequence format for transformer
     x = tf.keras.layers.Reshape((seq_len, embed_dim))(x)
     
     # Add positional encoding
-    pos_encoding = positional_encoding(seq_len, embed_dim)
-    x = x + pos_encoding
+    # Create a static positional encoding
+    pos_encoding = positional_encoding(seq_len, embed_dim, encoding_type="sinusoidal")
+    x = tf.keras.layers.Add()([x, pos_encoding])
     
     # Apply transformer encoder layers
-    for _ in range(num_encoder_layers):
-        # Multi-head attention
+    for i in range(num_encoder_layers):
+        # Multi-head attention block
         attn_output = tf.keras.layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=embed_dim // num_heads,
-            dropout=attention_dropout
+            dropout=attention_dropout,
+            name=f'encoder_mha_{i}'
         )(x, x)
         
         # Add & Norm
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x + attn_output)
+        x = tf.keras.layers.Add()([x, attn_output])
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
         # Feed-forward network
-        ffn = tf.keras.Sequential([
-            tf.keras.layers.Dense(dim_feedforward, activation='gelu'),
-            tf.keras.layers.Dropout(0.1),
-            tf.keras.layers.Dense(embed_dim)
-        ])
+        ffn_output = tf.keras.layers.Dense(dim_feedforward * 4, activation='gelu')(x)
+        ffn_output = tf.keras.layers.Dense(embed_dim)(ffn_output)
         
         # Add & Norm
-        ffn_output = ffn(x)
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x + ffn_output)
+        x = tf.keras.layers.Add()([x, ffn_output])
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
     
     # Global average pooling
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
     # Final classification head
-    x = tf.keras.layers.Dense(256, activation='gelu')(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    x = tf.keras.layers.Dropout(0.1)(x)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+
 
 
 

@@ -61,6 +61,10 @@ def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
     """
     Focal loss for addressing class imbalance with improved numerical stability
     """
+    # Convert inputs to float32
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
     # Clip predictions to prevent numerical instability
     epsilon = K.epsilon()
     y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
@@ -77,8 +81,6 @@ def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
     focal_loss = alpha_factor * modulating_factor * bce
     
     return K.mean(focal_loss)
-
-
 
 def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
     """
@@ -111,8 +113,6 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
     pe = np.expand_dims(pe, axis=0)
     
     return tf.cast(pe, dtype=tf.float32)
-
-
 
 ########################################################################
 # setup STD I/O
@@ -400,8 +400,6 @@ def file_to_spectrogram(file_name,
         logger.error(f"Error in file_to_spectrogram for {file_name}: {e}")
         return None
 
-
-
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
 
     """
@@ -495,8 +493,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     if labels is not None:
         return spectrograms, processed_labels
     return spectrograms
-
-
 
 def dataset_generator(target_dir, param=None):
     """
@@ -743,7 +739,6 @@ def dataset_generator(target_dir, param=None):
 
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
-
 def configure_mixed_precision(enabled=True):
     """
     Configure mixed precision training optimized for V100 GPU.
@@ -782,7 +777,6 @@ def configure_mixed_precision(enabled=True):
         except:
             pass
         return False
-
 
 class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
     """
@@ -834,7 +828,6 @@ def get_scaled_learning_rate(base_lr, batch_size, base_batch_size=32):
     """
     return base_lr * (batch_size / base_batch_size)
 
-
 class TerminateOnNaN(tf.keras.callbacks.Callback):
     """
     Callback that terminates training when a NaN loss is encountered
@@ -865,8 +858,6 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
         else:
             # Reset counter if we see a valid loss
             self.nan_epochs = 0
-
-
 
 ########################################################################
 # model
@@ -1031,8 +1022,6 @@ def create_ast_model(input_shape, config=None):
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
-
-
 def preprocess_spectrograms(spectrograms, target_shape):
     """
     Resize all spectrograms to a consistent shape.
@@ -1143,7 +1132,6 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
     
     return balanced_data, balanced_labels
 
-
 def mixup_data(x, y, alpha=0.2):
     """
     Applies mixup augmentation to the data with improved stability
@@ -1167,8 +1155,8 @@ def mixup_data(x, y, alpha=0.2):
     lam_y = np.reshape(lam, (batch_size,))
     mixed_y = lam_y * y + (1 - lam_y) * y[index]
     
-    return mixed_x, mixed_y
-
+    # Ensure consistent dtype
+    return mixed_x.astype(np.float32), mixed_y.astype(np.float32)
 
 def normalize_spectrograms(spectrograms, method="minmax"):
     """
@@ -1205,7 +1193,6 @@ def normalize_spectrograms(spectrograms, method="minmax"):
         logger.warning(f"Unknown normalization method: {method}, returning original data")
         return spectrograms
 
-
 def monitor_gpu_usage():
     """
     Monitor GPU memory usage and log it
@@ -1224,7 +1211,6 @@ def monitor_gpu_usage():
     except Exception as e:
         logger.warning(f"Failed to monitor GPU usage: {e}")
         return None, None, None
-
 
 def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=None):
     """
@@ -1342,7 +1328,7 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     Create a TensorFlow dataset that streams and processes audio files on-the-fly
     """
     if labels is not None:
-        labels = np.array(labels)
+        labels = np.array(labels, dtype=np.float32)  # Ensure float32 dtype
     
     # Function to load and process a single file
     def process_file(file_path, label=None):
@@ -1391,7 +1377,12 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             if np.max(spec) > np.min(spec):
                 spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
             
-            return spec.astype(np.float32), label
+            # Ensure float32 dtype
+            spec = spec.astype(np.float32)
+            if label is not None:
+                label = np.float32(label)
+                
+            return spec, label
         
         # Wrap the function to handle TensorFlow tensors
         result = tf.py_function(
@@ -1407,25 +1398,6 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             result[1].set_shape(())
             return result[0], result[1]
         return result[0]
-    
-    # Create the dataset
-    if labels is not None:
-        dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
-        dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
-    else:
-        dataset = tf.data.Dataset.from_tensor_slices(file_list)
-        dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=tf.data.AUTOTUNE)
-    
-    # Apply dataset transformations
-    if is_training:
-        dataset = dataset.shuffle(buffer_size=min(len(file_list), 10000))
-    
-    # Batch and prefetch
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    
-    return dataset
-
 
 
 def create_small_dataset(files, labels, max_files=100):
@@ -1465,6 +1437,11 @@ def create_small_dataset(files, labels, max_files=100):
         return [files[i] for i in indices], labels[indices] if labels is not None else None
 
 def weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0):
+    # Convert inputs to float32
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    pos_weight = tf.cast(pos_weight, tf.float32)
+    
     # Clip predictions for numerical stability
     epsilon = tf.keras.backend.epsilon()
     y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
@@ -1475,8 +1452,6 @@ def weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0):
     
     return tf.reduce_mean(loss)
 
-
-# Create a learning rate scheduler with warmup
 def create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50, min_lr=0.00001):
     def lr_schedule(epoch):
         # Warmup phase
@@ -1489,6 +1464,53 @@ def create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50, min_l
         return min_lr + (initial_lr - min_lr) * cosine_decay
     
     return lr_schedule
+
+@tf.function
+def train_step_with_accumulation(model, optimizer, loss_fn, x, y, accumulated_gradients, first_batch, accum_steps):
+    # Cast inputs to float32
+    x = tf.cast(x, tf.float32)
+    y = tf.cast(y, tf.float32)
+    
+    with tf.GradientTape() as tape:
+        # Forward pass
+        y_pred = model(x, training=True)
+        # Compute loss
+        loss = loss_fn(y, y_pred)
+        # Scale loss by accumulation steps
+        scaled_loss = loss / tf.cast(accum_steps, tf.float32)
+    
+    # Compute gradients
+    gradients = tape.gradient(scaled_loss, model.trainable_variables)
+    
+    # If this is the first batch in an accumulation cycle, reset the accumulated gradients
+    if first_batch:
+        for i in range(len(accumulated_gradients)):
+            accumulated_gradients[i].assign(tf.zeros_like(model.trainable_variables[i], dtype=tf.float32))
+    
+    # Accumulate gradients
+    for i in range(len(accumulated_gradients)):
+        accumulated_gradients[i].assign_add(tf.cast(gradients[i], tf.float32))
+    
+    # Compute accuracy
+    accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(y_pred), y), tf.float32))
+    
+    return loss, accuracy
+
+@tf.function
+def val_step(model, loss_fn, x, y):
+    # Cast inputs to float32
+    x = tf.cast(x, tf.float32)
+    y = tf.cast(y, tf.float32)
+    
+    # Forward pass
+    y_pred = model(x, training=False)
+    # Compute loss
+    loss = loss_fn(y, y_pred)
+    # Compute accuracy
+    accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(y_pred), y), tf.float32))
+    
+    return loss, accuracy
+
 
 
 def implement_progressive_training(model, train_files, train_labels, val_files, val_labels, param):
@@ -1619,8 +1641,6 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
     
     return model, all_history
 
-
-
 ########################################################################
 # main
 ########################################################################
@@ -1640,16 +1660,23 @@ def main():
         logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
         logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
     
-    # Configure GPU memory for V100 32GB
+    # Configure memory growth for V100 32GB
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
             # Allow TensorFlow to allocate memory as needed, but set a growth limit
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info("GPU memory growth enabled for V100")
+            
+            # Set memory limit to 30GB (leaving some headroom)
+            tf.config.experimental.set_virtual_device_configuration(
+                gpus[0],
+                [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=30 * 1024)]
+            )
+            logger.info("GPU memory configuration set for V100 32GB")
         except RuntimeError as e:
-            logger.error(f"Error setting GPU memory growth: {e}")
+            logger.error(f"Error setting GPU memory configuration: {e}")
+
 
     with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
@@ -1946,8 +1973,16 @@ def main():
 
     if use_streaming:
         logger.info("Using streaming data pipeline with tf.data")
+        # Ensure all labels are float32
+        if train_labels is not None:
+            train_labels = np.array(train_labels, dtype=np.float32)
+        if val_labels is not None:
+            val_labels = np.array(val_labels, dtype=np.float32)
+        if test_labels is not None:
+            test_labels = np.array(test_labels, dtype=np.float32)
         # Create TensorFlow datasets
-        batch_size = param.get("fit", {}).get("batch_size", 16)
+        batch_size = param.get("fit", {}).get("batch_size", 32)
+        logger.info(f"Using batch size {batch_size} optimized for V100 32GB")
         train_dataset = create_tf_dataset(
             train_files, 
             train_labels, 
@@ -2010,6 +2045,8 @@ def main():
         0: 1.0,  # Normal class
         1: 2.0   # Abnormal class - ensure higher weight
     }
+    # Convert keys to integers to avoid dtype issues
+    class_weights = {int(k): float(v) for k, v in class_weights.items()}
     logger.info(f"Using fixed class weights: {class_weights}")
 
     # Ensure consistent data types before training

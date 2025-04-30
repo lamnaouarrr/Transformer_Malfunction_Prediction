@@ -1655,11 +1655,6 @@ def main():
     logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
 
     if param.get("fit", {}).get("class_weight_balancing", True):
-        lass_weights = {  # <-- This is the typo
-            0: 1.0,  # Normal class
-            1: 10.0  # Abnormal class
-        }
-        logger.info(f"Using modified class weights to prioritize abnormal detection: {class_weights}")
         # Count class occurrences
         class_counts = np.bincount(train_labels_expanded.astype(int))
         total_samples = np.sum(class_counts)
@@ -1675,14 +1670,14 @@ def main():
         }
         
         logger.info(f"Using calculated class weights: {class_weights}")
-
     else:
-        # Use default weights that prioritize abnormal class.
+        # Use default weights that prioritize abnormal class
         class_weights = {
             0: 1.0,
             1: param.get("fit", {}).get("default_abnormal_weight", 5.0)
         }
         logger.info(f"Using default class weights: {class_weights}")
+
 
 
     print("============== MODEL TRAINING ==============")

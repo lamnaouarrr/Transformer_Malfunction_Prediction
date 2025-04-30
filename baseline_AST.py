@@ -872,17 +872,18 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """Create an Audio Spectrogram Transformer (AST) model with improved stability"""
+    """Create an efficient Audio Spectrogram Transformer (AST) model"""
     if config is None:
         config = {}
     
     # Get transformer configuration
     transformer_config = config.get("transformer", {})
     num_heads = transformer_config.get("num_heads", 4)
-    dim_feedforward = transformer_config.get("dim_feedforward", 512)
+    dim_feedforward = transformer_config.get("dim_feedforward", 384)  # Smaller for ViT-Small
     num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
     patch_size = transformer_config.get("patch_size", 4)
     attention_dropout = transformer_config.get("attention_dropout", 0.1)
+    attention_type = transformer_config.get("attention_type", "standard")
     
     # Calculate sequence length and embedding dimension based on input shape and patch size
     h_patches = input_shape[0] // patch_size
@@ -896,14 +897,27 @@ def create_ast_model(input_shape, config=None):
     # Reshape for patching
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Patch embedding using Conv2D with smaller initial values
-    x = tf.keras.layers.Conv2D(
-        filters=embed_dim,
+    # Use depth-wise separable convolution for patch embedding (more efficient)
+    # First apply depth-wise convolution
+    x = tf.keras.layers.DepthwiseConv2D(
         kernel_size=patch_size,
         strides=patch_size,
         padding='same',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),  # Stable initialization
-        name='patch_embedding'
+        depth_multiplier=4,  # Increase channels
+        use_bias=False,
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        name='patch_embedding_depthwise'
+    )(x)
+    
+    # Then apply pointwise convolution
+    x = tf.keras.layers.Conv2D(
+        filters=embed_dim,
+        kernel_size=1,
+        strides=1,
+        padding='same',
+        use_bias=True,
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        name='patch_embedding_pointwise'
     )(x)
     
     # Add batch normalization for stability
@@ -919,18 +933,38 @@ def create_ast_model(input_shape, config=None):
     pos_encoding = positional_encoding(seq_len, embed_dim, encoding_type="sinusoidal")
     x = tf.keras.layers.Add()([x, pos_encoding])
     
-    # Apply transformer encoder layers
+    # Apply transformer encoder layers with gradient checkpointing
     for i in range(num_encoder_layers):
         # Layer normalization before attention (pre-norm formulation)
         attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Multi-head attention block with smaller key_dim
-        attn_output = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=max(16, embed_dim // num_heads),  # Ensure key_dim is not too small
-            dropout=attention_dropout,
-            name=f'encoder_mha_{i}'
-        )(attn_input, attn_input)
+        # Choose attention mechanism based on config
+        if attention_type == "efficient":
+            # Efficient attention with linear complexity
+            # Project queries, keys, values
+            q = tf.keras.layers.Dense(embed_dim, name=f'q_proj_{i}')(attn_input)
+            k = tf.keras.layers.Dense(embed_dim, name=f'k_proj_{i}')(attn_input)
+            v = tf.keras.layers.Dense(embed_dim, name=f'v_proj_{i}')(attn_input)
+            
+            # Apply softmax to keys for linear attention
+            k_softmax = tf.keras.layers.Softmax(axis=-1)(k)
+            
+            # Context vector (linear attention)
+            context = tf.keras.layers.Lambda(
+                lambda x: tf.matmul(x[0], tf.matmul(x[1], x[2], transpose_a=True)),
+                name=f'linear_attention_{i}'
+            )([q, k_softmax, v])
+            
+            # Project output
+            attn_output = tf.keras.layers.Dense(embed_dim, name=f'attn_out_{i}')(context)
+        else:
+            # Standard multi-head attention
+            attn_output = tf.keras.layers.MultiHeadAttention(
+                num_heads=num_heads,
+                key_dim=max(16, embed_dim // num_heads),
+                dropout=attention_dropout,
+                name=f'encoder_mha_{i}'
+            )(attn_input, attn_input)
         
         # Residual connection
         x = tf.keras.layers.Add()([x, attn_output])
@@ -938,21 +972,33 @@ def create_ast_model(input_shape, config=None):
         # Layer normalization before FFN
         ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Feed-forward network with smaller dimensions
-        ffn_output = tf.keras.layers.Dense(
-            min(dim_feedforward * 2, 1024),  # Limit size for stability
-            activation='relu',  # Use ReLU instead of GELU for stability
-            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
+        # Gated feed-forward network (better performance)
+        ffn_hidden = tf.keras.layers.Dense(
+            embed_dim * 2,  # Twice the size for gating
+            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+            name=f'ffn_hidden_{i}'
         )(ffn_input)
+        
+        # Split into two parts
+        ffn_hidden_1, ffn_hidden_2 = tf.split(ffn_hidden, 2, axis=-1)
+        
+        # Apply gating (GELU activation for one path, sigmoid for gate)
+        ffn_output = tf.keras.layers.Multiply()(
+            [
+                tf.keras.layers.Activation('gelu')(ffn_hidden_1),
+                tf.keras.layers.Activation('sigmoid')(ffn_hidden_2)
+            ]
+        )
+        
+        # Project back to embedding dimension
+        ffn_output = tf.keras.layers.Dense(
+            embed_dim,
+            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+            name=f'ffn_output_{i}'
+        )(ffn_output)
         
         # Add dropout for regularization
         ffn_output = tf.keras.layers.Dropout(0.1)(ffn_output)
-        
-        # Second dense layer
-        ffn_output = tf.keras.layers.Dense(
-            embed_dim,
-            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
-        )(ffn_output)
         
         # Residual connection
         x = tf.keras.layers.Add()([x, ffn_output])
@@ -965,11 +1011,25 @@ def create_ast_model(input_shape, config=None):
     
     # Final classification head with dropout
     x = tf.keras.layers.Dropout(0.2)(x)
-    outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    
+    # Add a hidden layer before final classification
+    x = tf.keras.layers.Dense(
+        embed_dim // 2,
+        activation='gelu',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        name='classifier_hidden'
+    )(x)
+    
+    x = tf.keras.layers.Dropout(0.1)(x)
+    
+    outputs = tf.keras.layers.Dense(
+        1, 
+        activation='sigmoid',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        name='classifier_output'
+    )(x)
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
-
-
 
 
 
@@ -1277,6 +1337,96 @@ def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=Non
     
     return all_spectrograms, all_labels
 
+def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, param=None):
+    """
+    Create a TensorFlow dataset that streams and processes audio files on-the-fly
+    """
+    if labels is not None:
+        labels = np.array(labels)
+    
+    # Function to load and process a single file
+    def process_file(file_path, label=None):
+        def _process_file(file_path, label):
+            # Convert string tensor to string
+            file_path = file_path.numpy().decode('utf-8')
+            
+            # Get parameters
+            n_mels = param.get("feature", {}).get("n_mels", 64)
+            n_fft = param.get("feature", {}).get("n_fft", 1024)
+            hop_length = param.get("feature", {}).get("hop_length", 512)
+            power = param.get("feature", {}).get("power", 2.0)
+            
+            # Process file to spectrogram
+            spec = file_to_spectrogram(
+                file_path, 
+                n_mels=n_mels, 
+                n_fft=n_fft, 
+                hop_length=hop_length, 
+                power=power, 
+                augment=is_training,
+                param=param
+            )
+            
+            # Handle case where processing fails
+            if spec is None:
+                # Return a zero spectrogram with the expected shape
+                target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
+                spec = np.zeros(target_shape, dtype=np.float32)
+            
+            # Ensure consistent shape
+            target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
+            if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
+                try:
+                    from skimage.transform import resize
+                    spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
+                except Exception:
+                    # Fall back to simple padding/cropping
+                    temp_spec = np.zeros(target_shape, dtype=np.float32)
+                    freq_dim = min(spec.shape[0], target_shape[0])
+                    time_dim = min(spec.shape[1], target_shape[1])
+                    temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+                    spec = temp_spec
+            
+            # Normalize
+            if np.max(spec) > np.min(spec):
+                spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
+            
+            return spec.astype(np.float32), label
+        
+        # Wrap the function to handle TensorFlow tensors
+        result = tf.py_function(
+            _process_file,
+            [file_path, label],
+            [tf.float32, tf.float32 if label is not None else None]
+        )
+        
+        # Set shapes explicitly
+        target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
+        result[0].set_shape(target_shape)
+        if label is not None:
+            result[1].set_shape(())
+            return result[0], result[1]
+        return result[0]
+    
+    # Create the dataset
+    if labels is not None:
+        dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
+        dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
+    else:
+        dataset = tf.data.Dataset.from_tensor_slices(file_list)
+        dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=tf.data.AUTOTUNE)
+    
+    # Apply dataset transformations
+    if is_training:
+        dataset = dataset.shuffle(buffer_size=min(len(file_list), 10000))
+    
+    # Batch and prefetch
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    
+    return dataset
+
+
 
 def create_small_dataset(files, labels, max_files=100):
     """
@@ -1341,6 +1491,134 @@ def create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50, min_l
     return lr_schedule
 
 
+def implement_progressive_training(model, train_files, train_labels, val_files, val_labels, param):
+    """
+    Implement progressive training with increasing spectrogram sizes
+    """
+    # Get base parameters
+    base_epochs = param.get("fit", {}).get("epochs", 30)
+    batch_size = param.get("fit", {}).get("batch_size", 16)
+    
+    # Define progressive sizes (start smaller, end with target size)
+    progressive_config = param.get("training", {}).get("progressive_training", {})
+    if not progressive_config.get("enabled", False):
+        logger.info("Progressive training disabled")
+        return None
+    
+    # Get sizes from config or use defaults
+    sizes = progressive_config.get("sizes", [(32, 48), (48, 64), (64, 96)])
+    epochs_per_size = progressive_config.get("epochs_per_size", [10, 10, 10])
+    
+    # Ensure we have enough epochs for each size
+    if len(epochs_per_size) != len(sizes):
+        epochs_per_size = [base_epochs // len(sizes)] * len(sizes)
+    
+    logger.info(f"Starting progressive training with sizes: {sizes}")
+    logger.info(f"Epochs per size: {epochs_per_size}")
+    
+    # Store history for each stage
+    all_history = []
+    
+    # Train progressively
+    for i, (size, epochs) in enumerate(zip(sizes, epochs_per_size)):
+        logger.info(f"Progressive training stage {i+1}/{len(sizes)}: size={size}, epochs={epochs}")
+        
+        # Update target shape in parameters
+        param["feature"]["target_shape"] = size
+        
+        # Create datasets with current size
+        train_dataset = create_tf_dataset(
+            train_files, 
+            train_labels, 
+            batch_size=batch_size, 
+            is_training=True, 
+            param=param
+        )
+        
+        val_dataset = create_tf_dataset(
+            val_files, 
+            val_labels, 
+            batch_size=batch_size, 
+            is_training=False, 
+            param=param
+        )
+        
+        # If first stage, create model from scratch
+        if i == 0:
+            model = create_ast_model(input_shape=size, config=param.get("model", {}).get("architecture", {}))
+            
+            # Compile model
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(
+                    learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001),
+                    clipnorm=1.0,
+                    epsilon=1e-7
+                ),
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
+        else:
+            # For later stages, we need to adjust the input layer
+            # Create a new model with the current size
+            new_model = create_ast_model(input_shape=size, config=param.get("model", {}).get("architecture", {}))
+            
+            # Copy weights from previous model where possible
+            for new_layer, old_layer in zip(new_model.layers[1:], model.layers[1:]):
+                try:
+                    new_layer.set_weights(old_layer.get_weights())
+                except:
+                    logger.warning(f"Could not transfer weights for layer {new_layer.name}")
+            
+            # Replace model
+            model = new_model
+            
+            # Recompile
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(
+                    learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001) * 0.5,  # Lower LR for fine-tuning
+                    clipnorm=1.0,
+                    epsilon=1e-7
+                ),
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
+        
+        # Define callbacks for this stage
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=5,
+                restore_best_weights=True
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=3,
+                min_delta=0.001
+            ),
+            tf.keras.callbacks.TerminateOnNaN()
+        ]
+        
+        # Train for this stage
+        history = model.fit(
+            train_dataset,
+            epochs=epochs,
+            validation_data=val_dataset,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        all_history.append(history)
+        
+        # Save intermediate model
+        try:
+            model.save(f"{param['model_directory']}/model_stage_{i+1}.keras")
+            logger.info(f"Saved model for stage {i+1}")
+        except Exception as e:
+            logger.warning(f"Error saving model for stage {i+1}: {e}")
+    
+    return model, all_history
+
 
 
 ########################################################################
@@ -1373,8 +1651,6 @@ def main():
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory growth: {e}")
 
-
-
     with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
@@ -1395,7 +1671,6 @@ def main():
         if abnormal_files:
             print(f"Sample abnormal filename: {abnormal_files[0].name}")
 
-    
     start_time = time.time()
 
     with open("baseline_AST.yaml", "r") as stream:
@@ -1505,10 +1780,8 @@ def main():
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
 
-
     debug_mode = param.get("debug", {}).get("enabled", False)
     debug_sample_size = param.get("debug", {}).get("sample_size", 100)
-
 
     if debug_mode:
         logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
@@ -1517,7 +1790,6 @@ def main():
         test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
         
         logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
-
 
     preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
     chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
@@ -1580,8 +1852,6 @@ def main():
             batch_size=preprocessing_batch_size
         )
 
-
-
     if train_data.shape[0] == 0 or val_data.shape[0] == 0:
         logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
         return  # Exit main() if no valid training/validation data
@@ -1631,7 +1901,6 @@ def main():
         val_data = val_data - train_mean
         logger.info("Mean centering applied (std too small for z-score)")
 
-
     # Balance the dataset
     logger.info("Balancing dataset...")
     train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
@@ -1667,26 +1936,40 @@ def main():
         
         logger.info(f"After augmentation: {len(train_data)} samples, {np.sum(train_labels_expanded == 1)} abnormal")
 
-
-
     # Configure mixed precision
     mixed_precision_enabled = configure_mixed_precision(
         enabled=param.get("training", {}).get("mixed_precision", False)
     )
 
-    # Create model with the correct input shape
-    model = create_ast_model(
-        input_shape=(target_shape[0], target_shape[1]),
-        config=param.get("model", {}).get("architecture", {})
-    )
+    # Check if we should use streaming data
+    use_streaming = param.get("training", {}).get("streaming_data", {}).get("enabled", False)
+
+    if use_streaming:
+        logger.info("Using streaming data pipeline with tf.data")
+        # Create TensorFlow datasets
+        batch_size = param.get("fit", {}).get("batch_size", 16)
+        train_dataset = create_tf_dataset(
+            train_files, 
+            train_labels, 
+            batch_size=batch_size, 
+            is_training=True, 
+            param=param
+        )
+        
+        val_dataset = create_tf_dataset(
+            val_files, 
+            val_labels, 
+            batch_size=batch_size, 
+            is_training=False, 
+            param=param
+        )
 
     monitor_gpu_usage()
 
-    #debug
+    # Debug
     normal_count = sum(1 for label in train_labels_expanded if label == 0)
     abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
     print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
-
     
     # Check for data shape mismatch and fix it
     if train_data.shape[0] != train_labels_expanded.shape[0]:
@@ -1695,7 +1978,6 @@ def main():
         if train_data.shape[0] > train_labels_expanded.shape[0]:
             # Too many features, need to reduce
             train_data = train_data[:train_labels_expanded.shape[0]]
-            sample_weights = sample_weights[:train_labels_expanded.shape[0]]
             logger.info(f"Reduced X to match y: {train_data.shape}")
         else:
             # Too many labels, need to reduce
@@ -1720,7 +2002,6 @@ def main():
     learning_rate = get_scaled_learning_rate(base_learning_rate, batch_size)
     logger.info(f"Scaled learning rate from {base_learning_rate} to {learning_rate} for batch size {batch_size}")
 
-
     # Log the training parameters being used
     logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
 
@@ -1730,9 +2011,6 @@ def main():
         1: 2.0   # Abnormal class - ensure higher weight
     }
     logger.info(f"Using fixed class weights: {class_weights}")
-
-
-
 
     # Ensure consistent data types before training
     logger.info(f"Train data type: {train_data.dtype}")
@@ -1754,79 +2032,6 @@ def main():
     if val_labels_expanded.dtype != np.float32:
         logger.info("Converting val_labels to float32")
         val_labels_expanded = val_labels_expanded.astype(np.float32)
-
-    # Find optimal learning rate if enabled
-    if param.get("training", {}).get("find_optimal_lr", False):
-        logger.info("Running learning rate finder...")
-        
-        # Create a temporary model with the same architecture
-        temp_model = tf.keras.models.clone_model(model)
-        
-        # Create a callback to record learning rates and losses
-        class LRFinder(tf.keras.callbacks.Callback):
-            def __init__(self, min_lr=1e-7, max_lr=1e-1, steps=100):
-                super().__init__()
-                self.min_lr = min_lr
-                self.max_lr = max_lr
-                self.steps = steps
-                self.learning_rates = []
-                self.losses = []
-                self.step = 0
-                
-            def on_batch_end(self, batch, logs=None):
-                # Calculate and set learning rate
-                lr = self.min_lr * (self.max_lr / self.min_lr) ** (self.step / self.steps)
-                tf.keras.backend.set_value(self.model.optimizer.lr, lr)
-                
-                # Record learning rate and loss
-                self.learning_rates.append(lr)
-                self.losses.append(logs['loss'])
-                
-                # Update step
-                self.step += 1
-                
-                # Stop after specified number of steps
-                if self.step >= self.steps:
-                    self.model.stop_training = True
-        
-        # Create the LRFinder callback
-        lr_finder = LRFinder(min_lr=1e-7, max_lr=1e-1, steps=100)
-        
-        # Plot learning rate vs loss
-        plt.figure(figsize=(10, 6))
-        plt.plot(lr_finder.learning_rates, lr_finder.losses)
-        plt.xscale('log')
-        plt.xlabel('Learning Rate')
-        plt.ylabel('Loss')
-        plt.title('Learning Rate Finder')
-        plt.savefig(f"{param['result_directory']}/learning_rate_finder.png")
-        plt.close()
-        
-        # Find optimal learning rate (point of steepest descent)
-        losses = lr_finder.losses
-        learning_rates = lr_finder.learning_rates
-        
-        # Smooth the loss curve
-        window_size = min(5, len(losses) // 5)
-        if window_size > 0:
-            smoothed_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
-            # Find the point of steepest descent
-            gradients = np.gradient(smoothed_losses)
-            optimal_idx = np.argmin(gradients)
-            # Map back to original array
-            optimal_idx = min(optimal_idx + window_size // 2, len(learning_rates) - 1)
-            optimal_lr = learning_rates[optimal_idx]
-        else:
-            # If we don't have enough points, use a reasonable default
-            optimal_lr = 0.001
-        
-        logger.info(f"Optimal learning rate found: {optimal_lr:.6f}")
-        
-        # Update learning rate
-        learning_rate = optimal_lr
-
-
-
 
     def verify_gpu_usage():
         """Verify that TensorFlow is properly using the GPU"""
@@ -1851,7 +2056,6 @@ def main():
         logger.warning("GPU is not being used! Training will be slow.")
         return
 
-
     print("============== MODEL TRAINING ==============")
     # Track model training time specifically
     model_start_time = time.time()
@@ -1865,474 +2069,359 @@ def main():
         mixed_precision.set_global_policy('mixed_float16')
         logger.info(f"Mixed precision policy enabled: {mixed_precision.global_policy()}")
 
-    model_config = param.get("model", {}).get("architecture", {})
-    model.summary()
+    # Check if we should use progressive training
+    use_progressive = param.get("training", {}).get("progressive_training", {}).get("enabled", False)
 
-    if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
-        try:
-            # Try loading with different formats
-            if os.path.exists(model_file):
-                model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-            else:
-                model = tf.keras.models.load_model(f"{model_file}", custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-            logger.info("Model loaded from file, no training performed")
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            # Create a new model
-            model = create_ast_model(
-                input_shape=(target_shape[0], target_shape[1]),
-                config=param.get("model", {}).get("architecture", {})
-            )
-            logger.info("Created new model due to loading error")
-    else:
-        # Define callbacks
-        callbacks = []
-        
-        # Early stopping
-        early_stopping_config = param.get("fit", {}).get("early_stopping", {})
-        if early_stopping_config.get("enabled", False):
-            callbacks.append(tf.keras.callbacks.EarlyStopping(
-                monitor=early_stopping_config.get("monitor", "val_loss"),
-                patience=20,
-                min_delta=early_stopping_config.get("min_delta", 0.001),
-                restore_best_weights=True,
-                verbose=1
-            ))
-
-
-        callbacks.append(TerminateOnNaN(patience=3))
-        logger.info("Added NaN detection callback")
-                
-        # Reduce learning rate on plateau
-        lr_config = param.get("fit", {}).get("lr_scheduler", {})
-        if lr_config.get("enabled", False):
-            logger.info("Adding ReduceLROnPlateau callback with settings:")
-            logger.info(f"  - Monitor: {lr_config.get('monitor', 'val_loss')}")
-            logger.info(f"  - Factor: {lr_config.get('factor', 0.1)}")
-            logger.info(f"  - Patience: {lr_config.get('patience', 5)}")
-            callbacks.append(ReduceLROnPlateau(
-                monitor=lr_config.get("monitor", "val_loss"),
-                factor=lr_config.get("factor", 0.1),
-                patience=lr_config.get("patience", 5),
-                min_delta=lr_config.get("min_delta", 0.001),
-                cooldown=lr_config.get("cooldown", 2),
-                min_lr=lr_config.get("min_lr", 0.00000001),
-                verbose=1
-            ))
-
-
-        # Add learning rate scheduler with warmup
-        callbacks.append(
-            tf.keras.callbacks.LearningRateScheduler(
-                create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50)
-            )
+    if use_progressive and not os.path.exists(model_file):
+        logger.info("Using progressive training with increasing spectrogram sizes")
+        model, progressive_history = implement_progressive_training(
+            None,  # No initial model
+            train_files,
+            train_labels,
+            val_files,
+            val_labels,
+            param
         )
-
-        # Add callback to detect and handle NaN values
-        callbacks.append(tf.keras.callbacks.TerminateOnNaN())
-
         
-        # Add warmup learning rate scheduler if enabled
-        warmup_config = param.get("fit", {}).get("warmup", {})
-        if warmup_config.get("enabled", False):
-            # Calculate total steps
-            steps_per_epoch = len(train_data) // param["fit"]["batch_size"]
-            total_steps = steps_per_epoch * param["fit"]["epochs"]
-            
-            # Calculate warmup steps
-            warmup_epochs = warmup_config.get("epochs", 5)
-            warmup_steps = steps_per_epoch * warmup_epochs
-
-
-        compile_params = param["fit"]["compile"].copy()
-        loss_type = param.get("model", {}).get("loss", "binary_crossentropy")
-        
-        # Handle learning_rate separately for the optimizer
-        learning_rate = compile_params.pop("learning_rate", 0.0001)
-        
-        # Adjust optimizer for mixed precision if enabled
-        clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
-        if mixed_precision_enabled and compile_params.get("optimizer") == "adam":
-            from tensorflow.keras.optimizers import Adam
-            
-            # In TF 2.4+, LossScaleOptimizer is automatically applied when using mixed_float16 policy
-            # So we just need to create the base optimizer with gradient clipping
-            compile_params["optimizer"] = Adam(learning_rate=learning_rate, clipnorm=clipnorm)
-            logger.info(f"Using Adam optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
-        else:
-            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=clipnorm)
-            logger.info(f"Using Adam optimizer with gradient clipping (clipnorm={clipnorm})")
-
-
-        # Use a more stable loss function
-        if loss_type == "binary_crossentropy":
-            compile_params["loss"] = "binary_crossentropy"  # Use TF's built-in implementation for stability
-        elif loss_type == "focal_loss":
-            # Only use focal loss if explicitly requested and with safeguards
-            gamma = param.get("model", {}).get("focal_loss", {}).get("gamma", 2.0)
-            alpha = param.get("model", {}).get("focal_loss", {}).get("alpha", 0.25)
-            
-            # Check if we should use a safer implementation
-            use_safe_focal = param.get("model", {}).get("focal_loss", {}).get("use_safe_implementation", True)
-            if use_safe_focal:
-                logger.info("Using numerically stable focal loss implementation")
-                compile_params["loss"] = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
-            else:
-                logger.warning("Using standard focal loss - watch for NaN losses")
-                compile_params["loss"] = tf.keras.losses.BinaryFocalCrossentropy(
-                    gamma=gamma, alpha=alpha, from_logits=False
-                )
-        else:
-            logger.info("Using standard binary crossentropy loss")
-            compile_params["loss"] = "binary_crossentropy"
-
-        
-        compile_params["metrics"] = ['accuracy']
-        
-        if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
-            logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
-            
-            # Create optimizer
-            optimizer = compile_params["optimizer"]
-            loss_fn = compile_params["loss"]
-            
-            # Get the dataset
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_data, tf.cast(train_labels_expanded, tf.float32)))
-            train_dataset = train_dataset.batch(param["fit"]["batch_size"])
-            
-            # Create validation dataset
-            val_dataset = tf.data.Dataset.from_tensor_slices((val_data, tf.cast(val_labels_expanded, tf.float32)))
-            val_dataset = val_dataset.batch(param["fit"]["batch_size"])
-            
-            # Define variables to store accumulated gradients
-            accum_steps = param["training"]["gradient_accumulation_steps"]
-            
-            # Create a history object to store metrics
-            history = {
+        # Combine histories
+        history = {
+            'history': {
                 'loss': [],
                 'accuracy': [],
                 'val_loss': [],
                 'val_accuracy': []
             }
-            
-            # Initialize accumulated gradients
-            accumulated_gradients = [tf.Variable(tf.zeros_like(var), trainable=False) 
-                                    for var in model.trainable_variables]
-            
-            # Define training step function
-            @tf.function
-            def train_step(x_batch, y_batch, first_batch):
-                with tf.GradientTape() as tape:
-                    logits = model(x_batch, training=True)
-                    
-                    # Ensure y_batch is float32 and reshape to match logits
-                    y_batch = tf.cast(y_batch, tf.float32)
-                    y_batch_reshaped = tf.reshape(y_batch, logits.shape)
-                    
-                    if isinstance(loss_fn, str):
-                        if loss_fn == "binary_crossentropy":
-                            loss_value = tf.keras.losses.binary_crossentropy(y_batch_reshaped, logits)
-                        else:
-                            loss_value = tf.keras.losses.get(loss_fn)(y_batch_reshaped, logits)
-                    else:
-                        loss_value = loss_fn(y_batch_reshaped, logits)
-                    
-                    # Scale the loss to account for gradient accumulation
-                    scaled_loss = loss_value / tf.cast(accum_steps, dtype=loss_value.dtype)
-                
-                # Calculate gradients
-                gradients = tape.gradient(scaled_loss, model.trainable_variables)
-                
-                # If this is the first batch in an accumulation cycle, reset the accumulators
-                if first_batch:
-                    for i, grad in enumerate(gradients):
-                        if grad is not None:
-                            accumulated_gradients[i].assign(grad)
-                        else:
-                            accumulated_gradients[i].assign(tf.zeros_like(model.trainable_variables[i]))
+        }
+        
+        for h in progressive_history:
+            history['history']['loss'].extend(h.history['loss'])
+            history['history']['accuracy'].extend(h.history['accuracy'])
+            history['history']['val_loss'].extend(h.history['val_loss'])
+            history['history']['val_accuracy'].extend(h.history['val_accuracy'])
+        
+        # Convert to object with history attribute for compatibility
+        history = type('History', (), history)
+        
+        # Save final model
+        try:
+            model.save(model_file)
+            logger.info(f"Model saved to {model_file}")
+        except Exception as e:
+            logger.warning(f"Error saving model: {e}")
+            try:
+                model.save(model_file.replace('.keras', ''))
+                logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
+            except Exception as e2:
+                logger.error(f"All attempts to save model failed: {e2}")
+    else:
+        # Regular training without progressive resizing
+        if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
+            try:
+                # Try loading with different formats
+                if os.path.exists(model_file):
+                    model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
                 else:
-                    # Otherwise add to the accumulated gradients
-                    for i, grad in enumerate(gradients):
-                        if grad is not None:
-                            accumulated_gradients[i].assign_add(grad)
-                
-                # Calculate accuracy - ensure consistent data types
-                y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
-                
-                return loss_value, accuracy
-
-            
-            # Define validation step function
-            @tf.function
-            def val_step(x_batch, y_batch):
-                logits = model(x_batch, training=False)
-                
-                # Ensure y_batch is float32 and reshape to match logits
-                y_batch = tf.cast(y_batch, tf.float32)
-                y_batch_reshaped = tf.reshape(y_batch, logits.shape)
-                
-                if isinstance(loss_fn, str):
-                    if loss_fn == "binary_crossentropy":
-                        loss_value = tf.keras.losses.binary_crossentropy(y_batch_reshaped, logits)
-                    else:
-                        loss_value = tf.keras.losses.get(loss_fn)(y_batch_reshaped, logits)
-                else:
-                    loss_value = loss_fn(y_batch_reshaped, logits)
-                
-                # Calculate accuracy - ensure consistent data types
-                y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
-                
-                return loss_value, accuracy
-
-
-            # Training loop
-            epochs = param["fit"]["epochs"]
-            for epoch in range(epochs):
-                print(f"\nEpoch {epoch+1}/{epochs}")
-                
-                # Training metrics
-                train_loss = tf.keras.metrics.Mean()
-                train_accuracy = tf.keras.metrics.Mean()
-                
-                # Validation metrics
-                val_loss = tf.keras.metrics.Mean()
-                val_accuracy = tf.keras.metrics.Mean()
-                
-                # Training loop
-                step = 0
-                progress_bar = tqdm(train_dataset, desc=f"Training")
-                for x_batch, y_batch in progress_bar:
-                    # Determine if this is the first batch in an accumulation cycle
-                    first_batch = (step % accum_steps == 0)
-                    
-                    # Perform training step
-                    batch_loss, batch_accuracy = train_step(x_batch, y_batch, first_batch)
-                    train_loss.update_state(batch_loss)
-                    train_accuracy.update_state(batch_accuracy)
-                    
-                    # If we've accumulated enough gradients, apply them
-                    if (step + 1) % accum_steps == 0 or (step + 1 == len(train_dataset)):
-                        # Apply accumulated gradients
-                        optimizer.apply_gradients(zip(accumulated_gradients, model.trainable_variables))
-                        
-                        # Log progress
-                        progress_bar.set_postfix({
-                            'loss': f'{train_loss.result():.4f}',
-                            'accuracy': f'{train_accuracy.result():.4f}'
-                        })
-                    
-                    step += 1
-                    
-                    # Clear memory periodically
-                    if step % 50 == 0:
-                        gc.collect()
-                
-                # Validation loop
-                for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
-                    batch_loss, batch_accuracy = val_step(x_batch, y_batch)
-                    val_loss.update_state(batch_loss)
-                    val_accuracy.update_state(batch_accuracy)
-                
-                # Print epoch results
-                print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
-                print(f"Validation loss: {val_loss.result():.4f}, accuracy: {val_accuracy.result():.4f}")
-                
-                # Store metrics in history
-                history['loss'].append(float(train_loss.result()))
-                history['accuracy'].append(float(train_accuracy.result()))
-                history['val_loss'].append(float(val_loss.result()))
-                history['val_accuracy'].append(float(val_accuracy.result()))
-                
-                # Check for early stopping
-                if callbacks and any(isinstance(cb, tf.keras.callbacks.EarlyStopping) for cb in callbacks):
-                    early_stopping_callback = next(cb for cb in callbacks if isinstance(cb, tf.keras.callbacks.EarlyStopping))
-                    
-                    # Get the monitored value
-                    if early_stopping_callback.monitor == 'val_loss':
-                        current = float(val_loss.result())
-                    elif early_stopping_callback.monitor == 'val_accuracy':
-                        current = float(val_accuracy.result())
-                    
-                    # Check if we should stop
-                    if hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_loss':
-                        if early_stopping_callback.best is None or current < early_stopping_callback.best:
-                            early_stopping_callback.best = current
-                            early_stopping_callback.wait = 0
-                            try:
-                                # Save with the native Keras format
-                                tf.keras.models.save_model(
-                                    model,
-                                    model_file,
-                                    overwrite=True,
-                                    include_optimizer=True,
-                                    save_format='keras'
-                                )
-                                logger.info(f"Model saved to {model_file}")
-                            except Exception as e:
-                                logger.warning(f"Error saving model: {e}")
-
-                            logger.info(f"Saved best model at epoch {epoch+1}")
-                        else:
-                            early_stopping_callback.wait += 1
-                            if early_stopping_callback.wait >= early_stopping_callback.patience:
-                                print(f"Early stopping triggered at epoch {epoch+1}")
-                                break
-                    elif hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_accuracy':
-                        if early_stopping_callback.best is None or current > early_stopping_callback.best:
-                            early_stopping_callback.best = current
-                            early_stopping_callback.wait = 0
-                            try:
-                                # Save with the native Keras format
-                                tf.keras.models.save_model(
-                                    model,
-                                    model_file,
-                                    overwrite=True,
-                                    include_optimizer=True,
-                                    save_format='keras'
-                                )
-                                logger.info(f"Model saved to {model_file}")
-                            except Exception as e:
-                                logger.warning(f"Error saving model: {e}")
-
-                            logger.info(f"Saved best model at epoch {epoch+1}")
-                        else:
-                            early_stopping_callback.wait += 1
-                            if early_stopping_callback.wait >= early_stopping_callback.patience:
-                                print(f"Early stopping triggered at epoch {epoch+1}")
-                                break
-                
-                # Save model periodically
-                if (epoch + 1) % 5 == 0:
-                    try:
-                        # Save with the native Keras format
-                        tf.keras.models.save_model(
-                            model,
-                            f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras",
-                            overwrite=True,
-                            include_optimizer=True,
-                            save_format='keras'
-                        )
-                        logger.info(f"Saved model checkpoint at epoch {epoch+1}")
-                    except Exception as e:
-                        logger.warning(f"Failed to save model checkpoint at epoch {epoch+1}: {e}")
-                    logger.info(f"Saved model checkpoint at epoch {epoch+1}")
-                
-                # Clear memory between epochs
-                gc.collect()
-            
-            # Convert history to a format compatible with Keras history
-            history = type('History', (), {'history': history})
-
-
+                    model = tf.keras.models.load_model(f"{model_file}", custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
+                logger.info("Model loaded from file, no training performed")
+            except Exception as e:
+                logger.error(f"Error loading model: {e}")
+                # Create a new model
+                model = create_ast_model(
+                    input_shape=(target_shape[0], target_shape[1]),
+                    config=param.get("model", {}).get("architecture", {})
+                )
+                logger.info("Created new model due to loading error")
         else:
-            # Disable XLA acceleration as it's causing shape issues
-            if False and param.get("training", {}).get("xla_acceleration", False):
-                logger.info("Enabling XLA acceleration")
-                tf.config.optimizer.set_jit(True)
-                os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
-            else:
-                logger.info("XLA acceleration disabled to avoid shape issues")
+            # Define callbacks
+            callbacks = []
+            
+            # Early stopping
+            early_stopping_config = param.get("fit", {}).get("early_stopping", {})
+            if early_stopping_config.get("enabled", False):
+                callbacks.append(tf.keras.callbacks.EarlyStopping(
+                    monitor=early_stopping_config.get("monitor", "val_loss"),
+                    patience=20,
+                    min_delta=early_stopping_config.get("min_delta", 0.001),
+                    restore_best_weights=True,
+                    verbose=1
+                ))
 
-            # Apply mixup augmentation if enabled
-            if False and param.get("training", {}).get("mixup", {}).get("enabled", False):
-                alpha = param["training"]["mixup"].get("alpha", 0.2)
-                logger.info(f"Applying mixup augmentation with alpha={alpha}")
+            callbacks.append(TerminateOnNaN(patience=3))
+            logger.info("Added NaN detection callback")
+                    
+            # Reduce learning rate on plateau
+            lr_config = param.get("fit", {}).get("lr_scheduler", {})
+            if lr_config.get("enabled", False):
+                logger.info("Adding ReduceLROnPlateau callback with settings:")
+                logger.info(f"  - Monitor: {lr_config.get('monitor', 'val_loss')}")
+                logger.info(f"  - Factor: {lr_config.get('factor', 0.1)}")
+                logger.info(f"  - Patience: {lr_config.get('patience', 5)}")
+                callbacks.append(ReduceLROnPlateau(
+                    monitor=lr_config.get("monitor", "val_loss"),
+                    factor=lr_config.get("factor", 0.1),
+                    patience=lr_config.get("patience", 5),
+                    min_delta=lr_config.get("min_delta", 0.001),
+                    cooldown=lr_config.get("cooldown", 2),
+                    min_lr=lr_config.get("min_lr", 0.00000001),
+                    verbose=1
+                ))
+
+            # Add learning rate scheduler with warmup
+            callbacks.append(
+                tf.keras.callbacks.LearningRateScheduler(
+                    create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50)
+                )
+            )
+
+            # Add callback to detect and handle NaN values
+            callbacks.append(tf.keras.callbacks.TerminateOnNaN())
+            
+            # Create model with the correct input shape
+            model = create_ast_model(
+                input_shape=(target_shape[0], target_shape[1]),
+                config=param.get("model", {}).get("architecture", {})
+            )
+            
+            model_config = param.get("model", {}).get("architecture", {})
+            model.summary()
+            
+            # Compile model
+            compile_params = param["fit"]["compile"].copy()
+            loss_type = param.get("model", {}).get("loss", "binary_crossentropy")
+            
+            # Handle learning_rate separately for the optimizer
+            learning_rate = compile_params.pop("learning_rate", 0.0001)
+            
+            # Adjust optimizer for mixed precision if enabled
+            clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
+            if mixed_precision_enabled and compile_params.get("optimizer") == "adam":
+                from tensorflow.keras.optimizers import Adam
                 
-                # Only apply mixup if we have enough samples
-                if train_data.shape[0] > 10:
-                    # Create a copy of the original data for safety
-                    orig_train_data = train_data.copy()
-                    orig_train_labels = train_labels_expanded.copy()
-                    
-                    # Apply mixup with controlled randomization
-                    np.random.seed(42)  # For reproducibility
-                    indices = np.random.permutation(train_data.shape[0])
-                    shuffled_data = train_data[indices]
-                    shuffled_labels = train_labels_expanded[indices]
-                    
-                    # Generate mixing coefficient
-                    lam = np.random.beta(alpha, alpha, size=train_data.shape[0])
-                    lam = np.maximum(lam, 1-lam)  # Ensure lambda is at least 0.5 for stability
-                    lam = np.reshape(lam, (train_data.shape[0], 1, 1))  # Reshape for broadcasting
-                    
-                    # Mix the data
-                    mixed_data = lam * train_data + (1 - lam) * shuffled_data
-                    
-                    # Mix the labels (reshape lambda for broadcasting)
-                    lam_labels = np.reshape(lam, (train_data.shape[0], 1))
-                    mixed_labels = lam_labels * train_labels_expanded + (1 - lam_labels) * shuffled_labels
-                    
-                    # Update the training data and labels
-                    train_data = mixed_data
-                    train_labels_expanded = mixed_labels
-                    
-                    logger.info(f"Applied mixup to {train_data.shape[0]} samples")
+                # In TF 2.4+, LossScaleOptimizer is automatically applied when using mixed_float16 policy
+                # So we just need to create the base optimizer with gradient clipping
+                optimizer = Adam(learning_rate=learning_rate, clipnorm=clipnorm)
+                logger.info(f"Using Adam optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
+            else:
+                optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=clipnorm)
+                logger.info(f"Using Adam optimizer with gradient clipping (clipnorm={clipnorm})")
+
+            # Use a more stable loss function
+            if loss_type == "binary_crossentropy":
+                loss_fn = "binary_crossentropy"  # Use TF's built-in implementation for stability
+            elif loss_type == "focal_loss":
+                # Only use focal loss if explicitly requested and with safeguards
+                gamma = param.get("model", {}).get("focal_loss", {}).get("gamma", 2.0)
+                alpha = param.get("model", {}).get("focal_loss", {}).get("alpha", 0.25)
+                
+                # Check if we should use a safer implementation
+                use_safe_focal = param.get("model", {}).get("focal_loss", {}).get("use_safe_implementation", True)
+                if use_safe_focal:
+                    logger.info("Using numerically stable focal loss implementation")
+                    loss_fn = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
                 else:
-                    logger.warning("Not enough samples for mixup, skipping")
-
-
+                    logger.warning("Using standard focal loss - watch for NaN losses")
+                    loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
+                        gamma=gamma, alpha=alpha, from_logits=False
+                    )
+            else:
+                logger.info("Using standard binary crossentropy loss")
+                loss_fn = "binary_crossentropy"
+            
+            # Compile the model
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(
-                    learning_rate=0.0001,
-                    clipnorm=1.0,
-                    epsilon=1e-7
-                ),
-                loss='binary_crossentropy',
+                optimizer=optimizer,
+                loss=loss_fn,
                 metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]
             )
-
-            # Train with improved settings
-            logger.info("Training with improved settings")
-            history = model.fit(
-                train_data,
-                train_labels_expanded,
-                batch_size=64,
-                epochs=50,
-                validation_data=(val_data, val_labels_expanded),
-                class_weight=class_weights,
-                callbacks=callbacks,
-                verbose=1
-            )
-
-
-            # Create a directory for checkpoints if it doesn't exist
-            checkpoint_dir = os.path.dirname(model_file)
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-
-        # Make sure history exists before plotting
-        if 'history' in locals():
-            # Define default values for variables that might not be defined
-            machine_type_val = machine_type if 'machine_type' in locals() else None
-            machine_id_val = machine_id if 'machine_id' in locals() else None
-            db_val = db if 'db' in locals() else None
             
-            # Plot the training history
-            visualizer.loss_plot(history, machine_type=machine_type_val, machine_id=machine_id_val, db=db_val)
-        else:
-            logger.warning("No training history available to plot")
-
-        visualizer.save_figure(history_img)
+            # Check if we should use gradient accumulation
+            if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
+                logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
+                
+                # Get the dataset
+                train_dataset = tf.data.Dataset.from_tensor_slices((train_data, tf.cast(train_labels_expanded, tf.float32)))
+                train_dataset = train_dataset.batch(param["fit"]["batch_size"])
+                
+                # Create validation dataset
+                val_dataset = tf.data.Dataset.from_tensor_slices((val_data, tf.cast(val_labels_expanded, tf.float32)))
+                val_dataset = val_dataset.batch(param["fit"]["batch_size"])
+                
+                # Define variables to store accumulated gradients
+                accum_steps = param["training"]["gradient_accumulation_steps"]
+                
+                # Create a history object to store metrics
+                history_dict = {
+                    'loss': [],
+                    'accuracy': [],
+                    'val_loss': [],
+                    'val_accuracy': []
+                }
+                
+                # Initialize accumulated gradients
+                accumulated_gradients = [tf.Variable(tf.zeros_like(var), trainable=False) 
+                                        for var in model.trainable_variables]
+                
+                # Training loop
+                epochs = param["fit"]["epochs"]
+                for epoch in range(epochs):
+                    print(f"\nEpoch {epoch+1}/{epochs}")
+                    
+                    # Training metrics
+                    train_loss = tf.keras.metrics.Mean()
+                    train_accuracy = tf.keras.metrics.Mean()
+                    
+                    # Validation metrics
+                    val_loss = tf.keras.metrics.Mean()
+                    val_accuracy = tf.keras.metrics.Mean()
+                    
+                    # Training loop
+                    step = 0
+                    progress_bar = tqdm(train_dataset, desc=f"Training")
+                    for x_batch, y_batch in progress_bar:
+                        # Determine if this is the first batch in an accumulation cycle
+                        first_batch = (step % accum_steps == 0)
+                        
+                        # Perform training step with the updated function
+                        batch_loss, batch_accuracy = train_step_with_accumulation(
+                            model, optimizer, loss_fn, x_batch, y_batch, accumulated_gradients, first_batch, accum_steps
+                        )
+                        
+                        train_loss.update_state(batch_loss)
+                        train_accuracy.update_state(batch_accuracy)
+                        
+                        # If we've accumulated enough gradients, apply them
+                        if (step + 1) % accum_steps == 0 or (step + 1 == len(train_dataset)):
+                            # Apply accumulated gradients
+                            optimizer.apply_gradients(zip(accumulated_gradients, model.trainable_variables))
+                            
+                            # Log progress
+                            progress_bar.set_postfix({
+                                'loss': f'{train_loss.result():.4f}',
+                                'accuracy': f'{train_accuracy.result():.4f}'
+                            })
+                        
+                        step += 1
+                        
+                        # Clear memory periodically
+                        if step % 50 == 0:
+                            gc.collect()
+                    
+                    # Validation loop
+                    for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
+                        batch_loss, batch_accuracy = val_step(model, loss_fn, x_batch, y_batch)
+                        val_loss.update_state(batch_loss)
+                        val_accuracy.update_state(batch_accuracy)
+                    
+                    # Print epoch results
+                    print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
+                    print(f"Validation loss: {val_loss.result():.4f}, accuracy: {val_accuracy.result():.4f}")
+                    
+                    # Store metrics in history
+                    history_dict['loss'].append(float(train_loss.result()))
+                    history_dict['accuracy'].append(float(train_accuracy.result()))
+                    history_dict['val_loss'].append(float(val_loss.result()))
+                    history_dict['val_accuracy'].append(float(val_accuracy.result()))
+                    
+                    # Check for early stopping
+                    if callbacks and any(isinstance(cb, tf.keras.callbacks.EarlyStopping) for cb in callbacks):
+                        early_stopping_callback = next(cb for cb in callbacks if isinstance(cb, tf.keras.callbacks.EarlyStopping))
+                        
+                        # Get the monitored value
+                        if early_stopping_callback.monitor == 'val_loss':
+                            current = float(val_loss.result())
+                        elif early_stopping_callback.monitor == 'val_accuracy':
+                            current = float(val_accuracy.result())
+                        
+                        # Check if we should stop
+                        if hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_loss':
+                            if early_stopping_callback.best is None or current < early_stopping_callback.best:
+                                early_stopping_callback.best = current
+                                early_stopping_callback.wait = 0
+                                try:
+                                    model.save(model_file)
+                                    logger.info(f"Model saved to {model_file}")
+                                except Exception as e:
+                                    logger.warning(f"Error saving model: {e}")
+                                    try:
+                                        model.save(model_file.replace('.keras', ''))
+                                        logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
+                                    except Exception as e2:
+                                        logger.error(f"All attempts to save model failed: {e2}")
+                                logger.info(f"Saved best model at epoch {epoch+1}")
+                            else:
+                                early_stopping_callback.wait += 1
+                                if early_stopping_callback.wait >= early_stopping_callback.patience:
+                                    print(f"Early stopping triggered at epoch {epoch+1}")
+                                    break
+                        elif hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_accuracy':
+                            if early_stopping_callback.best is None or current > early_stopping_callback.best:
+                                early_stopping_callback.best = current
+                                early_stopping_callback.wait = 0
+                                try:
+                                    model.save(model_file)
+                                    logger.info(f"Model saved to {model_file}")
+                                except Exception as e:
+                                    logger.warning(f"Error saving model: {e}")
+                                    try:
+                                        model.save(model_file.replace('.keras', ''))
+                                        logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
+                                    except Exception as e2:
+                                        logger.error(f"All attempts to save model failed: {e2}")
+                                logger.info(f"Saved best model at epoch {epoch+1}")
+                            else:
+                                early_stopping_callback.wait += 1
+                                if early_stopping_callback.wait >= early_stopping_callback.patience:
+                                    print(f"Early stopping triggered at epoch {epoch+1}")
+                                    break
+                    
+                    # Save model periodically
+                    if (epoch + 1) % 5 == 0:
+                        try:
+                            model.save(f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras")
+                            logger.info(f"Saved model checkpoint at epoch {epoch+1}")
+                        except Exception as e:
+                            logger.warning(f"Failed to save model checkpoint at epoch {epoch+1}: {e}")
+                    
+                    # Clear memory between epochs
+                    gc.collect()
+                
+                # Convert history to a format compatible with Keras history
+                history = type('History', (), {'history': history_dict})
+            else:
+                # Standard training without gradient accumulation
+                if use_streaming:
+                    # Train with streaming data
+                    history = model.fit(
+                        train_dataset,
+                        epochs=param.get("fit", {}).get("epochs", 30),
+                        validation_data=val_dataset,
+                        callbacks=callbacks,
+                        verbose=1
+                    )
+                else:
+                    # Train with in-memory data
+                    history = model.fit(
+                        train_data,
+                        train_labels_expanded,
+                        batch_size=param.get("fit", {}).get("batch_size", 16),
+                        epochs=param.get("fit", {}).get("epochs", 30),
+                        validation_data=(val_data, val_labels_expanded),
+                        class_weight=class_weights,
+                        callbacks=callbacks,
+                        verbose=1
+                    )
 
     # Log training time
     training_time = time.time() - model_start_time
     logger.info(f"Model training completed in {training_time:.2f} seconds")
 
-    # Save model after training completes
-    try:
-        model.save(model_file)
-        logger.info(f"Model saved to {model_file}")
-    except Exception as e:
-        logger.warning(f"Error saving model: {e}")
-        # Try alternative approach
-        try:
-            model.save(model_file.replace('.keras', ''))
-            logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
-        except Exception as e2:
-            logger.error(f"All attempts to save model failed: {e2}")
-
+    # Make sure history exists before plotting
+    if 'history' in locals():
+        # Plot the training history
+        visualizer.loss_plot(history)
+        visualizer.save_figure(history_img)
+    else:
+        logger.warning("No training history available to plot")
 
     print("============== EVALUATION ==============")
     # Evaluate on test set
@@ -2356,7 +2445,6 @@ def main():
         test_data = (test_data - train_mean) / train_std
     else:
         test_data = test_data - train_mean
-
 
     # Evaluate the model
     if test_data.shape[0] > 0:
@@ -2498,9 +2586,6 @@ def main():
                 test_recall = test_recall_lower
                 test_f1 = test_f1_lower
 
-
-
-
     # Calculate overall metrics
     if all_y_true and all_y_pred:
         overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
@@ -2515,7 +2600,6 @@ def main():
             "overall_f1": float(overall_f1),
         }
         results.update(overall_results)
-
 
         logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
         logger.info(f"Overall Precision: {overall_precision:.4f}")

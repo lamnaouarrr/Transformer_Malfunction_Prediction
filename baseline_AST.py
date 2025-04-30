@@ -2377,9 +2377,12 @@ def main():
     # Preprocess test data
     test_data = preprocess_spectrograms(test_data, target_shape)
 
-    # After making predictions but before applying threshold
-    if len(y_pred) > 0:
-        # Analyze raw predictions
+    # Evaluate the model
+    if test_data.shape[0] > 0:
+        # Predict on test set
+        y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
+        
+        # Now analyze the predictions (moved from above)
         logger.info(f"Raw prediction statistics:")
         logger.info(f"  - Min: {np.min(y_pred):.4f}, Max: {np.max(y_pred):.4f}")
         logger.info(f"  - Mean: {np.mean(y_pred):.4f}, Median: {np.median(y_pred):.4f}")
@@ -2409,25 +2412,14 @@ def main():
             recall = metrics.recall_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
             f1 = metrics.f1_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
             logger.info(f"Threshold {thresh:.1f}: Acc={accuracy:.4f}, Prec={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
-
-
-    # Evaluate the model
-    if test_data.shape[0] > 0:
-        # Predict on test set
-        y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
+        
+        # Apply standard threshold for final evaluation
         detection_threshold = 0.5
         logger.info(f"Using standard detection threshold: {detection_threshold}")
         y_pred_binary = (y_pred > detection_threshold).astype(int)
-
-        # Log the raw prediction values to understand the model's output distribution
-        if len(y_pred) > 0:
-            logger.info(f"Raw prediction statistics:")
-            logger.info(f"  - Min: {np.min(y_pred):.4f}, Max: {np.max(y_pred):.4f}")
-            logger.info(f"  - Mean: {np.mean(y_pred):.4f}, Median: {np.median(y_pred):.4f}")
-            logger.info(f"  - 25th percentile: {np.percentile(y_pred, 25):.4f}")
-            logger.info(f"  - 75th percentile: {np.percentile(y_pred, 75):.4f}")
+        
         gc.collect()
-
+        
         # Calculate metrics
         test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
         test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)

@@ -42,12 +42,12 @@ feature:
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.0005
+    learning_rate: 0.001
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
   epochs: 100
-  batch_size: 64
+  batch_size: 32
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -88,7 +88,7 @@ fit:
 training:
   find_optimal_lr: true
   mixed_precision: true
-  xla_acceleration: true
+  xla_acceleration: false
   gradient_accumulation_steps: 1
   gradient_clip_norm: 1.0
   mixup:
@@ -136,7 +136,7 @@ dataset:
 # Debug settings
 debug:
   enabled: true  # Set to false for full dataset
-  sample_size: 100  # Number of samples to use in debug mode
+  sample_size: 200  # Number of samples to use in debug mode
 
 
 # Visualization parameters

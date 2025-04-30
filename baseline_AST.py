@@ -916,81 +916,61 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create an enhanced Audio Spectrogram Transformer model optimized for V100 GPU
+    Create a simplified Audio Spectrogram Transformer model that works reliably
     """
     if config is None:
         config = {}
     
-    transformer_config = config.get("transformer", {})
-    dim_feedforward = transformer_config.get("dim_feedforward", 512)  # Increased from 256
-    dropout_rate = config.get("dropout", 0.3)
-    l2_reg = config.get("l2_regularization", 1e-5)
-
+    # Ensure input_shape is fully defined
+    if None in input_shape:
+        logger.warning(f"Input shape contains None: {input_shape}, using default shape")
+        input_shape = (64, 48)  # Use your default shape
     
-    # Input layer expects (freq, time) format
-    inputs = Input(shape=input_shape)
+    logger.info(f"Creating model with input shape: {input_shape}")
+    
+    # Simplified hyperparameters
+    dropout_rate = 0.3
+    l2_reg = 1e-5
+    
+    # Input layer with explicit shape
+    inputs = tf.keras.layers.Input(shape=input_shape, name='input')
     
     # Reshape to prepare for CNN (batch, freq, time, 1)
-    x = Reshape((input_shape[0], input_shape[1], 1))(inputs)
+    x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1), name='reshape')(inputs)
     
-    # First convolutional block with L2 regularization - increased filters for V100
+    # First convolutional block
     x = tf.keras.layers.Conv2D(32, (3, 3), padding='same', 
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+                              kernel_regularizer=l2(l2_reg), name='conv1')(x)
+    x = tf.keras.layers.BatchNormalization(name='bn1')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1, name='leaky1')(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2), name='pool1')(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2, name='drop1')(x)
     
-    # Second convolutional block - increased filters
+    # Second convolutional block
     x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+                              kernel_regularizer=l2(l2_reg), name='conv2')(x)
+    x = tf.keras.layers.BatchNormalization(name='bn2')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1, name='leaky2')(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2), name='pool2')(x)
+    x = tf.keras.layers.Dropout(dropout_rate/2, name='drop2')(x)
     
-    # Third convolutional block - increased filters
-    x = tf.keras.layers.Conv2D(128, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+    # Global pooling
+    x = tf.keras.layers.GlobalAveragePooling2D(name='global_pool')(x)
     
-    # Fourth convolutional block - new for V100
-    x = tf.keras.layers.Conv2D(256, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2)(x)
+    # Dense layers
+    x = tf.keras.layers.Dense(128, kernel_regularizer=l2(l2_reg), name='dense1')(x)
+    x = tf.keras.layers.BatchNormalization(name='bn3')(x)
+    x = tf.keras.layers.LeakyReLU(alpha=0.1, name='leaky3')(x)
+    x = tf.keras.layers.Dropout(dropout_rate, name='drop3')(x)
+    
+    # Output layer
+    outputs = tf.keras.layers.Dense(1, activation='sigmoid', name='output')(x)
+    
+    # Create model
+    model = tf.keras.models.Model(inputs=inputs, outputs=outputs, name="SimpleAST")
+    
+    return model
 
-    
-    # Global pooling instead of flattening to reduce parameters
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    
-    # Dense layers with batch normalization - increased dimensions for V100
-    x = Dense(dim_feedforward, kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = Dropout(dropout_rate)(x)
-    
-    # Additional dense layer for V100
-    x = Dense(dim_feedforward // 2, kernel_regularizer=l2(l2_reg))(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = Dropout(dropout_rate)(x)
-    
-    # Final classification layer
-    x = Dense(64, kernel_regularizer=l2(l2_reg))(x)  # Increased from 32
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1)(x)
-    x = Dropout(dropout_rate)(x)
-
-    # Use a threshold-adjusted sigmoid for better sensitivity to abnormal class
-    outputs = Dense(1, activation="sigmoid", kernel_regularizer=l2(l2_reg), bias_initializer=tf.keras.initializers.Constant(-1.0))(x)
-    outputs = tf.keras.layers.Lambda(lambda x: tf.squeeze(x, axis=-1))(outputs)
-    
-    return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
 
 
 def preprocess_spectrograms(spectrograms, target_shape):
@@ -1334,21 +1314,37 @@ def create_small_dataset(files, labels, max_files=100):
         return [files[i] for i in indices], labels[indices] if labels is not None else None
 
 
-def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, min_lr=1e-7, max_lr=1e-1, epochs=1):
+def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, min_lr=1e-6, max_lr=1e-2, epochs=1):
     """
     Find the optimal learning rate by training with exponentially increasing learning rate
     """
     # Number of batches in one epoch
-    num_batches = len(train_data) // batch_size
+    num_batches = max(1, len(train_data) // batch_size)
     # Total number of steps
-    total_steps = num_batches * epochs
-    # Learning rate schedule
-    lr_schedule = tf.keras.callbacks.LearningRateScheduler(
-        lambda step: min_lr * (max_lr / min_lr) ** (step / total_steps)
-    )
+    total_steps = max(1, num_batches * epochs)
+    
+    # Create a list to store learning rates and losses
+    learning_rates = []
+    losses = []
     
     # Create a new model with the same architecture
     temp_model = tf.keras.models.clone_model(model)
+    
+    # Define a callback to record learning rates and losses
+    class LRFinder(tf.keras.callbacks.Callback):
+        def on_batch_end(self, batch, logs=None):
+            # Get the current learning rate
+            lr = tf.keras.backend.get_value(self.model.optimizer.lr)
+            # Record the learning rate and loss
+            learning_rates.append(lr)
+            losses.append(logs['loss'])
+            # Update the learning rate
+            tf.keras.backend.set_value(
+                self.model.optimizer.lr, 
+                lr * (max_lr / min_lr) ** (1 / total_steps)
+            )
+    
+    # Compile the model
     temp_model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=min_lr),
         loss='binary_crossentropy',
@@ -1356,17 +1352,13 @@ def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, m
     )
     
     # Train the model with increasing learning rate
-    history = temp_model.fit(
+    temp_model.fit(
         train_data, train_labels,
         batch_size=batch_size,
         epochs=epochs,
-        callbacks=[lr_schedule],
+        callbacks=[LRFinder()],
         verbose=1
     )
-    
-    # Get the learning rates and losses
-    learning_rates = min_lr * (max_lr / min_lr) ** (np.arange(len(history.history['loss'])) / total_steps)
-    losses = history.history['loss']
     
     # Plot the learning rate vs loss
     plt.figure(figsize=(10, 6))
@@ -1378,15 +1370,33 @@ def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, m
     plt.savefig('./result/result_AST/learning_rate_finder.png')
     
     # Find the optimal learning rate (where loss is still decreasing but before it explodes)
-    optimal_idx = np.argmin(losses)
-    if optimal_idx == len(losses) - 1:
-        # If the minimum is at the end, choose a point before it
-        optimal_idx = len(losses) // 2
+    # Smooth the loss curve
+    window_size = min(5, len(losses) // 5)
+    if window_size > 0:
+        smoothed_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+        # Find the point of steepest descent
+        gradients = np.gradient(smoothed_losses)
+        optimal_idx = np.argmin(gradients)
+        # Map back to original array
+        optimal_idx = min(optimal_idx + window_size // 2, len(learning_rates) - 1)
+    else:
+        # If we don't have enough points, just use a reasonable default
+        optimal_idx = len(learning_rates) // 2
+    
+    # Ensure we have a valid index
+    if optimal_idx >= len(learning_rates):
+        optimal_idx = len(learning_rates) - 1
     
     optimal_lr = learning_rates[optimal_idx]
+    # Ensure the learning rate is reasonable
+    if optimal_lr < 1e-5:
+        logger.warning(f"Optimal learning rate too small: {optimal_lr}, using default")
+        optimal_lr = 0.0005  # Use a reasonable default
+    
     logger.info(f"Optimal learning rate found: {optimal_lr:.6f}")
     
     return optimal_lr
+
 
 
 
@@ -2202,10 +2212,13 @@ def main():
 
 
         else:
-            if param.get("training", {}).get("xla_acceleration", False):
+            # Disable XLA acceleration as it's causing shape issues
+            if False and param.get("training", {}).get("xla_acceleration", False):
                 logger.info("Enabling XLA acceleration")
                 tf.config.optimizer.set_jit(True)
                 os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
+            else:
+                logger.info("XLA acceleration disabled to avoid shape issues")
             
             # Check for data shape mismatch and fix it
             if train_data.shape[0] != train_labels_expanded.shape[0]:
@@ -2261,21 +2274,52 @@ def main():
 
 
             # Use a smaller batch size and more conservative approach
-            safe_batch_size = min(64, batch_size)
+            safe_batch_size = min(32, batch_size)  # Reduced from 64 to 32
             safe_epochs = min(100, epochs)
 
+            # Ensure data types are correct
+            train_data = tf.convert_to_tensor(train_data, dtype=tf.float32)
+            train_labels_expanded = tf.convert_to_tensor(train_labels_expanded, dtype=tf.float32)
+            val_data = tf.convert_to_tensor(val_data, dtype=tf.float32)
+            val_labels_expanded = tf.convert_to_tensor(val_labels_expanded, dtype=tf.float32)
+
             logger.info(f"Training with conservative settings: batch_size={safe_batch_size}, epochs={safe_epochs}")
-            history = model.fit(
-                train_data,
-                train_labels_expanded,
-                batch_size=safe_batch_size,
-                epochs=safe_epochs,
-                validation_data=(val_data, val_labels_expanded),
-                callbacks=callbacks,
-                class_weight=class_weights,
-                sample_weight=sample_weights,
-                verbose=1
-            )
+            logger.info(f"Train data shape: {train_data.shape}, dtype: {train_data.dtype}")
+            logger.info(f"Train labels shape: {train_labels_expanded.shape}, dtype: {train_labels_expanded.dtype}")
+
+            try:
+                history = model.fit(
+                    train_data,
+                    train_labels_expanded,
+                    batch_size=safe_batch_size,
+                    epochs=safe_epochs,
+                    validation_data=(val_data, val_labels_expanded),
+                    callbacks=callbacks,
+                    class_weight=class_weights,
+                    verbose=1  # Removed sample_weight to simplify
+                )
+            except Exception as e:
+                logger.error(f"Error during model training: {e}")
+                # Try with even simpler settings
+                logger.info("Trying with simpler training settings...")
+                
+                # Recompile the model with simpler settings
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                    loss='binary_crossentropy',
+                    metrics=['accuracy']
+                )
+                
+                # Try training with minimal settings
+                history = model.fit(
+                    train_data,
+                    train_labels_expanded,
+                    batch_size=16,
+                    epochs=10,  # Just try a few epochs to see if it works
+                    validation_data=(val_data, val_labels_expanded),
+                    verbose=1
+                )
+
 
 
             # Save the trained model

@@ -460,11 +460,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     valid_labels = [] if labels is not None else None
     max_freq = 0
     max_time = 0
-
-    train_data = train_data.astype(np.float32)
-    train_labels_expanded = train_labels_expanded.astype(np.float32)
-    val_data = val_data.astype(np.float32)
-    val_labels_expanded = val_labels_expanded.astype(np.float32)
     
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
@@ -537,6 +532,8 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                 spectrograms[batch_start + i] = np.zeros((max_freq, max_time))
         
         gc.collect()
+
+    spectrograms = spectrograms.astype(np.float32)
     
     if labels is not None:
         return spectrograms, processed_labels

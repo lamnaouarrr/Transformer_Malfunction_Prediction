@@ -460,6 +460,11 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     valid_labels = [] if labels is not None else None
     max_freq = 0
     max_time = 0
+
+    train_data = train_data.astype(np.float32)
+    train_labels_expanded = train_labels_expanded.astype(np.float32)
+    val_data = val_data.astype(np.float32)
+    val_labels_expanded = val_labels_expanded.astype(np.float32)
     
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
@@ -1187,6 +1192,7 @@ def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=Non
     """
     Process a large dataset in chunks to avoid memory issues
     """
+
     if param is None:
         param = {}
     
@@ -1729,6 +1735,26 @@ def main():
         }
         logger.info(f"Using default class weights: {class_weights}")
 
+    # Ensure consistent data types before training
+    logger.info(f"Train data type: {train_data.dtype}")
+    logger.info(f"Train labels type: {train_labels_expanded.dtype}")
+
+    # Convert to float32 if needed
+    if train_data.dtype != np.float32:
+        logger.info("Converting train_data to float32")
+        train_data = train_data.astype(np.float32)
+        
+    if train_labels_expanded.dtype != np.float32:
+        logger.info("Converting train_labels to float32")
+        train_labels_expanded = train_labels_expanded.astype(np.float32)
+        
+    if val_data.dtype != np.float32:
+        logger.info("Converting val_data to float32")
+        val_data = val_data.astype(np.float32)
+        
+    if val_labels_expanded.dtype != np.float32:
+        logger.info("Converting val_labels to float32")
+        val_labels_expanded = val_labels_expanded.astype(np.float32)
 
 
     print("============== MODEL TRAINING ==============")
@@ -1876,11 +1902,11 @@ def main():
             loss_fn = compile_params["loss"]
             
             # Get the dataset
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+            train_dataset = tf.data.Dataset.from_tensor_slices((train_data, tf.cast(train_labels_expanded, tf.float32)))
             train_dataset = train_dataset.batch(param["fit"]["batch_size"])
             
             # Create validation dataset
-            val_dataset = tf.data.Dataset.from_tensor_slices((val_data, val_labels_expanded))
+            val_dataset = tf.data.Dataset.from_tensor_slices((val_data, tf.cast(val_labels_expanded, tf.float32)))
             val_dataset = val_dataset.batch(param["fit"]["batch_size"])
             
             # Define variables to store accumulated gradients
@@ -1904,7 +1930,8 @@ def main():
                 with tf.GradientTape() as tape:
                     logits = model(x_batch, training=True)
                     
-                    # Reshape y_batch to match logits shape
+                    # Ensure y_batch is float32 and reshape to match logits
+                    y_batch = tf.cast(y_batch, tf.float32)
                     y_batch_reshaped = tf.reshape(y_batch, logits.shape)
                     
                     if isinstance(loss_fn, str):
@@ -1934,13 +1961,11 @@ def main():
                         if grad is not None:
                             accumulated_gradients[i].assign_add(grad)
                 
-                # Calculate accuracy - reshape y_batch to match logits
+                # Calculate accuracy - ensure consistent data types
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
                 accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
                 
                 return loss_value, accuracy
-
-
 
             
             # Define validation step function
@@ -1948,7 +1973,8 @@ def main():
             def val_step(x_batch, y_batch):
                 logits = model(x_batch, training=False)
                 
-                # Reshape y_batch to match logits shape
+                # Ensure y_batch is float32 and reshape to match logits
+                y_batch = tf.cast(y_batch, tf.float32)
                 y_batch_reshaped = tf.reshape(y_batch, logits.shape)
                 
                 if isinstance(loss_fn, str):
@@ -1959,7 +1985,7 @@ def main():
                 else:
                     loss_value = loss_fn(y_batch_reshaped, logits)
                 
-                # Calculate accuracy
+                # Calculate accuracy - ensure consistent data types
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
                 accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
                 

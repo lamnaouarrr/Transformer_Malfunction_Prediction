@@ -986,6 +986,7 @@ def create_ast_model(input_shape, config=None):
 
     # Use a threshold-adjusted sigmoid for better sensitivity to abnormal class
     outputs = Dense(1, activation="sigmoid", kernel_regularizer=l2(l2_reg), bias_initializer=tf.keras.initializers.Constant(-1.0))(x)
+    outputs = tf.keras.layers.Lambda(lambda x: tf.squeeze(x, axis=-1))(outputs)
     
     return Model(inputs=inputs, outputs=outputs, name="AudioSpectrogramTransformer")
 
@@ -1293,6 +1294,43 @@ def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=Non
     return all_spectrograms, all_labels
 
 
+def create_small_dataset(files, labels, max_files=100):
+    """
+    Create a small subset of the dataset for debugging
+    """
+    if len(files) <= max_files:
+        return files, labels
+    
+    # Ensure we get a balanced sample if labels are provided
+    if labels is not None and len(labels) > 0:
+        normal_indices = np.where(labels == 0)[0]
+        abnormal_indices = np.where(labels == 1)[0]
+        
+        # Take half from each class, or all if less than half of max_files
+        n_normal = min(len(normal_indices), max_files // 2)
+        n_abnormal = min(len(abnormal_indices), max_files // 2)
+        
+        # If one class has fewer samples, take more from the other
+        if n_normal < max_files // 2:
+            n_abnormal = min(len(abnormal_indices), max_files - n_normal)
+        if n_abnormal < max_files // 2:
+            n_normal = min(len(normal_indices), max_files - n_abnormal)
+        
+        # Randomly select samples from each class
+        selected_normal = np.random.choice(normal_indices, n_normal, replace=False)
+        selected_abnormal = np.random.choice(abnormal_indices, n_abnormal, replace=False)
+        
+        # Combine indices
+        selected_indices = np.concatenate([selected_normal, selected_abnormal])
+        np.random.shuffle(selected_indices)
+        
+        return [files[i] for i in selected_indices], labels[selected_indices]
+    else:
+        # If no labels, just take a random sample
+        indices = np.random.choice(len(files), min(max_files, len(files)), replace=False)
+        return [files[i] for i in indices], labels[indices] if labels is not None else None
+
+
 
 ########################################################################
 # main
@@ -1321,7 +1359,6 @@ def main():
             logger.info("GPU memory limit set to 28GB for V100")
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory limit: {e}")
-
 
 
     with open("baseline_AST.yaml", "r") as stream:
@@ -1459,6 +1496,20 @@ def main():
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
+
+
+    debug_mode = param.get("debug", {}).get("enabled", False)
+    debug_sample_size = param.get("debug", {}).get("sample_size", 100)
+
+
+    if debug_mode:
+        logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
+        train_files, train_labels = create_small_dataset(train_files, train_labels, debug_sample_size)
+        val_files, val_labels = create_small_dataset(val_files, val_labels, debug_sample_size // 2)
+        test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
+        
+        logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
+
 
     preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
     chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
@@ -1852,13 +1903,17 @@ def main():
             def train_step(x_batch, y_batch, first_batch):
                 with tf.GradientTape() as tape:
                     logits = model(x_batch, training=True)
+                    
+                    # Reshape y_batch to match logits shape
+                    y_batch_reshaped = tf.reshape(y_batch, logits.shape)
+                    
                     if isinstance(loss_fn, str):
                         if loss_fn == "binary_crossentropy":
-                            loss_value = tf.keras.losses.binary_crossentropy(y_batch, logits)
+                            loss_value = tf.keras.losses.binary_crossentropy(y_batch_reshaped, logits)
                         else:
-                            loss_value = tf.keras.losses.get(loss_fn)(y_batch, logits)
+                            loss_value = tf.keras.losses.get(loss_fn)(y_batch_reshaped, logits)
                     else:
-                        loss_value = loss_fn(y_batch, logits)
+                        loss_value = loss_fn(y_batch_reshaped, logits)
                     
                     # Scale the loss to account for gradient accumulation
                     scaled_loss = loss_value / tf.cast(accum_steps, dtype=loss_value.dtype)
@@ -1879,31 +1934,37 @@ def main():
                         if grad is not None:
                             accumulated_gradients[i].assign_add(grad)
                 
-                # Calculate accuracy
+                # Calculate accuracy - reshape y_batch to match logits
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
                 
                 return loss_value, accuracy
+
+
+
             
             # Define validation step function
             @tf.function
             def val_step(x_batch, y_batch):
                 logits = model(x_batch, training=False)
                 
+                # Reshape y_batch to match logits shape
+                y_batch_reshaped = tf.reshape(y_batch, logits.shape)
+                
                 if isinstance(loss_fn, str):
                     if loss_fn == "binary_crossentropy":
-                        loss_value = tf.keras.losses.binary_crossentropy(y_batch, logits)
+                        loss_value = tf.keras.losses.binary_crossentropy(y_batch_reshaped, logits)
                     else:
-                        loss_value = tf.keras.losses.get(loss_fn)(y_batch, logits)
+                        loss_value = tf.keras.losses.get(loss_fn)(y_batch_reshaped, logits)
                 else:
-                    loss_value = loss_fn(y_batch, logits)
+                    loss_value = loss_fn(y_batch_reshaped, logits)
                 
                 # Calculate accuracy
                 y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch, y_pred), tf.float32))
+                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
                 
                 return loss_value, accuracy
-            
+
 
             # Training loop
             epochs = param["fit"]["epochs"]

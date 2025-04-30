@@ -132,6 +132,12 @@ dataset:
   file_extension: "wav"
   default_prediction: 0.5  # Default value for error cases
 
+# Debug settings
+debug:
+  enabled: true  # Set to false for full dataset
+  sample_size: 100  # Number of samples to use in debug mode
+
+
 # Visualization parameters
 visualization:
   figure_size: [30, 20]

@@ -1327,8 +1327,18 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     """
     Create a TensorFlow dataset that streams and processes audio files on-the-fly
     """
+    # Check if file_list is empty or None
+    if file_list is None or len(file_list) == 0:
+        logger.error("Empty file list provided to create_tf_dataset")
+        return None
+        
     if labels is not None:
         labels = np.array(labels, dtype=np.float32)  # Ensure float32 dtype
+        
+        # Check if labels match file_list length
+        if len(labels) != len(file_list):
+            logger.error(f"Mismatch between file_list length ({len(file_list)}) and labels length ({len(labels)})")
+            return None
     
     # Function to load and process a single file
     def process_file(file_path, label=None):
@@ -1398,7 +1408,28 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             result[1].set_shape(())
             return result[0], result[1]
         return result[0]
-
+    
+    # Create the dataset
+    try:
+        if labels is not None:
+            dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
+            dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
+        else:
+            dataset = tf.data.Dataset.from_tensor_slices(file_list)
+            dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=tf.data.AUTOTUNE)
+        
+        # Apply dataset transformations
+        if is_training:
+            dataset = dataset.shuffle(buffer_size=min(len(file_list), 10000))
+        
+        # Batch and prefetch
+        dataset = dataset.batch(batch_size)
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+        
+        return dataset
+    except Exception as e:
+        logger.error(f"Error creating TensorFlow dataset: {e}")
+        return None
 
 def create_small_dataset(files, labels, max_files=100):
     """
@@ -1517,6 +1548,20 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
     """
     Implement progressive training with increasing spectrogram sizes
     """
+    # Check if input data is valid
+    if not train_files or train_files is None or len(train_files) == 0:
+        logger.error("No training files provided for progressive training")
+        return None, None
+        
+    if not val_files or val_files is None or len(val_files) == 0:
+        logger.warning("No validation files provided for progressive training, using a portion of training data")
+        # Use a portion of training data for validation if no validation data is provided
+        split_idx = int(len(train_files) * 0.9)
+        val_files = train_files[split_idx:]
+        val_labels = train_labels[split_idx:] if train_labels is not None else None
+        train_files = train_files[:split_idx]
+        train_labels = train_labels[:split_idx] if train_labels is not None else None
+    
     # Get base parameters
     base_epochs = param.get("fit", {}).get("epochs", 30)
     batch_size = param.get("fit", {}).get("batch_size", 16)
@@ -1525,7 +1570,7 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
     progressive_config = param.get("training", {}).get("progressive_training", {})
     if not progressive_config.get("enabled", False):
         logger.info("Progressive training disabled")
-        return None
+        return None, None
     
     # Get sizes from config or use defaults
     sizes = progressive_config.get("sizes", [(32, 48), (48, 64), (64, 96)])
@@ -1549,21 +1594,35 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
         param["feature"]["target_shape"] = size
         
         # Create datasets with current size
-        train_dataset = create_tf_dataset(
-            train_files, 
-            train_labels, 
-            batch_size=batch_size, 
-            is_training=True, 
-            param=param
-        )
-        
-        val_dataset = create_tf_dataset(
-            val_files, 
-            val_labels, 
-            batch_size=batch_size, 
-            is_training=False, 
-            param=param
-        )
+        try:
+            train_dataset = create_tf_dataset(
+                train_files, 
+                train_labels, 
+                batch_size=batch_size, 
+                is_training=True, 
+                param=param
+            )
+            
+            val_dataset = create_tf_dataset(
+                val_files, 
+                val_labels, 
+                batch_size=batch_size, 
+                is_training=False, 
+                param=param
+            )
+            
+            # Verify datasets are not None
+            if train_dataset is None:
+                logger.error(f"Failed to create training dataset for size {size}")
+                return None, None
+                
+            if val_dataset is None:
+                logger.error(f"Failed to create validation dataset for size {size}")
+                return None, None
+                
+        except Exception as e:
+            logger.error(f"Error creating datasets for size {size}: {e}")
+            return None, None
         
         # If first stage, create model from scratch
         if i == 0:
@@ -1622,15 +1681,20 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
         ]
         
         # Train for this stage
-        history = model.fit(
-            train_dataset,
-            epochs=epochs,
-            validation_data=val_dataset,
-            callbacks=callbacks,
-            verbose=1
-        )
-        
-        all_history.append(history)
+        try:
+            history = model.fit(
+                train_dataset,
+                epochs=epochs,
+                validation_data=val_dataset,
+                callbacks=callbacks,
+                verbose=1
+            )
+            
+            all_history.append(history)
+        except Exception as e:
+            logger.error(f"Error during training for size {size}: {e}")
+            # Continue with next size instead of failing completely
+            continue
         
         # Save intermediate model
         try:
@@ -1640,6 +1704,7 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
             logger.warning(f"Error saving model for stage {i+1}: {e}")
     
     return model, all_history
+
 
 ########################################################################
 # main
@@ -2111,45 +2176,57 @@ def main():
 
     if use_progressive and not os.path.exists(model_file):
         logger.info("Using progressive training with increasing spectrogram sizes")
-        model, progressive_history = implement_progressive_training(
-            None,  # No initial model
-            train_files,
-            train_labels,
-            val_files,
-            val_labels,
-            param
-        )
         
-        # Combine histories
-        history = {
-            'history': {
-                'loss': [],
-                'accuracy': [],
-                'val_loss': [],
-                'val_accuracy': []
-            }
-        }
-        
-        for h in progressive_history:
-            history['history']['loss'].extend(h.history['loss'])
-            history['history']['accuracy'].extend(h.history['accuracy'])
-            history['history']['val_loss'].extend(h.history['val_loss'])
-            history['history']['val_accuracy'].extend(h.history['val_accuracy'])
-        
-        # Convert to object with history attribute for compatibility
-        history = type('History', (), history)
-        
-        # Save final model
-        try:
-            model.save(model_file)
-            logger.info(f"Model saved to {model_file}")
-        except Exception as e:
-            logger.warning(f"Error saving model: {e}")
-            try:
-                model.save(model_file.replace('.keras', ''))
-                logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
-            except Exception as e2:
-                logger.error(f"All attempts to save model failed: {e2}")
+        # Check if we have valid training and validation files
+        if not train_files or len(train_files) == 0:
+            logger.error("No training files available for progressive training")
+        elif not val_files or len(val_files) == 0:
+            logger.warning("No validation files for progressive training, will use a portion of training data")
+        else:
+            model, progressive_history = implement_progressive_training(
+                None,  # No initial model
+                train_files,
+                train_labels,
+                val_files,
+                val_labels,
+                param
+            )
+            
+            # Check if progressive training was successful
+            if model is None:
+                logger.error("Progressive training failed, falling back to standard training")
+                use_progressive = False
+            else:
+                # Combine histories
+                history = {
+                    'history': {
+                        'loss': [],
+                        'accuracy': [],
+                        'val_loss': [],
+                        'val_accuracy': []
+                    }
+                }
+                
+                for h in progressive_history:
+                    history['history']['loss'].extend(h.history['loss'])
+                    history['history']['accuracy'].extend(h.history['accuracy'])
+                    history['history']['val_loss'].extend(h.history['val_loss'])
+                    history['history']['val_accuracy'].extend(h.history['val_accuracy'])
+                
+                # Convert to object with history attribute for compatibility
+                history = type('History', (), history)
+                
+                # Save final model
+                try:
+                    model.save(model_file)
+                    logger.info(f"Model saved to {model_file}")
+                except Exception as e:
+                    logger.warning(f"Error saving model: {e}")
+                    try:
+                        model.save(model_file.replace('.keras', ''))
+                        logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
+                    except Exception as e2:
+                        logger.error(f"All attempts to save model failed: {e2}")
     else:
         # Regular training without progressive resizing
         if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):

@@ -1334,6 +1334,61 @@ def create_small_dataset(files, labels, max_files=100):
         return [files[i] for i in indices], labels[indices] if labels is not None else None
 
 
+def find_optimal_learning_rate(model, train_data, train_labels, batch_size=32, min_lr=1e-7, max_lr=1e-1, epochs=1):
+    """
+    Find the optimal learning rate by training with exponentially increasing learning rate
+    """
+    # Number of batches in one epoch
+    num_batches = len(train_data) // batch_size
+    # Total number of steps
+    total_steps = num_batches * epochs
+    # Learning rate schedule
+    lr_schedule = tf.keras.callbacks.LearningRateScheduler(
+        lambda step: min_lr * (max_lr / min_lr) ** (step / total_steps)
+    )
+    
+    # Create a new model with the same architecture
+    temp_model = tf.keras.models.clone_model(model)
+    temp_model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=min_lr),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    # Train the model with increasing learning rate
+    history = temp_model.fit(
+        train_data, train_labels,
+        batch_size=batch_size,
+        epochs=epochs,
+        callbacks=[lr_schedule],
+        verbose=1
+    )
+    
+    # Get the learning rates and losses
+    learning_rates = min_lr * (max_lr / min_lr) ** (np.arange(len(history.history['loss'])) / total_steps)
+    losses = history.history['loss']
+    
+    # Plot the learning rate vs loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(learning_rates, losses)
+    plt.xscale('log')
+    plt.xlabel('Learning Rate')
+    plt.ylabel('Loss')
+    plt.title('Learning Rate Finder')
+    plt.savefig('./result/result_AST/learning_rate_finder.png')
+    
+    # Find the optimal learning rate (where loss is still decreasing but before it explodes)
+    optimal_idx = np.argmin(losses)
+    if optimal_idx == len(losses) - 1:
+        # If the minimum is at the end, choose a point before it
+        optimal_idx = len(losses) // 2
+    
+    optimal_lr = learning_rates[optimal_idx]
+    logger.info(f"Optimal learning rate found: {optimal_lr:.6f}")
+    
+    return optimal_lr
+
+
 
 ########################################################################
 # main
@@ -1344,10 +1399,15 @@ def main():
     if physical_devices:
         for device in physical_devices:
             try:
-                tf.config.experimental.set_memory_growth(device, False)
-                logger.info(f"Using dynamic memory allocation for {device}")
+                # Enable memory growth for better memory management
+                tf.config.experimental.set_memory_growth(device, True)
+                logger.info(f"Enabled memory growth for {device}")
             except Exception as e:
-                logger.warning(f"Could not configure memory allocation for {device}: {e}")
+                logger.warning(f"Could not set memory growth for {device}: {e}")
+        
+        # Verify GPU is being used
+        logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
+        logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
     
         # Configure GPU memory for V100 32GB
     gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -1714,16 +1774,17 @@ def main():
         total_samples = np.sum(class_counts)
         
         # Calculate weights inversely proportional to class frequencies
-        # But ensure abnormal class (1) gets higher weight
-        abnormal_weight_multiplier = param.get("fit", {}).get("abnormal_weight_multiplier", 1.5)
+        # But ensure abnormal class (1) gets MUCH higher weight
+        abnormal_weight_multiplier = param.get("fit", {}).get("abnormal_weight_multiplier", 3.0)  # Increased from 1.5 to 3.0
         
         class_weights = {
-            0: total_samples / (class_counts[0] * 2) if class_counts[0] > 0 else 1.0,
-            1: (total_samples / (class_counts[1] * 2) * abnormal_weight_multiplier) 
-            if len(class_counts) > 1 and class_counts[1] > 0 else 5.0
+            0: 1.0,  # Fixed weight for normal class
+            1: 10.0 * abnormal_weight_multiplier  # Much higher weight for abnormal class
+            if len(class_counts) > 1 and class_counts[1] > 0 else 15.0
         }
         
-        logger.info(f"Using calculated class weights: {class_weights}")
+        logger.info(f"Using VERY aggressive class weights to prioritize abnormal detection: {class_weights}")
+
     else:
         # Use default weights that prioritize abnormal class
         class_weights = {
@@ -1752,6 +1813,46 @@ def main():
     if val_labels_expanded.dtype != np.float32:
         logger.info("Converting val_labels to float32")
         val_labels_expanded = val_labels_expanded.astype(np.float32)
+
+    # Add this before training if you want to find the optimal learning rate
+    if param.get("training", {}).get("find_optimal_lr", False):
+        logger.info("Running learning rate finder...")
+        optimal_lr = find_optimal_learning_rate(
+            model, 
+            train_data, 
+            train_labels_expanded,
+            batch_size=batch_size,
+            min_lr=1e-7,
+            max_lr=1e-1
+        )
+        # Update the learning rate
+        learning_rate = optimal_lr
+        logger.info(f"Updated learning rate to optimal value: {learning_rate}")
+
+
+
+    def verify_gpu_usage():
+        """Verify that TensorFlow is properly using the GPU"""
+        # Create a simple test tensor and operation
+        with tf.device('/GPU:0'):
+            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
+            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
+            c = tf.matmul(a, b)
+        
+        # Check if the operation was executed on GPU
+        logger.info(f"Test tensor device: {c.device}")
+        if 'GPU' in c.device:
+            logger.info("✓ GPU is properly configured and being used")
+        else:
+            logger.warning("⚠ GPU is not being used for tensor operations!")
+        
+        return 'GPU' in c.device
+
+    print("============== VERIFYING GPU USAGE ==============")
+    is_gpu_working = verify_gpu_usage()
+    if not is_gpu_working:
+        logger.warning("GPU is not being used! Training will be slow.")
+        return
 
 
     print("============== MODEL TRAINING ==============")
@@ -1793,6 +1894,10 @@ def main():
         # Reduce learning rate on plateau
         lr_config = param.get("fit", {}).get("lr_scheduler", {})
         if lr_config.get("enabled", False):
+            logger.info("Adding ReduceLROnPlateau callback with settings:")
+            logger.info(f"  - Monitor: {lr_config.get('monitor', 'val_loss')}")
+            logger.info(f"  - Factor: {lr_config.get('factor', 0.1)}")
+            logger.info(f"  - Patience: {lr_config.get('patience', 5)}")
             callbacks.append(ReduceLROnPlateau(
                 monitor=lr_config.get("monitor", "val_loss"),
                 factor=lr_config.get("factor", 0.1),
@@ -1802,6 +1907,7 @@ def main():
                 min_lr=lr_config.get("min_lr", 0.00000001),
                 verbose=1
             ))
+
         
         # Model checkpoint
         checkpoint_config = param.get("fit", {}).get("checkpointing", {})
@@ -2206,9 +2312,17 @@ def main():
         # Predict on test set
         y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
         # Use a lower threshold to increase sensitivity to abnormal class
-        detection_threshold = 0.3  # Lower threshold to catch more abnormal samples
+        detection_threshold = 0.2  # Further lowered to catch more abnormal samples
+        logger.info(f"Using very low detection threshold: {detection_threshold} to improve abnormal detection")
         y_pred_binary = (y_pred > detection_threshold).astype(int)
-        logger.info(f"Using adjusted detection threshold: {detection_threshold}")
+
+        # Log the raw prediction values to understand the model's output distribution
+        if len(y_pred) > 0:
+            logger.info(f"Raw prediction statistics:")
+            logger.info(f"  - Min: {np.min(y_pred):.4f}, Max: {np.max(y_pred):.4f}")
+            logger.info(f"  - Mean: {np.mean(y_pred):.4f}, Median: {np.median(y_pred):.4f}")
+            logger.info(f"  - 25th percentile: {np.percentile(y_pred, 25):.4f}")
+            logger.info(f"  - 75th percentile: {np.percentile(y_pred, 75):.4f}")
         gc.collect()
 
         # Calculate metrics
@@ -2276,10 +2390,7 @@ def main():
             "overall_f1": float(overall_f1),
         }
         results.update(overall_results)
-        results["timing"] = {
-            "total_execution_time_seconds": float(total_time),
-            "model_training_time_seconds": float(training_time),
-        }
+
 
         logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
         logger.info(f"Overall Precision: {overall_precision:.4f}")
@@ -2295,13 +2406,18 @@ def main():
         )
         visualizer.save_figure(overall_cm_img)
 
+    total_time = time.time() - start_time
+    results["timing"] = {
+        "total_execution_time_seconds": float(total_time),
+        "model_training_time_seconds": float(training_time),
+    }
+
     # Save results to YAML
     with open(result_file, "w") as f:
         yaml.safe_dump(results, f)
     logger.info(f"Results saved to {result_file}")
 
     # Log total execution time
-    total_time = time.time() - start_time
     logger.info(f"Total execution time: {total_time:.2f} seconds")
 
 if __name__ == "__main__":

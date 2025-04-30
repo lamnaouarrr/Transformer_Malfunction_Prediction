@@ -42,7 +42,7 @@ feature:
 fit:
   compile:
     optimizer: "adam"
-    learning_rate: 0.0002
+    learning_rate: 0.0005
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
@@ -54,7 +54,7 @@ fit:
   early_stopping:
     enabled: true
     monitor: "val_loss"
-    patience: 10
+    patience: 15
     min_delta: 0.001
     restore_best_weights: true
   weight_factor: 1.5  # For non-problematic IDs
@@ -77,8 +77,8 @@ fit:
     mode: "max"
     save_best_only: true
   class_weight_balancing: true
-  abnormal_weight_multiplier: 1.5
-  default_abnormal_weight: 5.0 
+  abnormal_weight_multiplier: 3.0
+  default_abnormal_weight: 10.0 
   warmup:
     enabled: true
     epochs: 5
@@ -86,9 +86,10 @@ fit:
 
 # Training optimizations
 training:
+  find_optimal_lr: true
   mixed_precision: true
   xla_acceleration: true
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   gradient_clip_norm: 1.0
   mixup:
     enabled: true

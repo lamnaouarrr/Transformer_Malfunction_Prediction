@@ -356,7 +356,11 @@ def file_to_spectrogram(file_name,
             frames = param["feature"].get("frames", None)
             stride = param["feature"].get("stride", None)
             
-            if frames and stride:
+            # Check if we're in progressive training mode
+            in_progressive_mode = param.get("feature", {}).get("target_shape", None) is not None
+            
+            # If in progressive mode, don't use frames/stride processing
+            if frames and stride and not in_progressive_mode:
                 # Create frame-based spectrograms
                 frame_length = log_mel_spectrogram.shape[1]
                 frame_samples = []
@@ -381,18 +385,35 @@ def file_to_spectrogram(file_name,
         if np.max(log_mel_spectrogram) > np.min(log_mel_spectrogram):
             log_mel_spectrogram = (log_mel_spectrogram - np.min(log_mel_spectrogram)) / (np.max(log_mel_spectrogram) - np.min(log_mel_spectrogram))
         
-        # Ensure minimum size for transformer input - increased for V100
-        min_time_dim = param.get("model", {}).get("architecture", {}).get("transformer", {}).get("patch_size", 16) * 4
-        if log_mel_spectrogram.shape[1] < min_time_dim:
-            # Pad if too short
-            pad_width = min_time_dim - log_mel_spectrogram.shape[1]
-            log_mel_spectrogram = np.pad(log_mel_spectrogram, ((0, 0), (0, pad_width)), mode='constant')
-        
-        # Trim or sample if too long - increased for V100
-        max_time_dim = 1024  # Increased from 512 for V100
-        if log_mel_spectrogram.shape[1] > max_time_dim:
-            start = np.random.randint(0, log_mel_spectrogram.shape[1] - max_time_dim)
-            log_mel_spectrogram = log_mel_spectrogram[:, start:start+max_time_dim]
+        # If we have a target shape, resize to it
+        target_shape = param.get("feature", {}).get("target_shape", None)
+        if target_shape:
+            # Ensure we have a 2D spectrogram of the right shape
+            if log_mel_spectrogram.shape[0] != target_shape[0] or log_mel_spectrogram.shape[1] != target_shape[1]:
+                try:
+                    from skimage.transform import resize
+                    log_mel_spectrogram = resize(log_mel_spectrogram, target_shape, anti_aliasing=True, mode='reflect')
+                except Exception as e:
+                    logger.error(f"Error resizing spectrogram: {e}")
+                    # Fall back to simple padding/cropping
+                    temp_spec = np.zeros(target_shape, dtype=np.float32)
+                    freq_dim = min(log_mel_spectrogram.shape[0], target_shape[0])
+                    time_dim = min(log_mel_spectrogram.shape[1], target_shape[1])
+                    temp_spec[:freq_dim, :time_dim] = log_mel_spectrogram[:freq_dim, :time_dim]
+                    log_mel_spectrogram = temp_spec
+        else:
+            # Ensure minimum size for transformer input - increased for V100
+            min_time_dim = param.get("model", {}).get("architecture", {}).get("transformer", {}).get("patch_size", 16) * 4
+            if log_mel_spectrogram.shape[1] < min_time_dim:
+                # Pad if too short
+                pad_width = min_time_dim - log_mel_spectrogram.shape[1]
+                log_mel_spectrogram = np.pad(log_mel_spectrogram, ((0, 0), (0, pad_width)), mode='constant')
+            
+            # Trim or sample if too long - increased for V100
+            max_time_dim = 1024  # Increased from 512 for V100
+            if log_mel_spectrogram.shape[1] > max_time_dim:
+                start = np.random.randint(0, log_mel_spectrogram.shape[1] - max_time_dim)
+                log_mel_spectrogram = log_mel_spectrogram[:, start:start+max_time_dim]
             
         return log_mel_spectrogram
         
@@ -1369,6 +1390,11 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
                 target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
                 spec = np.zeros(target_shape, dtype=np.float32)
             
+            # Ensure we have a 2D spectrogram (not 3D with frames)
+            if len(spec.shape) == 3:
+                # If we have multiple frames, just take the first one
+                spec = spec[0]
+            
             # Ensure consistent shape
             target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
             if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
@@ -1393,6 +1419,7 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
                 label = np.float32(label)
                 
             return spec, label
+
         
         # Wrap the function to handle TensorFlow tensors
         result = tf.py_function(
@@ -1623,6 +1650,14 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
         except Exception as e:
             logger.error(f"Error creating datasets for size {size}: {e}")
             return None, None
+
+        # Add this right after creating the datasets
+        logger.info(f"Checking dataset shapes for size {size}...")
+        for x_batch, y_batch in train_dataset.take(1):
+            logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+        for x_batch, y_batch in val_dataset.take(1):
+            logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+
         
         # If first stage, create model from scratch
         if i == 0:

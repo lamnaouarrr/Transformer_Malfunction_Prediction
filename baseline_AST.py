@@ -916,7 +916,7 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 def create_ast_model(input_shape, config=None):
     """
-    Create a simplified Audio Spectrogram Transformer model that works reliably
+    Create a balanced Audio Spectrogram model
     """
     if config is None:
         config = {}
@@ -924,53 +924,51 @@ def create_ast_model(input_shape, config=None):
     # Ensure input_shape is fully defined
     if None in input_shape:
         logger.warning(f"Input shape contains None: {input_shape}, using default shape")
-        input_shape = (64, 48)  # Use your default shape
+        input_shape = (64, 48)
     
-    logger.info(f"Creating model with input shape: {input_shape}")
+    logger.info(f"Creating balanced model with input shape: {input_shape}")
     
     # Simplified hyperparameters
-    dropout_rate = 0.3
-    l2_reg = 1e-5
+    dropout_rate = 0.2  # Reduced from 0.3
+    l2_reg = 1e-6  # Reduced from 1e-5
     
-    # Input layer with explicit shape
-    inputs = tf.keras.layers.Input(shape=input_shape, name='input')
+    # Input layer
+    inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Reshape to prepare for CNN (batch, freq, time, 1)
-    x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1), name='reshape')(inputs)
+    # Reshape to prepare for CNN
+    x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
     # First convolutional block
-    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same', 
-                              kernel_regularizer=l2(l2_reg), name='conv1')(x)
-    x = tf.keras.layers.BatchNormalization(name='bn1')(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1, name='leaky1')(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2), name='pool1')(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2, name='drop1')(x)
+    x = tf.keras.layers.Conv2D(16, (3, 3), padding='same', 
+                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)  # Changed from LeakyReLU to ReLU
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
     
     # Second convolutional block
-    x = tf.keras.layers.Conv2D(64, (3, 3), padding='same',
-                              kernel_regularizer=l2(l2_reg), name='conv2')(x)
-    x = tf.keras.layers.BatchNormalization(name='bn2')(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1, name='leaky2')(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2), name='pool2')(x)
-    x = tf.keras.layers.Dropout(dropout_rate/2, name='drop2')(x)
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding='same',
+                              kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+    x = tf.keras.layers.Dropout(dropout_rate)(x)
     
     # Global pooling
-    x = tf.keras.layers.GlobalAveragePooling2D(name='global_pool')(x)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
     
-    # Dense layers
-    x = tf.keras.layers.Dense(128, kernel_regularizer=l2(l2_reg), name='dense1')(x)
-    x = tf.keras.layers.BatchNormalization(name='bn3')(x)
-    x = tf.keras.layers.LeakyReLU(alpha=0.1, name='leaky3')(x)
-    x = tf.keras.layers.Dropout(dropout_rate, name='drop3')(x)
+    # Dense layer
+    x = tf.keras.layers.Dense(64, kernel_regularizer=l2(l2_reg))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.Dropout(dropout_rate)(x)
     
-    # Output layer
-    outputs = tf.keras.layers.Dense(1, activation='sigmoid', name='output')(x)
+    # Output layer with no bias initialization
+    outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
     
     # Create model
-    model = tf.keras.models.Model(inputs=inputs, outputs=outputs, name="SimpleAST")
+    model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
     
     return model
-
 
 
 def preprocess_spectrograms(spectrograms, target_shape):
@@ -1783,17 +1781,12 @@ def main():
         class_counts = np.bincount(train_labels_expanded.astype(int))
         total_samples = np.sum(class_counts)
         
-        # Calculate weights inversely proportional to class frequencies
-        # But ensure abnormal class (1) gets MUCH higher weight
-        abnormal_weight_multiplier = param.get("fit", {}).get("abnormal_weight_multiplier", 3.0)  # Increased from 1.5 to 3.0
-        
         class_weights = {
-            0: 1.0,  # Fixed weight for normal class
-            1: 10.0 * abnormal_weight_multiplier  # Much higher weight for abnormal class
-            if len(class_counts) > 1 and class_counts[1] > 0 else 15.0
+            0: 1.0,  # Normal class
+            1: 2.0   # Abnormal class
         }
         
-        logger.info(f"Using VERY aggressive class weights to prioritize abnormal detection: {class_weights}")
+        logger.info(f"Using balanced class weights: {class_weights}")
 
     else:
         # Use default weights that prioritize abnormal class
@@ -2287,40 +2280,44 @@ def main():
             logger.info(f"Train data shape: {train_data.shape}, dtype: {train_data.dtype}")
             logger.info(f"Train labels shape: {train_labels_expanded.shape}, dtype: {train_labels_expanded.dtype}")
 
-            try:
-                history = model.fit(
-                    train_data,
-                    train_labels_expanded,
-                    batch_size=safe_batch_size,
-                    epochs=safe_epochs,
-                    validation_data=(val_data, val_labels_expanded),
-                    callbacks=callbacks,
-                    class_weight=class_weights,
-                    verbose=1  # Removed sample_weight to simplify
-                )
-            except Exception as e:
-                logger.error(f"Error during model training: {e}")
-                # Try with even simpler settings
-                logger.info("Trying with simpler training settings...")
-                
-                # Recompile the model with simpler settings
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                    loss='binary_crossentropy',
-                    metrics=['accuracy']
-                )
-                
-                # Try training with minimal settings
-                history = model.fit(
-                    train_data,
-                    train_labels_expanded,
-                    batch_size=16,
-                    epochs=10,  # Just try a few epochs to see if it works
-                    validation_data=(val_data, val_labels_expanded),
-                    verbose=1
-                )
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.005),
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
 
+            # Use a simple callback list
+            simple_callbacks = [
+                tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss',
+                    patience=10,
+                    restore_best_weights=True
+                ),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.5,
+                    patience=3,
+                    min_lr=0.0001
+                ),
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath=model_file,
+                    monitor='val_accuracy',
+                    save_best_only=True
+                )
+            ]
 
+            # Train with simple settings
+            logger.info("Training with simplified settings")
+            history = model.fit(
+                train_data,
+                train_labels_expanded,
+                batch_size=32,
+                epochs=30,  # Reduced from 100
+                validation_data=(val_data, val_labels_expanded),
+                class_weight=class_weights,  # Using our balanced class weights
+                callbacks=simple_callbacks,
+                verbose=1
+            )
 
             # Save the trained model
             model.save(model_file)
@@ -2351,13 +2348,46 @@ def main():
     # Preprocess test data
     test_data = preprocess_spectrograms(test_data, target_shape)
 
+    # After making predictions but before applying threshold
+    if len(y_pred) > 0:
+        # Analyze raw predictions
+        logger.info(f"Raw prediction statistics:")
+        logger.info(f"  - Min: {np.min(y_pred):.4f}, Max: {np.max(y_pred):.4f}")
+        logger.info(f"  - Mean: {np.mean(y_pred):.4f}, Median: {np.median(y_pred):.4f}")
+        
+        # Count predictions in different ranges
+        ranges = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        for i in range(len(ranges)-1):
+            count = np.sum((y_pred >= ranges[i]) & (y_pred < ranges[i+1]))
+            logger.info(f"  - Predictions in range [{ranges[i]:.1f}, {ranges[i+1]:.1f}): {count} ({count/len(y_pred)*100:.1f}%)")
+        
+        # Plot histogram of predictions
+        plt.figure(figsize=(10, 6))
+        plt.hist(y_pred, bins=20)
+        plt.title('Distribution of Raw Predictions')
+        plt.xlabel('Prediction Value')
+        plt.ylabel('Count')
+        plt.savefig(f"{param['result_directory']}/prediction_distribution.png")
+        plt.close()
+        
+        # Try multiple thresholds
+        thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
+        logger.info("Evaluating with multiple thresholds:")
+        for thresh in thresholds:
+            y_pred_binary_thresh = (y_pred > thresh).astype(int)
+            accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary_thresh)
+            precision = metrics.precision_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
+            recall = metrics.recall_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
+            f1 = metrics.f1_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
+            logger.info(f"Threshold {thresh:.1f}: Acc={accuracy:.4f}, Prec={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
+
+
     # Evaluate the model
     if test_data.shape[0] > 0:
         # Predict on test set
         y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
-        # Use a lower threshold to increase sensitivity to abnormal class
-        detection_threshold = 0.2  # Further lowered to catch more abnormal samples
-        logger.info(f"Using very low detection threshold: {detection_threshold} to improve abnormal detection")
+        detection_threshold = 0.5
+        logger.info(f"Using standard detection threshold: {detection_threshold}")
         y_pred_binary = (y_pred > detection_threshold).astype(int)
 
         # Log the raw prediction values to understand the model's output distribution

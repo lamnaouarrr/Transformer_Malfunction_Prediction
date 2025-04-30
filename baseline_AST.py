@@ -2286,7 +2286,11 @@ def main():
                 metrics=['accuracy']
             )
 
-            # Use a simple callback list
+            # Create a directory for checkpoints if it doesn't exist
+            checkpoint_dir = os.path.dirname(model_file)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+            # Define callbacks with fixed ModelCheckpoint
             simple_callbacks = [
                 tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss',
@@ -2299,12 +2303,15 @@ def main():
                     patience=3,
                     min_lr=0.0001
                 ),
+                # Fix the ModelCheckpoint callback
                 tf.keras.callbacks.ModelCheckpoint(
                     filepath=model_file,
                     monitor='val_accuracy',
-                    save_best_only=True
+                    save_best_only=True,
+                    save_weights_only=False  # Save the entire model
                 )
             ]
+
 
             # Train with simple settings
             logger.info("Training with simplified settings")

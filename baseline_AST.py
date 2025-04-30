@@ -1920,19 +1920,6 @@ def main():
                 verbose=1
             ))
 
-        
-        # Model checkpoint
-        checkpoint_config = param.get("fit", {}).get("checkpointing", {})
-        if checkpoint_config.get("enabled", False):
-            checkpoint_path = f"{param['model_directory']}/checkpoint_ast.keras"
-            callbacks.append(tf.keras.callbacks.ModelCheckpoint(
-                filepath=checkpoint_path,
-                monitor=checkpoint_config.get("monitor", "val_accuracy"),
-                mode=checkpoint_config.get("mode", "max"),
-                save_best_only=checkpoint_config.get("save_best_only", True),
-                verbose=1
-            ))
-
 
         # Add learning rate scheduler with warmup
         callbacks.append(
@@ -2332,6 +2319,20 @@ def main():
     # Log training time
     training_time = time.time() - model_start_time
     logger.info(f"Model training completed in {training_time:.2f} seconds")
+
+    # Save model after training completes
+    try:
+        model.save(model_file)
+        logger.info(f"Model saved to {model_file}")
+    except Exception as e:
+        logger.warning(f"Error saving model: {e}")
+        # Try alternative approach
+        try:
+            model.save(model_file.replace('.keras', ''))
+            logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
+        except Exception as e2:
+            logger.error(f"All attempts to save model failed: {e2}")
+
 
     print("============== EVALUATION ==============")
     # Evaluate on test set

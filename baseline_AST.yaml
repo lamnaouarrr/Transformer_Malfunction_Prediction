@@ -46,7 +46,7 @@ fit:
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
-  epochs: 30
+  epochs: 100
   batch_size: 32
   shuffle: True
   validation_split: 0.1

@@ -1677,7 +1677,7 @@ def main():
         logger.info(f"Using calculated class weights: {class_weights}")
 
     else:
-        # Use default weights that prioritize abnormal class
+        # Use default weights that prioritize abnormal class.
         class_weights = {
             0: 1.0,
             1: param.get("fit", {}).get("default_abnormal_weight", 5.0)

@@ -1518,12 +1518,6 @@ def main():
     if len(parts) < 4:
         logger.warning(f"Filename format incorrect: {filename}")
         return  # Exit main() if filename format is incorrect
-
-    condition = parts[0]  # normal or abnormal
-    db = parts[1]
-    machine_type = parts[2]
-    machine_id = parts[3].split('-')[0] if '-' in parts[3] else parts[3]
-    print(f"DEBUG: Extracted - condition: {condition}, db: {db}, machine_type: {machine_type}, machine_id: {machine_id}")
     
     # Use a straightforward key without unintended characters
     evaluation_result_key = "overall_model"
@@ -1852,39 +1846,6 @@ def main():
         # Create the LRFinder callback
         lr_finder = LRFinder(min_lr=1e-7, max_lr=1e-1, steps=100)
         
-        # Train with improved settings
-        logger.info("Training with improved settings")
-        history = model.fit(
-            train_data,
-            train_labels_expanded,
-            batch_size=64,  # Increased batch size for V100
-            epochs=50,  # More epochs with early stopping
-            validation_data=(val_data, val_labels_expanded),
-            class_weight=class_weights,  # Using our balanced class weights
-            callbacks=[
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=15,  # More patience
-                    restore_best_weights=True
-                ),
-                tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,  # More gradual reduction
-                    patience=5,
-                    min_lr=0.00001
-                ),
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=model_file,
-                    monitor='val_loss',
-                    save_best_only=True,
-                    save_weights_only=True,
-                    verbose=1
-                )
-            ],
-            verbose=1
-        )
-
-        
         # Plot learning rate vs loss
         plt.figure(figsize=(10, 6))
         plt.plot(lr_finder.learning_rates, lr_finder.losses)
@@ -2028,17 +1989,7 @@ def main():
             # Calculate warmup steps
             warmup_epochs = warmup_config.get("epochs", 5)
             warmup_steps = steps_per_epoch * warmup_epochs
-            
-            # Create scheduler
-            warmup_lr = WarmUpCosineDecayScheduler(
-                learning_rate_base=learning_rate,
-                total_steps=total_steps,
-                warmup_steps=warmup_steps,
-                hold_base_rate_steps=steps_per_epoch * warmup_config.get("hold_epochs", 0)
-            )
-            
-            callbacks.append(warmup_lr)
-            logger.info(f"Added warmup learning rate scheduler with {warmup_epochs} warmup epochs")
+
 
         compile_params = param["fit"]["compile"].copy()
         loss_type = param.get("model", {}).get("loss", "binary_crossentropy")
@@ -2084,14 +2035,6 @@ def main():
 
         
         compile_params["metrics"] = ['accuracy']
-        
-        # Sample weights for class balance
-        sample_weights = np.ones(len(train_data))
-        
-        # Apply uniform sample weights - no machine-specific weighting
-        if param.get("fit", {}).get("apply_sample_weights", False):
-            weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
-            sample_weights *= weight_factor
         
         if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
             logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
@@ -2305,21 +2248,6 @@ def main():
                 os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
             else:
                 logger.info("XLA acceleration disabled to avoid shape issues")
-            
-            # Check for data shape mismatch and fix it
-            if train_data.shape[0] != train_labels_expanded.shape[0]:
-                logger.warning(f"Data shape mismatch! X: {train_data.shape[0]} samples, y: {train_labels_expanded.shape[0]} labels")
-                
-                if train_data.shape[0] > train_labels_expanded.shape[0]:
-                    # Too many features, need to reduce
-                    train_data = train_data[:train_labels_expanded.shape[0]]
-                    sample_weights = sample_weights[:train_labels_expanded.shape[0]]
-                    logger.info(f"Reduced X to match y: {train_data.shape}")
-                else:
-                    #Too many labels, need to reduce
-                    train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
-                    sample_weights = sample_weights[:train_data.shape[0]]
-                    logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
 
             # Apply mixup augmentation if enabled
             if False and param.get("training", {}).get("mixup", {}).get("enabled", False):
@@ -2365,29 +2293,37 @@ def main():
                 metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]  # Track more metrics
             )
 
+            # Train with improved settings
+            logger.info("Training with improved settings")
+            history = model.fit(
+                train_data,
+                train_labels_expanded,
+                batch_size=64,
+                epochs=50,
+                validation_data=(val_data, val_labels_expanded),
+                class_weight=class_weights,
+                callbacks=callbacks,
+                verbose=1
+            )
 
 
             # Create a directory for checkpoints if it doesn't exist
             checkpoint_dir = os.path.dirname(model_file)
             os.makedirs(checkpoint_dir, exist_ok=True)
 
-            # Define callbacks without ModelCheckpoint
-            simple_callbacks = [
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=10,
-                    restore_best_weights=True
-                ),
-                tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,
-                    patience=3,
-                    min_lr=0.0001
-                )
-            ]
 
-        # Visualize training history
-        visualizer.loss_plot(history, machine_type=machine_type, machine_id=machine_id, db=db)
+        # Make sure history exists before plotting
+        if 'history' in locals():
+            # Define default values for variables that might not be defined
+            machine_type_val = machine_type if 'machine_type' in locals() else None
+            machine_id_val = machine_id if 'machine_id' in locals() else None
+            db_val = db if 'db' in locals() else None
+            
+            # Plot the training history
+            visualizer.loss_plot(history, machine_type=machine_type_val, machine_id=machine_id_val, db=db_val)
+        else:
+            logger.warning("No training history available to plot")
+
         visualizer.save_figure(history_img)
 
     # Log training time

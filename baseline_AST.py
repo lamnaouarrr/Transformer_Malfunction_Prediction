@@ -1868,9 +1868,22 @@ def main():
     model_config = param.get("model", {}).get("architecture", {})
     model.summary()
 
-    if os.path.exists(model_file):
-        model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-        logger.info("Model loaded from file, no training performed")
+    if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
+        try:
+            # Try loading with different formats
+            if os.path.exists(model_file):
+                model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
+            else:
+                model = tf.keras.models.load_model(f"{model_file}", custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
+            logger.info("Model loaded from file, no training performed")
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            # Create a new model
+            model = create_ast_model(
+                input_shape=(target_shape[0], target_shape[1]),
+                config=param.get("model", {}).get("architecture", {})
+            )
+            logger.info("Created new model due to loading error")
     else:
         # Define callbacks
         callbacks = []
@@ -1912,13 +1925,14 @@ def main():
         checkpoint_config = param.get("fit", {}).get("checkpointing", {})
         if checkpoint_config.get("enabled", False):
             checkpoint_path = f"{param['model_directory']}/checkpoint_ast.keras"
-            callbacks.append(ModelCheckpoint(
+            callbacks.append(tf.keras.callbacks.ModelCheckpoint(
                 filepath=checkpoint_path,
                 monitor=checkpoint_config.get("monitor", "val_accuracy"),
                 mode=checkpoint_config.get("mode", "max"),
                 save_best_only=checkpoint_config.get("save_best_only", True),
                 verbose=1
             ))
+
 
         # Add learning rate scheduler with warmup
         callbacks.append(
@@ -2159,8 +2173,19 @@ def main():
                         if early_stopping_callback.best is None or current < early_stopping_callback.best:
                             early_stopping_callback.best = current
                             early_stopping_callback.wait = 0
-                            # Save best model
-                            model.save(model_file)
+                            try:
+                                # Save with the native Keras format
+                                tf.keras.models.save_model(
+                                    model,
+                                    model_file,
+                                    overwrite=True,
+                                    include_optimizer=True,
+                                    save_format='keras'
+                                )
+                                logger.info(f"Model saved to {model_file}")
+                            except Exception as e:
+                                logger.warning(f"Error saving model: {e}")
+
                             logger.info(f"Saved best model at epoch {epoch+1}")
                         else:
                             early_stopping_callback.wait += 1
@@ -2171,8 +2196,19 @@ def main():
                         if early_stopping_callback.best is None or current > early_stopping_callback.best:
                             early_stopping_callback.best = current
                             early_stopping_callback.wait = 0
-                            # Save best model
-                            model.save(model_file)
+                            try:
+                                # Save with the native Keras format
+                                tf.keras.models.save_model(
+                                    model,
+                                    model_file,
+                                    overwrite=True,
+                                    include_optimizer=True,
+                                    save_format='keras'
+                                )
+                                logger.info(f"Model saved to {model_file}")
+                            except Exception as e:
+                                logger.warning(f"Error saving model: {e}")
+
                             logger.info(f"Saved best model at epoch {epoch+1}")
                         else:
                             early_stopping_callback.wait += 1
@@ -2182,7 +2218,18 @@ def main():
                 
                 # Save model periodically
                 if (epoch + 1) % 5 == 0:
-                    model.save(f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras")
+                    try:
+                        # Save with the native Keras format
+                        tf.keras.models.save_model(
+                            model,
+                            f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras",
+                            overwrite=True,
+                            include_optimizer=True,
+                            save_format='keras'
+                        )
+                        logger.info(f"Saved model checkpoint at epoch {epoch+1}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save model checkpoint at epoch {epoch+1}: {e}")
                     logger.info(f"Saved model checkpoint at epoch {epoch+1}")
                 
                 # Clear memory between epochs

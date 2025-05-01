@@ -50,6 +50,8 @@ from transformers import TFViTModel, ViTConfig
 __versions__ = "3.0.0"
 ########################################################################
 
+_SPECTROGRAM_CACHE = {}
+
 def binary_cross_entropy_loss(y_true, y_pred):
     """
     Binary cross-entropy loss for autoencoder with improved memory efficiency
@@ -316,6 +318,11 @@ def file_to_spectrogram(file_name,
     """
     Convert file_name to a 2D spectrogram with optional augmentation for normal data.
     """
+    # Check cache first (skip cache if augmentation is on)
+    cache_key = f"{file_name}_{n_mels}_{n_fft}_{hop_length}_{power}"
+    if not augment and cache_key in _SPECTROGRAM_CACHE:
+        return _SPECTROGRAM_CACHE[cache_key]
+
     try:
         sr, y = demux_wav(file_name)
         # Use sample rate from parameters if provided
@@ -414,6 +421,9 @@ def file_to_spectrogram(file_name,
             if log_mel_spectrogram.shape[1] > max_time_dim:
                 start = np.random.randint(0, log_mel_spectrogram.shape[1] - max_time_dim)
                 log_mel_spectrogram = log_mel_spectrogram[:, start:start+max_time_dim]
+
+        if not augment and len(_SPECTROGRAM_CACHE) < 10000:  # Limit cache size
+            _SPECTROGRAM_CACHE[cache_key] = log_mel_spectrogram
             
         return log_mel_spectrogram
         
@@ -1083,7 +1093,7 @@ def preprocess_spectrograms(spectrograms, target_shape):
         
     return processed
 
-# In the balance_dataset function, modify the augmentation approach:
+
 def balance_dataset(train_data, train_labels, augment_minority=True):
     """
     Balance the dataset by augmenting the minority class with more sophisticated techniques
@@ -1370,7 +1380,7 @@ def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=Non
 
 def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, param=None):
     """
-    Create a TensorFlow dataset that streams and processes audio files on-the-fly
+    Create a TensorFlow dataset that streams and processes audio files on-the-fly - optimized for speed
     """
     # Check if file_list is empty or None
     if file_list is None or len(file_list) == 0:
@@ -1380,16 +1390,26 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     if labels is not None:
         labels = np.array(labels, dtype=np.float32)  # Ensure float32 dtype
         
-        # Check if labels match file_list length
-        if len(labels) != len(file_list):
-            logger.error(f"Mismatch between file_list length ({len(file_list)}) and labels length ({len(labels)})")
-            return None
+    # Calculate a reasonable shuffle buffer size (smaller is faster)
+    shuffle_buffer_size = min(len(file_list), 100)  # Reduce from 500 to 100 maximum
+    logger.info(f"Using shuffle buffer size: {shuffle_buffer_size}")
+    
+    # Create a cache to store processed spectrograms
+    _spectrogram_cache = {}
     
     # Function to load and process a single file
     def process_file(file_path, label=None):
         def _process_file(file_path, label):
             # Convert string tensor to string
-            file_path = file_path.numpy().decode('utf-8')
+            file_path_str = file_path.numpy().decode('utf-8')
+            
+            # Check if we have this in cache
+            cache_key = f"{file_path_str}_{is_training}"
+            if cache_key in _spectrogram_cache:
+                spec = _spectrogram_cache[cache_key]
+                if label is not None:
+                    return spec, np.float32(label)
+                return spec
             
             # Get parameters
             n_mels = param.get("feature", {}).get("n_mels", 64)
@@ -1399,7 +1419,7 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             
             # Process file to spectrogram
             spec = file_to_spectrogram(
-                file_path, 
+                file_path_str, 
                 n_mels=n_mels, 
                 n_fft=n_fft, 
                 hop_length=hop_length, 
@@ -1441,9 +1461,14 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             spec = spec.astype(np.float32)
             if label is not None:
                 label = np.float32(label)
-                
-            return spec, label
-
+            
+            # Store in cache if not too many items already
+            if len(_spectrogram_cache) < 1000:  # Limit cache size
+                _spectrogram_cache[cache_key] = spec
+            
+            if label is not None:
+                return spec, label
+            return spec
         
         # Wrap the function to handle TensorFlow tensors
         result = tf.py_function(
@@ -1460,27 +1485,36 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             return result[0], result[1]
         return result[0]
     
-    # Create the dataset
-    try:
-        if labels is not None:
-            dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
-            dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
-        else:
-            dataset = tf.data.Dataset.from_tensor_slices(file_list)
-            dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=tf.data.AUTOTUNE)
-        
-        # Apply dataset transformations
-        if is_training:
-            dataset = dataset.shuffle(buffer_size=min(len(file_list), 10000))
-        
-        # Batch and prefetch
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)
-        
-        return dataset
-    except Exception as e:
-        logger.error(f"Error creating TensorFlow dataset: {e}")
-        return None
+    # Create dataset to reduce file loading overhead
+    if labels is not None:
+        dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
+    else:
+        dataset = tf.data.Dataset.from_tensor_slices(file_list)
+    
+    # Use fewer parallel calls to avoid CPU bottleneck
+    num_parallel_calls = min(8, tf.data.AUTOTUNE)  
+    
+    # Load and preprocess in parallel
+    if labels is not None:
+        dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
+    else:
+        dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=num_parallel_calls)
+    
+    # Apply optimization techniques
+    if is_training:
+        # Use a much smaller shuffle buffer for speed
+        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
+    
+    # Cache the dataset in memory if it's small enough
+    if len(file_list) < 5000:  # Only cache reasonably sized datasets
+        logger.info("Caching dataset in memory")
+        dataset = dataset.cache()
+    
+    # Batch and prefetch
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    
+    return dataset
 
 def create_small_dataset(files, labels, max_files=100):
     """
@@ -1595,45 +1629,11 @@ def val_step(model, loss_fn, x, y):
 
 def implement_progressive_training(model, train_files, train_labels, val_files, val_labels, param):
     """
-    Implement progressive training with increasing spectrogram sizes
+    Implement progressive training with increasing spectrogram sizes - optimized for speed
     """
-    # Check if input data is valid
-    if not train_files or train_files is None or len(train_files) == 0:
-        logger.error("No training files provided for progressive training")
-        return None, None
-        
-    if not val_files or val_files is None or len(val_files) == 0:
-        logger.warning("No validation files provided for progressive training, using a portion of training data")
-        # Use a portion of training data for validation if no validation data is provided
-        split_idx = int(len(train_files) * 0.9)
-        val_files = train_files[split_idx:]
-        val_labels = train_labels[split_idx:] if train_labels is not None else None
-        train_files = train_files[:split_idx]
-        train_labels = train_labels[:split_idx] if train_labels is not None else None
-    
-    # Get base parameters
-    base_epochs = param.get("fit", {}).get("epochs", 30)
-    batch_size = param.get("fit", {}).get("batch_size", 16)
-    
-    # Define progressive sizes (start smaller, end with target size)
-    progressive_config = param.get("training", {}).get("progressive_training", {})
-    if not progressive_config.get("enabled", False):
-        logger.info("Progressive training disabled")
-        return None, None
-    
-    # Get sizes from config or use defaults
-    sizes = progressive_config.get("sizes", [(32, 48), (48, 64), (64, 96)])
-    epochs_per_size = progressive_config.get("epochs_per_size", [10, 10, 10])
-    
-    # Ensure we have enough epochs for each size
-    if len(epochs_per_size) != len(sizes):
-        epochs_per_size = [base_epochs // len(sizes)] * len(sizes)
-    
-    logger.info(f"Starting progressive training with sizes: {sizes}")
-    logger.info(f"Epochs per size: {epochs_per_size}")
-    
-    # Store history for each stage
-    all_history = []
+
+    # Cache datasets between progressive steps
+    cached_datasets = {}
     
     # Train progressively
     for i, (size, epochs) in enumerate(zip(sizes, epochs_per_size)):
@@ -1641,46 +1641,68 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
         
         # Update target shape in parameters
         param["feature"]["target_shape"] = size
+        size_key = f"{size[0]}x{size[1]}"
         
-        # Create datasets with current size
-        try:
-            train_dataset = create_tf_dataset(
-                train_files, 
-                train_labels, 
-                batch_size=batch_size, 
-                is_training=True, 
-                param=param
-            )
-            
-            val_dataset = create_tf_dataset(
-                val_files, 
-                val_labels, 
-                batch_size=batch_size, 
-                is_training=False, 
-                param=param
-            )
-            
-            # Verify datasets are not None
-            if train_dataset is None:
-                logger.error(f"Failed to create training dataset for size {size}")
-                return None, None
+        # Check if we already have this dataset cached
+        if size_key in cached_datasets:
+            logger.info(f"Using cached datasets for size {size}")
+            train_dataset, val_dataset = cached_datasets[size_key]
+        else:
+            # Create datasets with current size
+            try:
+                # Set a smaller shuffle buffer for speed
+                old_buffer_size = param.get("training", {}).get("streaming_data", {}).get("prefetch_buffer_size", 4)
+                param["training"]["streaming_data"]["prefetch_buffer_size"] = 2
                 
-            if val_dataset is None:
-                logger.error(f"Failed to create validation dataset for size {size}")
-                return None, None
+                train_dataset = create_tf_dataset(
+                    train_files, 
+                    train_labels, 
+                    batch_size=batch_size, 
+                    is_training=True, 
+                    param=param
+                )
                 
-        except Exception as e:
-            logger.error(f"Error creating datasets for size {size}: {e}")
-            return None, None
+                val_dataset = create_tf_dataset(
+                    val_files, 
+                    val_labels, 
+                    batch_size=batch_size, 
+                    is_training=False, 
+                    param=param
+                )
+                
+                # Restore original buffer size
+                param["training"]["streaming_data"]["prefetch_buffer_size"] = old_buffer_size
+                
+                # Cache the datasets for future use
+                cached_datasets[size_key] = (train_dataset, val_dataset)
+                
+            except Exception as e:
+                logger.error(f"Error creating datasets for size {size}: {e}")
+                return None, None
 
-        # Add this right after creating the datasets
+
         logger.info(f"Checking dataset shapes for size {size}...")
         for x_batch, y_batch in train_dataset.take(1):
             logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
         for x_batch, y_batch in val_dataset.take(1):
             logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
 
-        
+        # Add progress tracking for dataset loading
+        progress_counter = tf.Variable(0, dtype=tf.int32)
+
+        # Create a dataset map function to track progress
+        def track_progress(x, y):
+            progress_counter.assign_add(1)
+            if progress_counter % 50 == 0:  # Log every 50 batches
+                logger.info(f"Loaded {progress_counter.numpy()} batches")
+            return x, y
+
+        # Apply tracking to datasets
+        train_dataset = train_dataset.map(
+            track_progress,
+            num_parallel_calls=1  # Must be sequential to track accurately
+        )
+
         # If first stage, create model from scratch
         if i == 0:
             model = create_ast_model(input_shape=size, config=param.get("model", {}).get("architecture", {}))
@@ -1763,7 +1785,6 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
     return model, all_history
 
 
-# Add this function to your code:
 def find_optimal_threshold(y_true, y_pred_proba):
     """
     Find the optimal classification threshold using various metrics
@@ -1895,6 +1916,18 @@ def main():
             logger.info("GPU memory configuration set for V100 32GB")
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory configuration: {e}")
+
+
+    # Enable XLA compilation for faster GPU execution
+    if param.get("training", {}).get("xla_acceleration", True):
+        logger.info("Enabling XLA acceleration for faster training")
+        try:
+            tf.config.optimizer.set_jit(True)  # Enable XLA
+            os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=2'  # Force XLA on all operations
+            logger.info("XLA acceleration enabled successfully")
+        except Exception as e:
+            logger.warning(f"Failed to enable XLA acceleration: {e}")
+
 
 
     with open("baseline_AST.yaml", "r") as stream:
@@ -2206,8 +2239,19 @@ def main():
             val_labels = np.array(val_labels, dtype=np.float32)
         if test_labels is not None:
             test_labels = np.array(test_labels, dtype=np.float32)
+        
         # Create TensorFlow datasets
-        batch_size = param.get("fit", {}).get("batch_size", 32)
+        batch_size = param.get("fit", {}).get("batch_size", 16)
+        orig_batch_size = batch_size
+
+
+        if batch_size < 32 and param.get("training", {}).get("optimize_batch_size", True):
+            batch_size = 32  # Suggested size for V100 32GB
+            logger.info(f"Increased batch size from {orig_batch_size} to {batch_size} for V100 32GB (can be disabled in config)")
+
+        # Update the configuration to use this optimized batch size
+        param["fit"]["batch_size"] = batch_size
+
         logger.info(f"Using batch size {batch_size} optimized for V100 32GB")
         train_dataset = create_tf_dataset(
             train_files, 

@@ -88,17 +88,18 @@ fit:
 training:
   find_optimal_lr: false
   mixed_precision: true
-  xla_acceleration: false
+  xla_acceleration: true
+  optimize_batch_size: true
   gradient_accumulation_steps: 1
   gradient_clip_norm: 1.0
   mixup:
     enabled: true
     alpha: 0.2
   checkpointing:
-    save_frequency: 1000  # Save every 1000 batches
+    save_frequency: 1000
     keep_checkpoints: 5
   memory_optimization:
-    clear_memory_frequency: 50  # Clear memory every 50 batches
+    clear_memory_frequency: 50
     prefetch_buffer_size: 4
   progressive_training:
     enabled: true
@@ -106,11 +107,12 @@ training:
     epochs_per_size: [10, 10, 10]
   streaming_data:
     enabled: true
-    prefetch_buffer_size: 4
+    prefetch_buffer_size: 2
     parallel_calls: 8
+    cache_size: 1000
   efficient_attention:
     enabled: true
-    type: "linear"  # Options: "standard", "linear"
+    type: "linear"
   gradient_checkpointing:
     enabled: true
 

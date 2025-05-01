@@ -1,0 +1,12 @@
+overall_accuracy: 0.5
+overall_f1: 0.6666666666666666
+overall_model:
+  accuracy: 0.5
+  f1: 0.6666666666666666
+  precision: 0.5
+  recall: 1.0
+overall_precision: 0.5
+overall_recall: 1.0
+timing:
+  model_training_time_seconds: 6824.51736164093
+  total_execution_time_seconds: 7708.9133586883545

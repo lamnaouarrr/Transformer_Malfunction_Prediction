@@ -883,19 +883,19 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 # model
 ########################################################################
+# Modify the create_ast_model function to create a more robust model:
 def create_ast_model(input_shape, config=None):
-    """Create an efficient Audio Spectrogram Transformer (AST) model"""
+    """Create an improved Audio Spectrogram Transformer (AST) model"""
     if config is None:
         config = {}
     
     # Get transformer configuration
     transformer_config = config.get("transformer", {})
     num_heads = transformer_config.get("num_heads", 4)
-    dim_feedforward = transformer_config.get("dim_feedforward", 384)  # Smaller for ViT-Small
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
+    dim_feedforward = transformer_config.get("dim_feedforward", 512)
+    num_encoder_layers = transformer_config.get("num_encoder_layers", 3)  # Increase layers
     patch_size = transformer_config.get("patch_size", 4)
-    attention_dropout = transformer_config.get("attention_dropout", 0.1)
-    attention_type = transformer_config.get("attention_type", "standard")
+    attention_dropout = transformer_config.get("attention_dropout", 0.2)  # Increase dropout
     
     # Calculate sequence length and embedding dimension based on input shape and patch size
     h_patches = input_shape[0] // patch_size
@@ -906,22 +906,24 @@ def create_ast_model(input_shape, config=None):
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Reshape for patching
+    # Add channel dimension
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Use depth-wise separable convolution for patch embedding (more efficient)
-    # First apply depth-wise convolution
+    # Add batch normalization at the input
+    x = tf.keras.layers.BatchNormalization()(x)
+    
+    # Use depth-wise separable convolution for patch embedding
     x = tf.keras.layers.DepthwiseConv2D(
         kernel_size=patch_size,
         strides=patch_size,
         padding='same',
-        depth_multiplier=4,  # Increase channels
+        depth_multiplier=4,
         use_bias=False,
         kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
         name='patch_embedding_depthwise'
     )(x)
     
-    # Then apply pointwise convolution
+    # Pointwise convolution
     x = tf.keras.layers.Conv2D(
         filters=embed_dim,
         kernel_size=1,
@@ -945,38 +947,21 @@ def create_ast_model(input_shape, config=None):
     pos_encoding = positional_encoding(seq_len, embed_dim, encoding_type="sinusoidal")
     x = tf.keras.layers.Add()([x, pos_encoding])
     
-    # Apply transformer encoder layers with gradient checkpointing
+    # Apply transformer encoder layers
     for i in range(num_encoder_layers):
         # Layer normalization before attention (pre-norm formulation)
         attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Choose attention mechanism based on config
-        if attention_type == "efficient":
-            # Efficient attention with linear complexity
-            # Project queries, keys, values
-            q = tf.keras.layers.Dense(embed_dim, name=f'q_proj_{i}')(attn_input)
-            k = tf.keras.layers.Dense(embed_dim, name=f'k_proj_{i}')(attn_input)
-            v = tf.keras.layers.Dense(embed_dim, name=f'v_proj_{i}')(attn_input)
-            
-            # Apply softmax to keys for linear attention
-            k_softmax = tf.keras.layers.Softmax(axis=-1)(k)
-            
-            # Context vector (linear attention)
-            context = tf.keras.layers.Lambda(
-                lambda x: tf.matmul(x[0], tf.matmul(x[1], x[2], transpose_a=True)),
-                name=f'linear_attention_{i}'
-            )([q, k_softmax, v])
-            
-            # Project output
-            attn_output = tf.keras.layers.Dense(embed_dim, name=f'attn_out_{i}')(context)
-        else:
-            # Standard multi-head attention
-            attn_output = tf.keras.layers.MultiHeadAttention(
-                num_heads=num_heads,
-                key_dim=max(16, embed_dim // num_heads),
-                dropout=attention_dropout,
-                name=f'encoder_mha_{i}'
-            )(attn_input, attn_input)
+        # Standard multi-head attention
+        attn_output = tf.keras.layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=max(16, embed_dim // num_heads),
+            dropout=attention_dropout,
+            name=f'encoder_mha_{i}'
+        )(attn_input, attn_input)
+        
+        # Add dropout after attention
+        attn_output = tf.keras.layers.Dropout(0.1)(attn_output)
         
         # Residual connection
         x = tf.keras.layers.Add()([x, attn_output])
@@ -984,9 +969,9 @@ def create_ast_model(input_shape, config=None):
         # Layer normalization before FFN
         ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         
-        # Gated feed-forward network (better performance)
+        # Gated feed-forward network
         ffn_hidden = tf.keras.layers.Dense(
-            embed_dim * 2,  # Twice the size for gating
+            embed_dim * 4,  # Increase size for better representation
             kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
             name=f'ffn_hidden_{i}'
         )(ffn_input)
@@ -1010,7 +995,7 @@ def create_ast_model(input_shape, config=None):
         )(ffn_output)
         
         # Add dropout for regularization
-        ffn_output = tf.keras.layers.Dropout(0.1)(ffn_output)
+        ffn_output = tf.keras.layers.Dropout(0.2)(ffn_output)  # Increase dropout
         
         # Residual connection
         x = tf.keras.layers.Add()([x, ffn_output])
@@ -1021,27 +1006,42 @@ def create_ast_model(input_shape, config=None):
     # Global average pooling
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Final classification head with dropout
-    x = tf.keras.layers.Dropout(0.2)(x)
-    
-    # Add a hidden layer before final classification
-    x = tf.keras.layers.Dense(
+    # Add multiple classification heads for better learning
+    # Head 1
+    head1 = tf.keras.layers.Dense(
         embed_dim // 2,
         activation='gelu',
         kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_hidden'
+        name='classifier_hidden1'
     )(x)
-    
-    x = tf.keras.layers.Dropout(0.1)(x)
-    
-    outputs = tf.keras.layers.Dense(
+    head1 = tf.keras.layers.Dropout(0.3)(head1)
+    head1 = tf.keras.layers.Dense(
         1, 
         activation='sigmoid',
         kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_output'
+        name='classifier_output1'
+    )(head1)
+    
+    # Head 2
+    head2 = tf.keras.layers.Dense(
+        embed_dim // 4,
+        activation='gelu',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        name='classifier_hidden2'
     )(x)
+    head2 = tf.keras.layers.Dropout(0.3)(head2)
+    head2 = tf.keras.layers.Dense(
+        1, 
+        activation='sigmoid',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        name='classifier_output2'
+    )(head2)
+    
+    # Average the outputs of both heads
+    outputs = tf.keras.layers.Average()([head1, head2])
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+
 
 def preprocess_spectrograms(spectrograms, target_shape):
     """
@@ -1083,9 +1083,10 @@ def preprocess_spectrograms(spectrograms, target_shape):
         
     return processed
 
+# In the balance_dataset function, modify the augmentation approach:
 def balance_dataset(train_data, train_labels, augment_minority=True):
     """
-    Balance the dataset by augmenting the minority class
+    Balance the dataset by augmenting the minority class with more sophisticated techniques
     """
     # Count classes
     unique_labels, counts = np.unique(train_labels, return_counts=True)
@@ -1116,20 +1117,43 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
     
     logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
     
-    # Create augmented samples
+    # Create augmented samples with more sophisticated techniques
     augmented_data = []
     augmented_labels = []
     
-    # Simple augmentation: add noise and small shifts
+    # Use multiple augmentation techniques
     for _ in range(n_to_add):
         # Randomly select a minority sample
         idx = np.random.choice(minority_indices)
         sample = train_data[idx].copy()
         
-        # Add random noise
-        noise_level = 0.1
-        noise = np.random.normal(0, noise_level, sample.shape)
-        augmented_sample = sample + noise
+        # Apply a random augmentation technique
+        aug_type = np.random.choice(['noise', 'shift', 'flip', 'mixup'])
+        
+        if aug_type == 'noise':
+            # Add random noise with varying intensity
+            noise_level = np.random.uniform(0.05, 0.2)
+            noise = np.random.normal(0, noise_level, sample.shape)
+            augmented_sample = sample + noise
+            
+        elif aug_type == 'shift':
+            # Random shift in time or frequency
+            shift_dim = np.random.choice([0, 1])  # 0 for freq, 1 for time
+            shift_amount = np.random.randint(1, 5)
+            augmented_sample = np.roll(sample, shift_amount, axis=shift_dim)
+            
+        elif aug_type == 'flip':
+            # Frequency inversion (flip along frequency axis)
+            augmented_sample = np.flipud(sample)
+            
+        elif aug_type == 'mixup':
+            # Mix with another minority sample
+            idx2 = np.random.choice(minority_indices)
+            while idx2 == idx:  # Ensure different sample
+                idx2 = np.random.choice(minority_indices)
+            sample2 = train_data[idx2]
+            mix_ratio = np.random.uniform(0.3, 0.7)
+            augmented_sample = mix_ratio * sample + (1 - mix_ratio) * sample2
         
         # Clip values to valid range
         augmented_sample = np.clip(augmented_sample, 0, 1)
@@ -1569,8 +1593,6 @@ def val_step(model, loss_fn, x, y):
     
     return loss, accuracy
 
-
-
 def implement_progressive_training(model, train_files, train_labels, val_files, val_labels, param):
     """
     Implement progressive training with increasing spectrogram sizes
@@ -1739,6 +1761,103 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
             logger.warning(f"Error saving model for stage {i+1}: {e}")
     
     return model, all_history
+
+
+# Add this function to your code:
+def find_optimal_threshold(y_true, y_pred_proba):
+    """
+    Find the optimal classification threshold using various metrics
+    """
+    thresholds = np.linspace(0.1, 0.9, 33)  # Test 33 thresholds from 0.1 to 0.9
+    f1_scores = []
+    precisions = []
+    recalls = []
+    specificities = []
+    
+    # Calculate metrics for each threshold
+    for threshold in thresholds:
+        y_pred = (y_pred_proba > threshold).astype(int)
+        
+        # Calculate metrics
+        precision = metrics.precision_score(y_true, y_pred, zero_division=0)
+        recall = metrics.recall_score(y_true, y_pred, zero_division=0)
+        f1 = metrics.f1_score(y_true, y_pred, zero_division=0)
+        
+        # Calculate specificity (true negative rate)
+        tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred).ravel()
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        
+        # Store results
+        precisions.append(precision)
+        recalls.append(recall)
+        f1_scores.append(f1)
+        specificities.append(specificity)
+    
+    # Find threshold with best F1 score
+    best_f1_idx = np.argmax(f1_scores)
+    best_f1_threshold = thresholds[best_f1_idx]
+    
+    # Find threshold with best balance between precision and recall
+    pr_diffs = np.abs(np.array(precisions) - np.array(recalls))
+    best_balance_idx = np.argmin(pr_diffs)
+    best_balance_threshold = thresholds[best_balance_idx]
+    
+    # Find threshold with best geometric mean of recall and specificity
+    gmeans = np.sqrt(np.array(recalls) * np.array(specificities))
+    best_gmean_idx = np.argmax(gmeans)
+    best_gmean_threshold = thresholds[best_gmean_idx]
+    
+    # Log results
+    logger.info(f"Best F1 threshold: {best_f1_threshold:.3f} (F1={f1_scores[best_f1_idx]:.3f})")
+    logger.info(f"Best balanced threshold: {best_balance_threshold:.3f} (Precision={precisions[best_balance_idx]:.3f}, Recall={recalls[best_balance_idx]:.3f})")
+    logger.info(f"Best geometric mean threshold: {best_gmean_threshold:.3f} (G-mean={gmeans[best_gmean_idx]:.3f})")
+    
+    # Plot the metrics vs threshold
+    plt.figure(figsize=(12, 8))
+    plt.plot(thresholds, precisions, 'b-', label='Precision')
+    plt.plot(thresholds, recalls, 'g-', label='Recall')
+    plt.plot(thresholds, f1_scores, 'r-', label='F1 Score')
+    plt.plot(thresholds, specificities, 'c-', label='Specificity')
+    plt.plot(thresholds, gmeans, 'm-', label='G-Mean')
+    
+    # Mark the best thresholds
+    plt.axvline(x=best_f1_threshold, color='r', linestyle='--', alpha=0.5, label=f'Best F1 ({best_f1_threshold:.3f})')
+    plt.axvline(x=best_balance_threshold, color='g', linestyle='--', alpha=0.5, label=f'Best Balance ({best_balance_threshold:.3f})')
+    plt.axvline(x=best_gmean_threshold, color='m', linestyle='--', alpha=0.5, label=f'Best G-Mean ({best_gmean_threshold:.3f})')
+    
+    plt.xlabel('Threshold')
+    plt.ylabel('Metric Value')
+    plt.title('Metrics vs. Threshold')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{param['result_directory']}/threshold_optimization.png")
+    plt.close()
+    
+    # Return the best threshold based on F1 score
+    return best_f1_threshold
+
+def standardize_spectrograms(spectrograms):
+    """
+    Standardize spectrograms using robust scaling to handle outliers
+    """
+    # Calculate robust statistics (less affected by outliers)
+    q1 = np.percentile(spectrograms, 25, axis=(1, 2), keepdims=True)
+    q3 = np.percentile(spectrograms, 75, axis=(1, 2), keepdims=True)
+    median = np.median(spectrograms, axis=(1, 2), keepdims=True)
+    
+    # Calculate IQR (Interquartile Range)
+    iqr = q3 - q1
+    
+    # Handle cases where IQR is too small
+    iqr = np.maximum(iqr, 1e-5)
+    
+    # Apply robust scaling: (X - median) / IQR
+    scaled_specs = (spectrograms - median) / iqr
+    
+    # Clip extreme values
+    scaled_specs = np.clip(scaled_specs, -3, 3)
+    
+    return scaled_specs
 
 
 ########################################################################
@@ -1917,6 +2036,11 @@ def main():
         test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
         
         logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
+
+    # Then use it in your preprocessing pipeline:
+    train_data = standardize_spectrograms(train_data)
+    val_data = standardize_spectrograms(val_data)
+    test_data = standardize_spectrograms(test_data)
 
     preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
     chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
@@ -2376,10 +2500,36 @@ def main():
                 logger.info("Using standard binary crossentropy loss")
                 loss_fn = "binary_crossentropy"
             
-            # Compile the model
+            #Define a custom loss function that combines binary cross-entropy with focal loss
+            def combined_loss(y_true, y_pred):
+                # Cast inputs to float32
+                y_true = tf.cast(y_true, tf.float32)
+                y_pred = tf.cast(y_pred, tf.float32)
+                
+                # Binary cross-entropy component
+                bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+                
+                # Focal loss component
+                gamma = 2.0
+                alpha = 0.25
+                p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
+                focal_weight = alpha * tf.pow(1.0 - p_t, gamma)
+                focal = focal_weight * bce
+                
+                # Combine losses (weighted sum)
+                return 0.5 * bce + 0.5 * focal
+
+            # Use more aggressive class weights
+            class_weights = {
+                0: 1.0,  # Normal class
+                1: 4.0   # Abnormal class - increase weight significantly
+            }
+            # Convert keys to integers to avoid dtype issues
+            class_weights = {int(k): float(v) for k, v in class_weights.items()}
+
             model.compile(
                 optimizer=optimizer,
-                loss=loss_fn,
+                loss=combined_loss,
                 metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]
             )
             
@@ -2632,8 +2782,9 @@ def main():
             logger.info(f"Threshold {thresh:.1f}: Acc={accuracy:.4f}, Prec={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
         
         # Apply standard threshold for final evaluation
-        detection_threshold = 0.5
-        logger.info(f"Using standard detection threshold: {detection_threshold}")
+        logger.info("Finding optimal classification threshold...")
+        detection_threshold = find_optimal_threshold(test_labels_expanded, y_pred)
+        logger.info(f"Using optimal detection threshold: {detection_threshold}")
         y_pred_binary = (y_pred > detection_threshold).astype(int)
         
         gc.collect()

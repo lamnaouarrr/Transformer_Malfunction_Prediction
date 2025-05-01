@@ -1382,7 +1382,13 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     def process_file(file_path, label=None):
         def _process_file(file_path, label):
             # Convert string tensor to string
-            file_path_str = file_path.numpy().decode('utf-8')
+            if isinstance(file_path, np.ndarray):
+                file_path_str = str(file_path.item()) if file_path.size == 1 else str(file_path)
+            else:
+                try:
+                    file_path_str = file_path.numpy().decode('utf-8')
+                except (AttributeError, TypeError):
+                    file_path_str = str(file_path)
             
             # Check if we have this in cache
             cache_key = f"{file_path_str}_{is_training}"
@@ -1452,11 +1458,16 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             return spec
         
         # Wrap the function to handle TensorFlow tensors
+        output_types = [tf.float32]
+        if label is not None:
+            output_types.append(tf.float32)
+            
         result = tf.py_function(
             _process_file,
-            [file_path, label],
-            [tf.float32, tf.float32 if label is not None else None]
+            [file_path, label] if label is not None else [file_path],
+            output_types
         )
+
         
         # Set shapes explicitly
         target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
@@ -1703,11 +1714,18 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
                 return None, None
 
 
+        # Check dataset shapes (this will iterate through one batch each)
         logger.info(f"Checking dataset shapes for size {size}...")
-        for x_batch, y_batch in train_dataset.take(1):
-            logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
-        for x_batch, y_batch in val_dataset.take(1):
-            logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+        try:
+            # Use a try-except block to safely check dataset shapes
+            for x_batch, y_batch in train_dataset.take(1):
+                logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+            for x_batch, y_batch in val_dataset.take(1):
+                logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+        except Exception as e:
+            logger.error(f"Error checking training dataset shape: {e}")
+            logger.info("Continuing with training despite shape check error")
+
 
         # Use a Python iterator to track progress outside the graph context
         logger.info("Starting dataset loading - this may take a while...")

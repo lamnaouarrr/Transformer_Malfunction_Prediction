@@ -102,7 +102,7 @@ training:
     clear_memory_frequency: 50
     prefetch_buffer_size: 4
   progressive_training:
-    enabled: true
+    enabled: false
     sizes: [[32, 48], [48, 64], [64, 96]]
     epochs_per_size: [10, 10, 10]
   streaming_data:

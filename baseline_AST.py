@@ -779,6 +779,33 @@ def dataset_generator(target_dir, param=None):
 
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
+def setup_large_dataset_processing():
+    """Setup environment for large dataset processing"""
+    # Create temp directories
+    temp_dir = param.get("large_dataset", {}).get("temp_storage", "/tmp/ast_training")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Clear existing cached data
+    if os.path.exists(temp_dir):
+        for f in os.listdir(temp_dir):
+            if f.endswith('.tmp.npy'):
+                try:
+                    os.remove(os.path.join(temp_dir, f))
+                except:
+                    pass
+    
+    # Increase file descriptor limit if possible
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        logger.info(f"Increased file descriptor limit to {hard}")
+    except:
+        logger.warning("Could not increase file descriptor limit")
+    
+    return temp_dir
+
+
 def configure_mixed_precision(enabled=True):
     """
     Configure mixed precision training optimized for V100 GPU.
@@ -1383,168 +1410,35 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
         logger.error("Empty file list provided to create_tf_dataset")
         return None
         
-    if labels is not None:
-        labels = np.array(labels, dtype=np.float32)  # Ensure float32 dtype
-        
-    # Calculate a reasonable shuffle buffer size (smaller is faster)
-    shuffle_buffer_size = min(len(file_list), 100)  # Reduce from 500 to 100 maximum
-    logger.info(f"Using shuffle buffer size: {shuffle_buffer_size}")
+    # After the existing code, add these lines:
     
-    # Create a cache to store processed spectrograms
-    _spectrogram_cache = {}
-    
-    # Function to load and process a single file
-    def process_file(file_path, label=None):
-        def _process_file(file_path, label):
-            # Convert string tensor to string
-            if isinstance(file_path, tf.Tensor) and len(file_path.shape) >= 2:
-                # Already a spectrogram tensor, just return it
-                spec = file_path
-                if label is not None:
-                    return spec, label
-                return spec
-            
-            # Otherwise, treat as a file path
-            try:
-                if isinstance(file_path, np.ndarray):
-                    file_path_str = str(file_path.item()) if file_path.size == 1 else None
-                elif isinstance(file_path, tf.Tensor):
-                    file_path_str = file_path.numpy().decode('utf-8') if tf.rank(file_path) == 0 else None
-                else:
-                    file_path_str = str(file_path)
-                    
-                # If we couldn't get a valid file path, return empty spectrogram
-                if file_path_str is None or not isinstance(file_path_str, str) or len(file_path_str) > 1000:
-                    logger.warning(f"Invalid file path detected, returning empty spectrogram")
-                    # Return a zero tensor with the expected shape
-                    target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
-                    spec = np.zeros(target_shape, dtype=np.float32)
-                    if label is not None:
-                        return spec, label
-                    return spec
-                
-                # Create a cache key from file path
-                cache_key = file_path_str
-                
-                # Check if we have this spectrogram cached
-                if cache_key in _spectrogram_cache:
-                    spec = _spectrogram_cache[cache_key]
-                    if label is not None:
-                        return spec, label
-                    return spec
-            
-                # Get parameters
-                n_mels = param.get("feature", {}).get("n_mels", 64)
-                n_fft = param.get("feature", {}).get("n_fft", 1024)
-                hop_length = param.get("feature", {}).get("hop_length", 512)
-                power = param.get("feature", {}).get("power", 2.0)
-                
-                # Process file to spectrogram
-                spec = file_to_spectrogram(
-                    file_path_str, 
-                    n_mels=n_mels, 
-                    n_fft=n_fft, 
-                    hop_length=hop_length, 
-                    power=power, 
-                    augment=is_training,
-                    param=param
-                )
-                
-                # Handle case where processing fails
-                if spec is None:
-                    # Return a zero spectrogram with the expected shape
-                    target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
-                    spec = np.zeros(target_shape, dtype=np.float32)
-                
-                # Ensure we have a 2D spectrogram (not 3D with frames)
-                if len(spec.shape) == 3:
-                    # If we have multiple frames, just take the first one
-                    spec = spec[0]
-                
-                # Ensure consistent shape
-                target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
-                if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
-                    try:
-                        from skimage.transform import resize
-                        spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
-                    except Exception:
-                        # Fall back to simple padding/cropping
-                        temp_spec = np.zeros(target_shape, dtype=np.float32)
-                        freq_dim = min(spec.shape[0], target_shape[0])
-                        time_dim = min(spec.shape[1], target_shape[1])
-                        temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
-                        spec = temp_spec
-                
-                # Normalize
-                if np.max(spec) > np.min(spec):
-                    spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
-                
-                # Ensure float32 dtype
-                spec = spec.astype(np.float32)
-                if label is not None:
-                    label = np.float32(label)
-                
-                # Store in cache if not too many items already
-                if len(_spectrogram_cache) < 1000:  # Limit cache size
-                    _spectrogram_cache[cache_key] = spec
-                
-                if label is not None:
-                    return spec, label
-                return spec
-                
-            except Exception as e:
-                logger.warning(f"Error processing file path {file_path}: {e}")
-                # Return a zero tensor with the expected shape in case of error
-                target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
-                spec = np.zeros(target_shape, dtype=np.float32)
-                if label is not None:
-                    return spec, label
-                return spec
+    # Optimize for V100 with large datasets
+    large_dataset_mode = param.get("large_dataset", {}).get("enabled", False)
+    if large_dataset_mode:
+        logger.info("Large dataset mode enabled - optimizing dataset pipeline")
         
-        # Wrap the function to handle TensorFlow tensors
-        output_types = [tf.float32]
-        if label is not None:
-            output_types.append(tf.float32)
-            
-        result = tf.py_function(
-            _process_file,
-            [file_path, label] if label is not None else [file_path],
-            output_types
-        )
+        # Use smaller shuffle buffer for memory efficiency
+        shuffle_buffer_size = min(1000, len(file_list))
         
-        # Set shapes explicitly
-        target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
-        result[0].set_shape(target_shape)
-        if label is not None:
-            result[1].set_shape(())
-            return result[0], result[1]
-        return result[0]
-    
-    # Create dataset to reduce file loading overhead
-    if labels is not None:
-        dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
+        # Increase prefetch to maximize GPU utilization
+        prefetch_size = 3
+        
+        # Use fewer parallel calls to avoid CPU bottleneck
+        num_parallel_calls = min(8, tf.data.AUTOTUNE)
     else:
-        dataset = tf.data.Dataset.from_tensor_slices(file_list)
+        # Original settings
+        shuffle_buffer_size = min(len(file_list), 100)
+        prefetch_size = tf.data.AUTOTUNE
+        num_parallel_calls = min(8, tf.data.AUTOTUNE)
     
-    # Use fewer parallel calls to avoid CPU bottleneck
-    num_parallel_calls = min(8, tf.data.AUTOTUNE)  
+    # Use these variables in the dataset creation below
     
-    # Apply optimization techniques
+    # Replace the existing dataset.map line with:
     dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
+    
+    # And replace the existing prefetch line with:
+    dataset = dataset.prefetch(prefetch_size)
 
-    # Cache should come before shuffle for better performance
-    if len(file_list) < 5000:  # Only cache reasonably sized datasets
-        logger.info("Caching dataset in memory")
-        dataset = dataset.cache()  # Cache first
-    
-    if is_training:
-        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)  # Then shuffle
-    
-    # Batch and prefetch
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    
-    return dataset
 
 def create_small_dataset(files, labels, max_files=100):
     """
@@ -2242,6 +2136,29 @@ def main():
     debug_mode = param.get("debug", {}).get("enabled", False)
     debug_sample_size = param.get("debug", {}).get("sample_size", 100)
 
+    # Memory optimization for large datasets
+    if param.get("large_dataset", {}).get("enabled", False):
+        logger.info("Enabling aggressive memory management for large dataset")
+        # Clear any existing memory
+        gc.collect()
+        
+        # Attempt to limit TensorFlow memory growth on GPU
+        try:
+            for gpu in tf.config.experimental.list_physical_devices('GPU'):
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info("Set GPU memory growth mode for large dataset training")
+        except:
+            logger.warning("Could not set GPU memory growth mode")
+        
+        # Clear spectrogram cache
+        global _SPECTROGRAM_CACHE
+        _SPECTROGRAM_CACHE = {}
+        
+        # Set smaller segmentation sizes for large files
+        param["feature"]["n_fft"] = param["feature"].get("n_fft", 1024)
+        param["feature"]["hop_length"] = param["feature"].get("hop_length", 512)
+
+
     if debug_mode:
         logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
         train_files, train_labels = create_small_dataset(train_files, train_labels, debug_sample_size)
@@ -2255,24 +2172,58 @@ def main():
     chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
     chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
 
-    # For training data
-    if chunking_enabled and len(train_files) > chunk_size:
-        logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
-        train_data, train_labels_expanded = process_dataset_in_chunks(
-            train_files,
-            train_labels,
-            chunk_size=chunk_size,
+    # For training data with full dataset support
+    large_dataset_mode = param.get("large_dataset", {}).get("enabled", False)
+
+    if large_dataset_mode:
+        logger.info("LARGE DATASET MODE: Using streaming data pipeline - will not precompute spectrograms")
+        # Set up environment for large dataset processing
+        temp_dir = setup_large_dataset_processing()
+        logger.info(f"Using temporary directory: {temp_dir}")
+        
+        # Using streaming approach - don't load all data to memory
+        train_data, train_labels_expanded = None, None
+        use_streaming = True
+        
+        # Create streaming dataset directly (will be used later)
+        train_dataset = create_tf_dataset(
+            train_files, 
+            train_labels, 
+            batch_size=param.get("fit", {}).get("batch_size", 16),
+            is_training=True, 
             param=param
         )
-    else:
-        train_data, train_labels_expanded = list_to_spectrograms(
-            train_files,
-            train_labels,
-            msg="generate train_dataset",
-            augment=True,
-            param=param,
-            batch_size=preprocessing_batch_size
+        logger.info("Created streaming training dataset")
+        
+        # Also stream validation data
+        val_dataset = create_tf_dataset(
+            val_files, 
+            val_labels, 
+            batch_size=param.get("fit", {}).get("batch_size", 16),
+            is_training=False, 
+            param=param
         )
+        logger.info("Created streaming validation dataset")
+    else:
+        # Original code for smaller datasets
+        if chunking_enabled and len(train_files) > chunk_size:
+            logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
+            train_data, train_labels_expanded = process_dataset_in_chunks(
+                train_files,
+                train_labels,
+                chunk_size=chunk_size,
+                param=param
+            )
+        else:
+            train_data, train_labels_expanded = list_to_spectrograms(
+                train_files,
+                train_labels,
+                msg="generate train_dataset",
+                augment=True,
+                param=param,
+                batch_size=preprocessing_batch_size
+            )
+
 
     # For validation data
     if chunking_enabled and len(val_files) > chunk_size:
@@ -2907,14 +2858,52 @@ def main():
             else:
                 # Standard training without gradient accumulation
                 if use_streaming:
-                    # Train with streaming data
+                    # Add checkpoint callback for large dataset training
+                    if param.get("large_dataset", {}).get("enabled", False):
+                        # Create checkpoint directory
+                        checkpoint_dir = os.path.join(param["model_directory"], "checkpoints")
+                        os.makedirs(checkpoint_dir, exist_ok=True)
+                        
+                        # Add ModelCheckpoint callback
+                        checkpoint_callback = ModelCheckpoint(
+                            filepath=os.path.join(checkpoint_dir, "model_checkpoint_epoch_{epoch:02d}.keras"),
+                            save_weights_only=True,  # Save only weights for efficiency
+                            save_freq='epoch',
+                            verbose=1
+                        )
+                        callbacks.append(checkpoint_callback)
+                        
+                        # Add TensorBoard callback for monitoring
+                        try:
+                            tensorboard_dir = os.path.join(param["result_directory"], "tensorboard")
+                            os.makedirs(tensorboard_dir, exist_ok=True)
+                            tensorboard_callback = tf.keras.callbacks.TensorBoard(
+                                log_dir=tensorboard_dir,
+                                histogram_freq=1,
+                                update_freq=100  # Update every 100 batches
+                            )
+                            callbacks.append(tensorboard_callback)
+                            logger.info(f"TensorBoard logging enabled at {tensorboard_dir}")
+                        except:
+                            logger.warning("Failed to create TensorBoard callback")
+                    
+                    # Set steps_per_epoch to limit epoch size for faster iterations
+                    steps_per_epoch = None
+                    if param.get("large_dataset", {}).get("enabled", False):
+                        # Option 1: Use a fixed number of steps per epoch (faster iterations)
+                        steps_per_epoch = min(1000, len(train_files) // batch_size)
+                        logger.info(f"Limited to {steps_per_epoch} steps per epoch for faster iterations")
+                    
+                    # Train with streaming data and checkpointing
                     history = model.fit(
                         train_dataset,
                         epochs=param.get("fit", {}).get("epochs", 30),
                         validation_data=val_dataset,
                         callbacks=callbacks,
-                        verbose=1
+                        verbose=1,
+                        steps_per_epoch=steps_per_epoch  # Optional: limit steps per epoch
                     )
+
                 else:
                     # Train with in-memory data
                     history = model.fit(
@@ -2941,15 +2930,58 @@ def main():
         logger.warning("No training history available to plot")
 
     print("============== EVALUATION ==============")
-    # Evaluate on test set
-    test_data, test_labels_expanded = list_to_spectrograms(
-        test_files,
-        test_labels,
-        msg="generate test_dataset",
-        augment=False,
-        param=param,
-        batch_size=20
-    )
+    # Evaluate on test set with large dataset support
+    if param.get("large_dataset", {}).get("enabled", False):
+        logger.info("Using streaming evaluation for large test dataset")
+        
+        # Create a streaming dataset for test data
+        test_dataset = create_tf_dataset(
+            test_files,
+            test_labels,
+            batch_size=batch_size,
+            is_training=False,
+            param=param
+        )
+        
+        # Evaluate in streaming mode
+        test_metrics = model.evaluate(test_dataset, verbose=1)
+        
+        # Extract metrics
+        test_accuracy = test_metrics[model.metrics_names.index('accuracy')]
+        
+        # For detailed metrics, predict on test set in batches
+        all_y_pred = []
+        all_y_true = []
+        
+        logger.info("Generating predictions on test set in batches...")
+        for x_batch, y_batch in tqdm(test_dataset):
+            # Generate predictions
+            batch_preds = model.predict_on_batch(x_batch)
+            
+            # Collect results
+            all_y_pred.extend(batch_preds.numpy().flatten())
+            all_y_true.extend(y_batch.numpy().flatten())
+        
+        # Convert to numpy arrays
+        all_y_pred = np.array(all_y_pred)
+        all_y_true = np.array(all_y_true)
+        
+        # Now you can proceed with threshold optimization and metrics calculation
+        y_pred = all_y_pred
+        test_labels_expanded = all_y_true
+        
+        logger.info(f"Collected predictions for {len(all_y_pred)} test samples")
+    else:
+        # Original code for smaller datasets
+        test_data, test_labels_expanded = list_to_spectrograms(
+            test_files,
+            test_labels,
+            msg="generate test_dataset",
+            augment=False,
+            param=param,
+            batch_size=20
+        )
+
 
     logger.info(f"Test data shape: {test_data.shape}")
     logger.info(f"Test labels shape: {test_labels_expanded.shape}")

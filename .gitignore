@@ -6,5 +6,5 @@ logs
 .venv
 get-pip.py
 __pycache__
-baseline_AST.py_first half.txt
-baseline_AST.py_second half.txt
+baseline_AST.py_first_half.txt
+baseline_AST.py_second_half.txt

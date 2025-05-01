@@ -34,8 +34,14 @@ feature:
   preprocessing_batch_size: 64
   dataset_chunking:
     enabled: true
-    chunk_size: 5000  # Process 5000 files at a time
+    chunk_size: 1000  # Process 5000 files at a time
     temp_directory: "./temp_chunks/temp_chunks_AST"
+  large_dataset:
+    enabled: true
+    temp_storage: "/tmp/ast_training"  # SSD if available
+    cache_spectrograms: true
+    max_files_in_memory: 5000
+    precompute_enabled: false
 
 
 # Fit algorithm parameters
@@ -46,8 +52,8 @@ fit:
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
-  epochs: 30
-  batch_size: 8
+  epochs: 50
+  batch_size: 16
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -99,12 +105,12 @@ training:
     save_frequency: 1000
     keep_checkpoints: 5
   memory_optimization:
-    clear_memory_frequency: 50
+    clear_memory_frequency: 25
     prefetch_buffer_size: 4
   progressive_training:
-    enabled: false
-    sizes: [[32, 48], [48, 64], [64, 96]]
-    epochs_per_size: [10, 10, 10]
+    enabled: true
+    sizes: [[48, 64], [64, 96]]
+    epochs_per_size: [10, 15]
   streaming_data:
     enabled: true
     prefetch_buffer_size: 2
@@ -149,7 +155,7 @@ dataset:
 
 # Debug settings
 debug:
-  enabled: true  # Set to false for full dataset
+  enabled: false  # Set to false for full dataset
   sample_size: 500  # Number of samples to use in debug mode
 
 

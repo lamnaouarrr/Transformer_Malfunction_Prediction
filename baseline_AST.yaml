@@ -47,7 +47,7 @@ fit:
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
   epochs: 30
-  batch_size: 16
+  batch_size: 8
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -120,9 +120,9 @@ training:
 model:
   architecture:
     transformer:
-      num_heads: 2
-      dim_feedforward: 256
-      num_encoder_layers: 2
+      num_heads: 1
+      dim_feedforward: 128
+      num_encoder_layers: 1
       positional_encoding: true
       use_pretrained: false
       pretrained_model: "google/vit-base-patch16-224"

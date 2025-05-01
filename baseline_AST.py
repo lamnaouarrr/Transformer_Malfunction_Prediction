@@ -1371,6 +1371,13 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     """
     Create a TensorFlow dataset that streams and processes audio files on-the-fly - optimized for speed
     """
+    gc.collect()
+    if tf.config.list_physical_devices('GPU'):
+        try:
+            tf.keras.backend.clear_session()
+        except:
+            pass
+
     # Check if file_list is empty or None
     if file_list is None or len(file_list) == 0:
         logger.error("Empty file list provided to create_tf_dataset")
@@ -2081,18 +2088,15 @@ def main():
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
-            # Allow TensorFlow to allocate memory as needed, but set a growth limit
+            # ONLY enable memory growth without setting a fixed limit
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
             
-            # Set memory limit to 30GB (leaving some headroom)
-            tf.config.experimental.set_virtual_device_configuration(
-                gpus[0],
-                [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=30 * 1024)]
-            )
-            logger.info("GPU memory configuration set for V100 32GB")
+            # Remove the memory_limit configuration completely
+            logger.info("GPU memory growth enabled - will allocate memory as needed")
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory configuration: {e}")
+
 
     with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)    
@@ -2518,10 +2522,10 @@ def main():
 
     def verify_gpu_usage():
         """Verify that TensorFlow is properly using the GPU"""
-        # Create a simple test tensor and operation
+        # Create a simple test tensor and operation with SMALLER sizes
         with tf.device('/GPU:0'):
-            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
-            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
+            a = tf.constant([[1.0, 2.0], [3.0, 4.0]], dtype=tf.float16)  # Use float16 and small tensors
+            b = tf.constant([[1.0, 1.0], [1.0, 1.0]], dtype=tf.float16)
             c = tf.matmul(a, b)
         
         # Check if the operation was executed on GPU
@@ -2532,6 +2536,7 @@ def main():
             logger.warning("⚠ GPU is not being used for tensor operations!")
         
         return 'GPU' in c.device
+
 
     print("============== VERIFYING GPU USAGE ==============")
     is_gpu_working = verify_gpu_usage()

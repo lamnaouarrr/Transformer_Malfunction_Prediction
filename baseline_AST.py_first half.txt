@@ -319,6 +319,14 @@ def file_to_spectrogram(file_name,
     """
     Convert file_name to a 2D spectrogram with optional augmentation for normal data.
     """
+    if isinstance(file_name, (tf.Tensor, np.ndarray)) and len(getattr(file_name, 'shape', [])) >= 2:
+        # Already a spectrogram, return it directly
+        return file_name
+    # Check if file_name is valid
+    if not isinstance(file_name, str) or len(file_name) > 1000:
+        logger.warning(f"Invalid file name: {type(file_name)}, returning None")
+        return None
+    
     # Check cache first (skip cache if augmentation is on)
     cache_key = f"{file_name}_{n_mels}_{n_fft}_{hop_length}_{power}"
     if not augment and cache_key in _SPECTROGRAM_CACHE:
@@ -1382,80 +1390,119 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     def process_file(file_path, label=None):
         def _process_file(file_path, label):
             # Convert string tensor to string
-            file_path_str = file_path.numpy().decode('utf-8')
-            
-            # Check if we have this in cache
-            cache_key = f"{file_path_str}_{is_training}"
-            if cache_key in _spectrogram_cache:
-                spec = _spectrogram_cache[cache_key]
+            if isinstance(file_path, tf.Tensor) and len(file_path.shape) >= 2:
+                # Already a spectrogram tensor, just return it
+                spec = file_path
                 if label is not None:
-                    return spec, np.float32(label)
+                    return spec, label
                 return spec
             
-            # Get parameters
-            n_mels = param.get("feature", {}).get("n_mels", 64)
-            n_fft = param.get("feature", {}).get("n_fft", 1024)
-            hop_length = param.get("feature", {}).get("hop_length", 512)
-            power = param.get("feature", {}).get("power", 2.0)
+            # Otherwise, treat as a file path
+            try:
+                if isinstance(file_path, np.ndarray):
+                    file_path_str = str(file_path.item()) if file_path.size == 1 else None
+                elif isinstance(file_path, tf.Tensor):
+                    file_path_str = file_path.numpy().decode('utf-8') if tf.rank(file_path) == 0 else None
+                else:
+                    file_path_str = str(file_path)
+                    
+                # If we couldn't get a valid file path, return empty spectrogram
+                if file_path_str is None or not isinstance(file_path_str, str) or len(file_path_str) > 1000:
+                    logger.warning(f"Invalid file path detected, returning empty spectrogram")
+                    # Return a zero tensor with the expected shape
+                    target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
+                    spec = np.zeros(target_shape, dtype=np.float32)
+                    if label is not None:
+                        return spec, label
+                    return spec
+                
+                # Create a cache key from file path
+                cache_key = file_path_str
+                
+                # Check if we have this spectrogram cached
+                if cache_key in _spectrogram_cache:
+                    spec = _spectrogram_cache[cache_key]
+                    if label is not None:
+                        return spec, label
+                    return spec
             
-            # Process file to spectrogram
-            spec = file_to_spectrogram(
-                file_path_str, 
-                n_mels=n_mels, 
-                n_fft=n_fft, 
-                hop_length=hop_length, 
-                power=power, 
-                augment=is_training,
-                param=param
-            )
-            
-            # Handle case where processing fails
-            if spec is None:
-                # Return a zero spectrogram with the expected shape
+                # Get parameters
+                n_mels = param.get("feature", {}).get("n_mels", 64)
+                n_fft = param.get("feature", {}).get("n_fft", 1024)
+                hop_length = param.get("feature", {}).get("hop_length", 512)
+                power = param.get("feature", {}).get("power", 2.0)
+                
+                # Process file to spectrogram
+                spec = file_to_spectrogram(
+                    file_path_str, 
+                    n_mels=n_mels, 
+                    n_fft=n_fft, 
+                    hop_length=hop_length, 
+                    power=power, 
+                    augment=is_training,
+                    param=param
+                )
+                
+                # Handle case where processing fails
+                if spec is None:
+                    # Return a zero spectrogram with the expected shape
+                    target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
+                    spec = np.zeros(target_shape, dtype=np.float32)
+                
+                # Ensure we have a 2D spectrogram (not 3D with frames)
+                if len(spec.shape) == 3:
+                    # If we have multiple frames, just take the first one
+                    spec = spec[0]
+                
+                # Ensure consistent shape
                 target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
+                if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
+                    try:
+                        from skimage.transform import resize
+                        spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
+                    except Exception:
+                        # Fall back to simple padding/cropping
+                        temp_spec = np.zeros(target_shape, dtype=np.float32)
+                        freq_dim = min(spec.shape[0], target_shape[0])
+                        time_dim = min(spec.shape[1], target_shape[1])
+                        temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+                        spec = temp_spec
+                
+                # Normalize
+                if np.max(spec) > np.min(spec):
+                    spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
+                
+                # Ensure float32 dtype
+                spec = spec.astype(np.float32)
+                if label is not None:
+                    label = np.float32(label)
+                
+                # Store in cache if not too many items already
+                if len(_spectrogram_cache) < 1000:  # Limit cache size
+                    _spectrogram_cache[cache_key] = spec
+                
+                if label is not None:
+                    return spec, label
+                return spec
+                
+            except Exception as e:
+                logger.warning(f"Error processing file path {file_path}: {e}")
+                # Return a zero tensor with the expected shape in case of error
+                target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
                 spec = np.zeros(target_shape, dtype=np.float32)
-            
-            # Ensure we have a 2D spectrogram (not 3D with frames)
-            if len(spec.shape) == 3:
-                # If we have multiple frames, just take the first one
-                spec = spec[0]
-            
-            # Ensure consistent shape
-            target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
-            if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
-                try:
-                    from skimage.transform import resize
-                    spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
-                except Exception:
-                    # Fall back to simple padding/cropping
-                    temp_spec = np.zeros(target_shape, dtype=np.float32)
-                    freq_dim = min(spec.shape[0], target_shape[0])
-                    time_dim = min(spec.shape[1], target_shape[1])
-                    temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
-                    spec = temp_spec
-            
-            # Normalize
-            if np.max(spec) > np.min(spec):
-                spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
-            
-            # Ensure float32 dtype
-            spec = spec.astype(np.float32)
-            if label is not None:
-                label = np.float32(label)
-            
-            # Store in cache if not too many items already
-            if len(_spectrogram_cache) < 1000:  # Limit cache size
-                _spectrogram_cache[cache_key] = spec
-            
-            if label is not None:
-                return spec, label
-            return spec
+                if label is not None:
+                    return spec, label
+                return spec
         
         # Wrap the function to handle TensorFlow tensors
+        output_types = [tf.float32]
+        if label is not None:
+            output_types.append(tf.float32)
+            
         result = tf.py_function(
             _process_file,
-            [file_path, label],
-            [tf.float32, tf.float32 if label is not None else None]
+            [file_path, label] if label is not None else [file_path],
+            output_types
         )
         
         # Set shapes explicitly
@@ -1475,22 +1522,14 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     # Use fewer parallel calls to avoid CPU bottleneck
     num_parallel_calls = min(8, tf.data.AUTOTUNE)  
     
-    # Load and preprocess in parallel
-    if labels is not None:
-        dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
-    else:
-        dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=num_parallel_calls)
-    
     # Apply optimization techniques
-    if len(file_list) < 5000:  # Only cache reasonably sized datasets
-        logger.info("Caching dataset in memory")
-        dataset = dataset.cache()
-    
-    # Apply optimization techniques
-    dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
 
     # Cache should come before shuffle for better performance
-    dataset = dataset.cache()  # Cache first
+    if len(file_list) < 5000:  # Only cache reasonably sized datasets
+        logger.info("Caching dataset in memory")
+        dataset = dataset.cache()  # Cache first
+    
     if is_training:
         dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)  # Then shuffle
     
@@ -1670,44 +1709,141 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
             logger.info(f"Using cached datasets for size {size}")
             train_dataset, val_dataset = cached_datasets[size_key]
         else:
-            # Create datasets with current size
-            try:
-                # Set a smaller shuffle buffer for speed
-                old_buffer_size = param.get("training", {}).get("streaming_data", {}).get("prefetch_buffer_size", 4)
-                param["training"]["streaming_data"]["prefetch_buffer_size"] = 2
-                
-                train_dataset = create_tf_dataset(
-                    train_files, 
-                    train_labels, 
-                    batch_size=batch_size, 
-                    is_training=True, 
-                    param=param
-                )
-                
-                val_dataset = create_tf_dataset(
-                    val_files, 
-                    val_labels, 
-                    batch_size=batch_size, 
-                    is_training=False, 
-                    param=param
-                )
-                
-                # Restore original buffer size
-                param["training"]["streaming_data"]["prefetch_buffer_size"] = old_buffer_size
-                
-                # Cache the datasets for future use
-                cached_datasets[size_key] = (train_dataset, val_dataset)
-                
-            except Exception as e:
-                logger.error(f"Error creating datasets for size {size}: {e}")
-                return None, None
+            # Check if we already have preprocessed data to use directly
+            if i == 0:
+                if 'train_data' in globals() and 'train_labels_expanded' in globals() and 'val_data' in globals() and 'val_labels_expanded' in globals():
+                    logger.info("Using pre-processed tensor data instead of files for progressive training")
+                    
+                    # Resize data to current target shape
+                    from skimage.transform import resize
+                    
+                    # Create resized training data
+                    resized_train = np.zeros((train_data.shape[0], size[0], size[1]), dtype=np.float32)
+                    for j in range(train_data.shape[0]):
+                        resized_train[j] = resize(train_data[j], size, anti_aliasing=True)
+                        
+                    # Create resized validation data
+                    resized_val = np.zeros((val_data.shape[0], size[0], size[1]), dtype=np.float32)
+                    for j in range(val_data.shape[0]):
+                        resized_val[j] = resize(val_data[j], size, anti_aliasing=True)
+                        
+                    # Create direct datasets from tensor data
+                    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+                    train_dataset = train_dataset.batch(batch_size).shuffle(100).prefetch(tf.data.AUTOTUNE)
+                    
+                    val_dataset = tf.data.Dataset.from_tensor_slices((resized_val, val_labels_expanded))
+                    val_dataset = val_dataset.batch(batch_size).cache().prefetch(tf.data.AUTOTUNE)
+                    
+                    # Skip the file-based dataset creation
+                    use_file_based_dataset = False
+                else:
+                    use_file_based_dataset = True
+                    
+                # Only create file-based datasets if needed
+                if use_file_based_dataset:
+                    # Create datasets with current size
+                    try:
+                        # Set a smaller shuffle buffer for speed
+                        old_buffer_size = param.get("training", {}).get("streaming_data", {}).get("prefetch_buffer_size", 4)
+                        param["training"]["streaming_data"]["prefetch_buffer_size"] = 2
+                        
+                        train_dataset = create_tf_dataset(
+                            train_files, 
+                            train_labels, 
+                            batch_size=batch_size, 
+                            is_training=True, 
+                            param=param
+                        )
+                        
+                        val_dataset = create_tf_dataset(
+                            val_files, 
+                            val_labels, 
+                            batch_size=batch_size, 
+                            is_training=False, 
+                            param=param
+                        )
+                        
+                        # Restore original buffer size
+                        param["training"]["streaming_data"]["prefetch_buffer_size"] = old_buffer_size
+                        
+                        # Cache the datasets for future use
+                        cached_datasets[size_key] = (train_dataset, val_dataset)
+                        
+                    except Exception as e:
+                        logger.error(f"Error creating datasets for size {size}: {e}")
+                        return None, None
+            else:
+                # For subsequent stages, always use the file-based approach or resize tensor data if available
+                if 'train_data' in globals() and 'train_labels_expanded' in globals() and 'val_data' in globals() and 'val_labels_expanded' in globals():
+                    logger.info(f"Resizing pre-processed tensor data for size {size}")
+                    
+                    # Resize data to current target shape
+                    from skimage.transform import resize
+                    
+                    # Create resized training data
+                    resized_train = np.zeros((train_data.shape[0], size[0], size[1]), dtype=np.float32)
+                    for j in range(train_data.shape[0]):
+                        resized_train[j] = resize(train_data[j], size, anti_aliasing=True)
+                        
+                    # Create resized validation data
+                    resized_val = np.zeros((val_data.shape[0], size[0], size[1]), dtype=np.float32)
+                    for j in range(val_data.shape[0]):
+                        resized_val[j] = resize(val_data[j], size, anti_aliasing=True)
+                        
+                    # Create direct datasets from tensor data
+                    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+                    train_dataset = train_dataset.batch(batch_size).shuffle(100).prefetch(tf.data.AUTOTUNE)
+                    
+                    val_dataset = tf.data.Dataset.from_tensor_slices((resized_val, val_labels_expanded))
+                    val_dataset = val_dataset.batch(batch_size).cache().prefetch(tf.data.AUTOTUNE)
+                    
+                    # Cache the datasets for future use
+                    cached_datasets[size_key] = (train_dataset, val_dataset)
+                else:
+                    # Create datasets with current size from files
+                    try:
+                        # Set a smaller shuffle buffer for speed
+                        old_buffer_size = param.get("training", {}).get("streaming_data", {}).get("prefetch_buffer_size", 4)
+                        param["training"]["streaming_data"]["prefetch_buffer_size"] = 2
+                        
+                        train_dataset = create_tf_dataset(
+                            train_files, 
+                            train_labels, 
+                            batch_size=batch_size, 
+                            is_training=True, 
+                            param=param
+                        )
+                        
+                        val_dataset = create_tf_dataset(
+                            val_files, 
+                            val_labels, 
+                            batch_size=batch_size, 
+                            is_training=False, 
+                            param=param
+                        )
+                        
+                        # Restore original buffer size
+                        param["training"]["streaming_data"]["prefetch_buffer_size"] = old_buffer_size
+                        
+                        # Cache the datasets for future use
+                        cached_datasets[size_key] = (train_dataset, val_dataset)
+                        
+                    except Exception as e:
+                        logger.error(f"Error creating datasets for size {size}: {e}")
+                        return None, None
 
-
+        # Check dataset shapes (this will iterate through one batch each)
         logger.info(f"Checking dataset shapes for size {size}...")
-        for x_batch, y_batch in train_dataset.take(1):
-            logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
-        for x_batch, y_batch in val_dataset.take(1):
-            logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+        try:
+            # Use a try-except block to safely check dataset shapes
+            for x_batch, y_batch in train_dataset.take(1):
+                logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+            for x_batch, y_batch in val_dataset.take(1):
+                logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+        except Exception as e:
+            logger.error(f"Error checking training dataset shape: {e}")
+            logger.info("Continuing with training despite shape check error")
+
 
         # Use a Python iterator to track progress outside the graph context
         logger.info("Starting dataset loading - this may take a while...")

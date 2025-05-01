@@ -1415,65 +1415,84 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
                     if label is not None:
                         return spec, label
                     return spec
+                
+                # Create a cache key from file path
+                cache_key = file_path_str
+                
+                # Check if we have this spectrogram cached
+                if cache_key in _spectrogram_cache:
+                    spec = _spectrogram_cache[cache_key]
+                    if label is not None:
+                        return spec, label
+                    return spec
             
-            # Get parameters
-            n_mels = param.get("feature", {}).get("n_mels", 64)
-            n_fft = param.get("feature", {}).get("n_fft", 1024)
-            hop_length = param.get("feature", {}).get("hop_length", 512)
-            power = param.get("feature", {}).get("power", 2.0)
-            
-            # Process file to spectrogram
-            spec = file_to_spectrogram(
-                file_path_str, 
-                n_mels=n_mels, 
-                n_fft=n_fft, 
-                hop_length=hop_length, 
-                power=power, 
-                augment=is_training,
-                param=param
-            )
-            
-            # Handle case where processing fails
-            if spec is None:
-                # Return a zero spectrogram with the expected shape
+                # Get parameters
+                n_mels = param.get("feature", {}).get("n_mels", 64)
+                n_fft = param.get("feature", {}).get("n_fft", 1024)
+                hop_length = param.get("feature", {}).get("hop_length", 512)
+                power = param.get("feature", {}).get("power", 2.0)
+                
+                # Process file to spectrogram
+                spec = file_to_spectrogram(
+                    file_path_str, 
+                    n_mels=n_mels, 
+                    n_fft=n_fft, 
+                    hop_length=hop_length, 
+                    power=power, 
+                    augment=is_training,
+                    param=param
+                )
+                
+                # Handle case where processing fails
+                if spec is None:
+                    # Return a zero spectrogram with the expected shape
+                    target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
+                    spec = np.zeros(target_shape, dtype=np.float32)
+                
+                # Ensure we have a 2D spectrogram (not 3D with frames)
+                if len(spec.shape) == 3:
+                    # If we have multiple frames, just take the first one
+                    spec = spec[0]
+                
+                # Ensure consistent shape
                 target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
+                if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
+                    try:
+                        from skimage.transform import resize
+                        spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
+                    except Exception:
+                        # Fall back to simple padding/cropping
+                        temp_spec = np.zeros(target_shape, dtype=np.float32)
+                        freq_dim = min(spec.shape[0], target_shape[0])
+                        time_dim = min(spec.shape[1], target_shape[1])
+                        temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+                        spec = temp_spec
+                
+                # Normalize
+                if np.max(spec) > np.min(spec):
+                    spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
+                
+                # Ensure float32 dtype
+                spec = spec.astype(np.float32)
+                if label is not None:
+                    label = np.float32(label)
+                
+                # Store in cache if not too many items already
+                if len(_spectrogram_cache) < 1000:  # Limit cache size
+                    _spectrogram_cache[cache_key] = spec
+                
+                if label is not None:
+                    return spec, label
+                return spec
+                
+            except Exception as e:
+                logger.warning(f"Error processing file path {file_path}: {e}")
+                # Return a zero tensor with the expected shape in case of error
+                target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
                 spec = np.zeros(target_shape, dtype=np.float32)
-            
-            # Ensure we have a 2D spectrogram (not 3D with frames)
-            if len(spec.shape) == 3:
-                # If we have multiple frames, just take the first one
-                spec = spec[0]
-            
-            # Ensure consistent shape
-            target_shape = param.get("feature", {}).get("target_shape", (n_mels, 96))
-            if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
-                try:
-                    from skimage.transform import resize
-                    spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
-                except Exception:
-                    # Fall back to simple padding/cropping
-                    temp_spec = np.zeros(target_shape, dtype=np.float32)
-                    freq_dim = min(spec.shape[0], target_shape[0])
-                    time_dim = min(spec.shape[1], target_shape[1])
-                    temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
-                    spec = temp_spec
-            
-            # Normalize
-            if np.max(spec) > np.min(spec):
-                spec = (spec - np.min(spec)) / (np.max(spec) - np.min(spec))
-            
-            # Ensure float32 dtype
-            spec = spec.astype(np.float32)
-            if label is not None:
-                label = np.float32(label)
-            
-            # Store in cache if not too many items already
-            if len(_spectrogram_cache) < 1000:  # Limit cache size
-                _spectrogram_cache[cache_key] = spec
-            
-            if label is not None:
-                return spec, label
-            return spec
+                if label is not None:
+                    return spec, label
+                return spec
         
         # Wrap the function to handle TensorFlow tensors
         output_types = [tf.float32]
@@ -1485,7 +1504,6 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
             [file_path, label] if label is not None else [file_path],
             output_types
         )
-
         
         # Set shapes explicitly
         target_shape = param.get("feature", {}).get("target_shape", (param.get("feature", {}).get("n_mels", 64), 96))
@@ -1504,22 +1522,14 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
     # Use fewer parallel calls to avoid CPU bottleneck
     num_parallel_calls = min(8, tf.data.AUTOTUNE)  
     
-    # Load and preprocess in parallel
-    if labels is not None:
-        dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
-    else:
-        dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=num_parallel_calls)
-    
     # Apply optimization techniques
-    if len(file_list) < 5000:  # Only cache reasonably sized datasets
-        logger.info("Caching dataset in memory")
-        dataset = dataset.cache()
-    
-    # Apply optimization techniques
-    dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
 
     # Cache should come before shuffle for better performance
-    dataset = dataset.cache()  # Cache first
+    if len(file_list) < 5000:  # Only cache reasonably sized datasets
+        logger.info("Caching dataset in memory")
+        dataset = dataset.cache()  # Cache first
+    
     if is_training:
         dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)  # Then shuffle
     

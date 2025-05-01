@@ -34,6 +34,7 @@ from tqdm import tqdm
 from sklearn import metrics
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.mixture import GaussianMixture
+from tensorflow.keras.optimizers import AdamW
 from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Reshape, Permute, Concatenate, GlobalAveragePooling1D
@@ -893,7 +894,6 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 # model
 ########################################################################
-# Modify the create_ast_model function to create a more robust model:
 def create_ast_model(input_shape, config=None):
     """Create an improved Audio Spectrogram Transformer (AST) model"""
     if config is None:
@@ -1016,39 +1016,20 @@ def create_ast_model(input_shape, config=None):
     # Global average pooling
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Add multiple classification heads for better learning
-    # Head 1
-    head1 = tf.keras.layers.Dense(
-        embed_dim // 2,
+    # Single streamlined classification head 
+    x = tf.keras.layers.Dense(
+        dim_feedforward // 4,  # Smaller size
         activation='gelu',
         kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_hidden1'
+        name='classifier_hidden'
     )(x)
-    head1 = tf.keras.layers.Dropout(0.3)(head1)
-    head1 = tf.keras.layers.Dense(
+    x = tf.keras.layers.Dropout(0.2)(x)  # Reduced dropout
+    outputs = tf.keras.layers.Dense(
         1, 
         activation='sigmoid',
         kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_output1'
-    )(head1)
-    
-    # Head 2
-    head2 = tf.keras.layers.Dense(
-        embed_dim // 4,
-        activation='gelu',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_hidden2'
+        name='classifier_output'
     )(x)
-    head2 = tf.keras.layers.Dropout(0.3)(head2)
-    head2 = tf.keras.layers.Dense(
-        1, 
-        activation='sigmoid',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_output2'
-    )(head2)
-    
-    # Average the outputs of both heads
-    outputs = tf.keras.layers.Average()([head1, head2])
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
@@ -1506,9 +1487,12 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
         dataset = dataset.cache()
     
     # Apply optimization techniques
+    dataset = dataset.map(process_file, num_parallel_calls=tf.data.AUTOTUNE)
+
+    # Cache should come before shuffle for better performance
+    dataset = dataset.cache()  # Cache first
     if is_training:
-        # Use a much smaller shuffle buffer for speed
-        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
+        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)  # Then shuffle
     
     # Batch and prefetch
     dataset = dataset.batch(batch_size)
@@ -1759,10 +1743,10 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
             
             # Compile model
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(
+                optimizer = AdamW(
                     learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001),
-                    clipnorm=1.0,
-                    epsilon=1e-7
+                    weight_decay=0.01,  # Add weight decay
+                    clipnorm=clipnorm
                 ),
                 loss='binary_crossentropy',
                 metrics=['accuracy']
@@ -1784,10 +1768,10 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
             
             # Recompile
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(
+                optimizer = AdamW(
                     learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001) * 0.5,  # Lower LR for fine-tuning
-                    clipnorm=1.0,
-                    epsilon=1e-7
+                    weight_decay=0.01,  # Add weight decay
+                    clipnorm=clipnorm
                 ),
                 loss='binary_crossentropy',
                 metrics=['accuracy']
@@ -1835,7 +1819,8 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
     return model, all_history
 
 
-def find_optimal_threshold(y_true, y_pred_proba):
+# Modify your find_optimal_threshold function definition:
+def find_optimal_threshold(y_true, y_pred_proba, param=None):
     """
     Find the optimal classification threshold using various metrics
     """
@@ -1901,11 +1886,17 @@ def find_optimal_threshold(y_true, y_pred_proba):
     plt.title('Metrics vs. Threshold')
     plt.legend()
     plt.grid(True)
-    plt.savefig(f"{param['result_directory']}/threshold_optimization.png")
+    
+    # Check if param exists before using it
+    if param is not None and 'result_directory' in param:
+        plt.savefig(f"{param['result_directory']}/threshold_optimization.png")
+    else:
+        plt.savefig("threshold_optimization.png")
     plt.close()
     
     # Return the best threshold based on F1 score
     return best_f1_threshold
+
 
 def standardize_spectrograms(spectrograms):
     """
@@ -2562,16 +2553,12 @@ def main():
             
             # Adjust optimizer for mixed precision if enabled
             clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
-            if mixed_precision_enabled and compile_params.get("optimizer") == "adam":
-                from tensorflow.keras.optimizers import Adam
-                
-                # In TF 2.4+, LossScaleOptimizer is automatically applied when using mixed_float16 policy
-                # So we just need to create the base optimizer with gradient clipping
-                optimizer = Adam(learning_rate=learning_rate, clipnorm=clipnorm)
-                logger.info(f"Using Adam optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
+            if mixed_precision_enabled and compile_params.get("optimizer") == "AdamW":
+                optimizer = AdamW(learning_rate=learning_rate, clipnorm=clipnorm)
+                logger.info(f"Using AdamW optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
             else:
-                optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=clipnorm)
-                logger.info(f"Using Adam optimizer with gradient clipping (clipnorm={clipnorm})")
+                optimizer = tf.keras.optimizers.AdamW(learning_rate=learning_rate, clipnorm=clipnorm)
+                logger.info(f"Using AdamW optimizer with gradient clipping (clipnorm={clipnorm})")
 
             # Use a more stable loss function
             if loss_type == "binary_crossentropy":
@@ -2604,20 +2591,15 @@ def main():
                 # Binary cross-entropy component
                 bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
                 
-                # Focal loss component
-                gamma = 2.0
-                alpha = 0.25
-                p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
-                focal_weight = alpha * tf.pow(1.0 - p_t, gamma)
-                focal = focal_weight * bce
+                # Add a penalty term that amplifies errors near the decision boundary
+                boundary_penalty = 10.0 * y_true * (1 - y_pred) * (1 - y_pred) + 10.0 * (1 - y_true) * y_pred * y_pred
                 
-                # Combine losses (weighted sum)
-                return 0.5 * bce + 0.5 * focal
+                return bce + tf.reduce_mean(boundary_penalty)
 
             # Use more aggressive class weights
             class_weights = {
                 0: 1.0,  # Normal class
-                1: 4.0   # Abnormal class - increase weight significantly
+                1: 10.0   # Abnormal class - increase weight significantly
             }
             # Convert keys to integers to avoid dtype issues
             class_weights = {int(k): float(v) for k, v in class_weights.items()}
@@ -2878,7 +2860,7 @@ def main():
         
         # Apply standard threshold for final evaluation
         logger.info("Finding optimal classification threshold...")
-        detection_threshold = find_optimal_threshold(test_labels_expanded, y_pred)
+        detection_threshold = find_optimal_threshold(test_labels_expanded, y_pred, param)
         logger.info(f"Using optimal detection threshold: {detection_threshold}")
         y_pred_binary = (y_pred > detection_threshold).astype(int)
         

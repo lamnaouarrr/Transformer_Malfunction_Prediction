@@ -1501,14 +1501,14 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
         dataset = dataset.map(lambda x: process_file(x), num_parallel_calls=num_parallel_calls)
     
     # Apply optimization techniques
-    if is_training:
-        # Use a much smaller shuffle buffer for speed
-        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
-    
-    # Cache the dataset in memory if it's small enough
     if len(file_list) < 5000:  # Only cache reasonably sized datasets
         logger.info("Caching dataset in memory")
         dataset = dataset.cache()
+    
+    # Apply optimization techniques
+    if is_training:
+        # Use a much smaller shuffle buffer for speed
+        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
     
     # Batch and prefetch
     dataset = dataset.batch(batch_size)
@@ -1725,21 +1725,33 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
         for x_batch, y_batch in val_dataset.take(1):
             logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
 
-        # Add progress tracking for dataset loading
-        progress_counter = tf.Variable(0, dtype=tf.int32)
+        # Use a Python iterator to track progress outside the graph context
+        logger.info("Starting dataset loading - this may take a while...")
 
-        # Create a dataset map function to track progress
-        def track_progress(x, y):
-            progress_counter.assign_add(1)
-            if progress_counter % 50 == 0:  # Log every 50 batches
-                logger.info(f"Loaded {progress_counter.numpy()} batches")
-            return x, y
+        # Define a simple Python iterator that won't use .numpy() in graph mode
+        class ProgressCallback:
+            def __init__(self, name="Dataset"):
+                self.count = 0
+                self.name = name
+                
+            def __call__(self, *args):
+                self.count += 1
+                if self.count % 10 == 0:
+                    logger.info(f"{self.name}: Loaded {self.count} batches")
+                return args
 
-        # Apply tracking to datasets
-        train_dataset = train_dataset.map(
-            track_progress,
-            num_parallel_calls=1  # Must be sequential to track accurately
-        )
+        # Create the callbacks
+        train_callback = ProgressCallback("Training dataset")
+        val_callback = ProgressCallback("Validation dataset")
+
+        # Check dataset shapes (this will iterate through one batch each)
+        logger.info(f"Checking dataset shapes for size {size}...")
+        for x_batch, y_batch in train_dataset.take(1):
+            logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+            
+        for x_batch, y_batch in val_dataset.take(1):
+            logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
+
 
         # If first stage, create model from scratch
         if i == 0:

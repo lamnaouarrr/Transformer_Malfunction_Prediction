@@ -1634,6 +1634,44 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
 
     # Cache datasets between progressive steps
     cached_datasets = {}
+
+    # Check if input data is valid
+    if not train_files or train_files is None or len(train_files) == 0:
+        logger.error("No training files provided for progressive training")
+        return None, None
+        
+    if not val_files or val_files is None or len(val_files) == 0:
+        logger.warning("No validation files provided for progressive training, using a portion of training data")
+        # Use a portion of training data for validation if no validation data is provided
+        split_idx = int(len(train_files) * 0.9)
+        val_files = train_files[split_idx:]
+        val_labels = train_labels[split_idx:] if train_labels is not None else None
+        train_files = train_files[:split_idx]
+        train_labels = train_labels[:split_idx] if train_labels is not None else None
+    
+    # Get base parameters
+    base_epochs = param.get("fit", {}).get("epochs", 30)
+    batch_size = param.get("fit", {}).get("batch_size", 16)
+    
+    # Define progressive sizes (start smaller, end with target size)
+    progressive_config = param.get("training", {}).get("progressive_training", {})
+    if not progressive_config.get("enabled", False):
+        logger.info("Progressive training disabled")
+        return None, None
+    
+    # Get sizes from config or use defaults
+    sizes = progressive_config.get("sizes", [[32, 48], [48, 64], [64, 96]])
+    epochs_per_size = progressive_config.get("epochs_per_size", [10, 10, 10])
+    
+    # Ensure we have enough epochs for each size
+    if len(epochs_per_size) != len(sizes):
+        epochs_per_size = [base_epochs // len(sizes)] * len(sizes)
+    
+    logger.info(f"Starting progressive training with sizes: {sizes}")
+    logger.info(f"Epochs per size: {epochs_per_size}")
+    
+    # Store history for each stage
+    all_history = []
     
     # Train progressively
     for i, (size, epochs) in enumerate(zip(sizes, epochs_per_size)):
@@ -1930,7 +1968,7 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to enable XLA acceleration: {e}")
 
-            
+
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
     abnormal_dir = Path(param["base_directory"]) / "abnormal"

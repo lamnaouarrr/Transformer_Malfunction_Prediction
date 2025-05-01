@@ -1917,6 +1917,8 @@ def main():
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory configuration: {e}")
 
+    with open("baseline_AST.yaml", "r") as stream:
+        param = yaml.safe_load(stream)    
 
     # Enable XLA compilation for faster GPU execution
     if param.get("training", {}).get("xla_acceleration", True):
@@ -1928,10 +1930,7 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to enable XLA acceleration: {e}")
 
-
-
-    with open("baseline_AST.yaml", "r") as stream:
-        param = yaml.safe_load(stream)
+            
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
     abnormal_dir = Path(param["base_directory"]) / "abnormal"

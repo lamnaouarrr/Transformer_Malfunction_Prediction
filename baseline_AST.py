@@ -2037,10 +2037,6 @@ def main():
         
         logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
 
-    # Then use it in your preprocessing pipeline:
-    train_data = standardize_spectrograms(train_data)
-    val_data = standardize_spectrograms(val_data)
-    test_data = standardize_spectrograms(test_data)
 
     preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
     chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
@@ -2106,6 +2102,12 @@ def main():
     if train_data.shape[0] == 0 or val_data.shape[0] == 0:
         logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
         return  # Exit main() if no valid training/validation data
+
+    logger.info("Applying robust standardization to spectrograms...")
+    train_data = standardize_spectrograms(train_data)
+    val_data = standardize_spectrograms(val_data)
+    if 'test_data' in locals() and test_data is not None:
+        test_data = standardize_spectrograms(test_data)
 
     save_pickle(train_pickle, train_data)
     save_pickle(train_labels_pickle, train_labels_expanded)

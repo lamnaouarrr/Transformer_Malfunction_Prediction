@@ -1410,8 +1410,73 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
         logger.error("Empty file list provided to create_tf_dataset")
         return None
         
-    # After the existing code, add these lines:
+    # Create the initial dataset from file paths and labels
+    if labels is not None:
+        dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
+    else:
+        dataset = tf.data.Dataset.from_tensor_slices(file_list)
+        
+    # Define a function to process each file
+    def process_file(file_path, label=None):
+        # Convert string tensor to Python string
+        file_path_str = file_path.numpy().decode('utf-8') if isinstance(file_path, tf.Tensor) else file_path
+        
+        # Process the file to get spectrogram
+        spectrogram = tf.py_function(
+            lambda x: file_to_spectrogram(
+                x.numpy().decode('utf-8') if isinstance(x, tf.Tensor) else x,
+                n_mels=param.get("feature", {}).get("n_mels", 64),
+                n_fft=param.get("feature", {}).get("n_fft", 1024),
+                hop_length=param.get("feature", {}).get("hop_length", 512),
+                power=param.get("feature", {}).get("power", 2.0),
+                augment=is_training,
+                param=param
+            ),
+            [file_path],
+            tf.float32
+        )
+        
+        # Ensure the spectrogram has the correct shape
+        target_shape = param.get("feature", {}).get("target_shape", None)
+        if target_shape:
+            spectrogram = tf.ensure_shape(spectrogram, target_shape)
+        
+        if label is not None:
+            return spectrogram, label
+        else:
+            return spectrogram
     
+    # Create a wrapper function compatible with tf.data.Dataset.map
+    @tf.function
+    def tf_process_file(file_path, label=None):
+        if label is not None:
+            spec, label = tf.py_function(
+                lambda x, y: process_file(x, y),
+                [file_path, label],
+                [tf.float32, tf.float32]
+            )
+            
+            # Ensure shapes are defined
+            target_shape = param.get("feature", {}).get("target_shape", None)
+            if target_shape:
+                spec = tf.ensure_shape(spec, target_shape)
+                
+            label = tf.ensure_shape(label, [])
+            return spec, label
+        else:
+            spec = tf.py_function(
+                lambda x: process_file(x),
+                [file_path],
+                tf.float32
+            )
+            
+            # Ensure shape is defined
+            target_shape = param.get("feature", {}).get("target_shape", None)
+            if target_shape:
+                spec = tf.ensure_shape(spec, target_shape)
+                
+            return spec
+        
     # Optimize for V100 with large datasets
     large_dataset_mode = param.get("large_dataset", {}).get("enabled", False)
     if large_dataset_mode:
@@ -1431,14 +1496,20 @@ def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, 
         prefetch_size = tf.data.AUTOTUNE
         num_parallel_calls = min(8, tf.data.AUTOTUNE)
     
-    # Use these variables in the dataset creation below
+    # Apply transformations to the dataset
+    if is_training:
+        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size, reshuffle_each_iteration=True)
     
-    # Replace the existing dataset.map line with:
-    dataset = dataset.map(process_file, num_parallel_calls=num_parallel_calls)
+    # Apply the processing function
+    dataset = dataset.map(tf_process_file, num_parallel_calls=num_parallel_calls)
     
-    # And replace the existing prefetch line with:
+    # Batch the dataset
+    dataset = dataset.batch(batch_size)
+    
+    # Prefetch for better performance
     dataset = dataset.prefetch(prefetch_size)
-
+    
+    return dataset
 
 def create_small_dataset(files, labels, max_files=100):
     """

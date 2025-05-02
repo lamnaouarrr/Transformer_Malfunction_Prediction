@@ -612,7 +612,7 @@ def dataset_generator(target_dir, param=None):
             db = parts[1]
             machine_type = parts[2]
             machine_id_with_file = parts[3]
-            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
+            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id
             
             key = (db, machine_type, machine_id)
             
@@ -1667,6 +1667,9 @@ def implement_progressive_training(model, train_files, train_labels, val_files, 
     
     # Store history for each stage
     all_history = []
+    
+    # Get gradient clipping norm from parameters
+    clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
     
     # Train progressively
     for i, (size, epochs) in enumerate(zip(sizes, epochs_per_size)):

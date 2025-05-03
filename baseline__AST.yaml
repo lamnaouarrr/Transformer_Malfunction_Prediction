@@ -1,0 +1,175 @@
+# Feature extraction parameters
+feature:
+  n_mels: 64
+  frames: 5
+  n_fft: 1024
+  hop_length: 512
+  stride: 2
+  power: 2.0
+  sr: 16000
+  augmentation:
+    enabled: true
+    max_mask_freq: 10
+    max_mask_time: 10
+    n_freq_masks: 2
+    n_time_masks: 2
+    noise_level: 0.005
+  audio_augmentation:
+    enabled: true
+    time_stretch:
+      enabled: true
+      probability: 0.5
+      min_factor: 0.8
+      max_factor: 1.2
+    pitch_shift:
+      enabled: true
+      probability: 0.5
+      min_steps: -3
+      max_steps: 3
+    background_noise:
+      enabled: true
+      probability: 0.5
+      min_factor: 0.001
+      max_factor: 0.02
+  preprocessing_batch_size: 32  # Reduced from 64
+  dataset_chunking:
+    enabled: true
+    chunk_size: 500  # Reduced from 1000
+    temp_directory: "./temp_chunks/temp_chunks__AST"
+  large_dataset:
+    enabled: true
+    temp_storage: "/tmp/ast_training"  # SSD if available
+    cache_spectrograms: false  # Disabled caching to reduce memory usage
+    max_files_in_memory: 1000  # Reduced from 5000
+    precompute_enabled: false
+
+
+# Fit algorithm parameters
+fit:
+  compile:
+    optimizer: "AdamW"
+    learning_rate: 0.0001
+    loss: "binary_crossentropy"
+    metrics: ["accuracy"]
+    weighted_metrics: ["accuracy"]
+  epochs: 50
+  batch_size: 8  # Reduced from 16
+  shuffle: True
+  validation_split: 0.1
+  verbose: 1
+  early_stopping:
+    enabled: true
+    monitor: "val_loss"
+    patience: 15
+    min_delta: 0.001
+    restore_best_weights: true
+  weight_factor: 1.5  # For non-problematic IDs
+  weighted_machine_ids: []  # Will handle id_00 and id_04 explicitly in code
+  apply_sample_weights: true  # Enable sample weighting
+  special_case_weights: # Special case weights for problematic machine IDs
+    fan_id_00: 2.0
+    fan_id_04: 2.0
+  lr_scheduler:
+    enabled: true
+    monitor: "val_loss"
+    factor: 0.1
+    patience: 5
+    min_delta: 0.001
+    cooldown: 2
+    min_lr: 0.00000001
+  checkpointing:
+    enabled: true
+    monitor: "val_accuracy"
+    mode: "max"
+    save_best_only: true
+  class_weight_balancing: true
+  abnormal_weight_multiplier: 1.0
+  default_abnormal_weight: 10.0 
+  warmup:
+    enabled: true
+    epochs: 5
+    hold_epochs: 0
+
+# Training optimizations
+training:
+  find_optimal_lr: false
+  mixed_precision: true
+  xla_acceleration: true
+  optimize_batch_size: false  # Disable as we're manually setting it
+  gradient_accumulation_steps: 2  # Increased from 1 for memory efficiency
+  gradient_clip_norm: 1.0
+  mixup:
+    enabled: true
+    alpha: 0.2
+  checkpointing:
+    save_frequency: 1000
+    keep_checkpoints: 5
+  memory_optimization:
+    clear_memory_frequency: 5  # Increased frequency from 25
+    prefetch_buffer_size: 2  # Reduced from 4
+  progressive_training:
+    enabled: false  # Disable progressive training to simplify
+  streaming_data:
+    enabled: true
+    prefetch_buffer_size: 1  # Reduced from 2
+    parallel_calls: 4  # Reduced from 8
+    cache_size: 500  # Reduced from 1000
+  efficient_attention:
+    enabled: true
+    type: "linear"
+  gradient_checkpointing:
+    enabled: true
+
+# Enhanced transformer model settings
+model:
+  architecture:
+    transformer:
+      num_heads: 1
+      dim_feedforward: 64  # Reduced from 128
+      num_encoder_layers: 1
+      positional_encoding: true
+      use_pretrained: false
+      pretrained_model: "google/vit-base-patch16-224"
+      patch_size: 4
+      attention_dropout: 0.1
+      attention_type: "efficient"  # Options: "standard", "efficient", "linear"
+      pos_encoding_type: "sinusoidal"  # Options: "sinusoidal", "learned", "alibi", "rotary"
+      layer_norm_epsilon: 1.0e-6
+      activation_fn: "gelu"  # Options: "gelu", "relu", "swish"
+      ff_dim_multiplier: 2  # Reduced from 4
+      enable_rotary: false
+  loss: "binary_crossentropy"
+  l2_regularization: 0.00001
+  focal_loss:
+    gamma: 2.0
+    alpha: 0.25
+    use_safe_implementation: true
+
+# Dataset generation parameters
+dataset:
+  split_ratio: [0.8, 0.1, 0.1]  # [train, validation, test]
+  file_extension: "wav"
+  default_prediction: 0.5  # Default value for error cases
+
+# Debug settings
+debug:
+  enabled: false  # Set to false for full dataset
+  sample_size: 500  # Number of samples to use in debug mode
+
+
+# Visualization parameters
+visualization:
+  figure_size: [30, 20]
+  history_plots: ["loss", "accuracy"]
+
+# Directory paths
+base_directory: "./dataset"
+pickle_directory: "./pickle/pickle__AST"
+model_directory: "./model/AST_"
+result_directory: "./result/result__AST"
+result_file: "result__AST.yaml"
+
+# Logging parameters
+logging:
+  level: "DEBUG"
+  file: "./logs/log_AST/baseline__AST.log"

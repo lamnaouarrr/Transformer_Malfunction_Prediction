@@ -26,8 +26,19 @@ import tensorflow.keras.backend as K
 import seaborn as sns
 import math
 import gc
+import warnings
 
+# Configure memory optimizations (integrated from run_optimized_trainer.py)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
+warnings.filterwarnings('ignore')
 
+# Memory optimization environment variables
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['TF_MEMORY_ALLOCATION'] = '0.8'
+os.environ['TF_ENABLE_GPU_GARBAGE_COLLECTION'] = 'true'
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+os.environ['TF_USE_CUDNN_BATCHNORM_SPATIAL_PERSISTENT'] = '1'
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices --tf_xla_auto_jit=2'
 
 from pathlib import Path
 from tqdm import tqdm
@@ -121,8 +132,8 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    os.makedirs("./logs/log_AST", exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline_AST.log")
+    os.makedirs("./logs/log__AST", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline__AST.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -2382,7 +2393,7 @@ def main():
             logger.error(f"Error setting GPU memory configuration: {e}")
 
 
-    with open("baseline_AST.yaml", "r") as stream:
+    with open("baseline__AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)    
 
     # Enable XLA compilation for faster GPU execution
@@ -2416,7 +2427,7 @@ def main():
 
     start_time = time.time()
 
-    with open("baseline_AST.yaml", "r") as stream:
+    with open("baseline__AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
 
     os.makedirs(param["pickle_directory"], exist_ok=True)
@@ -2494,7 +2505,7 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = f"{param['result_directory']}/result_AST.yaml"
+    result_file = f"{param['result_directory']}/result__AST.yaml"
 
     # Get chunking parameters - add these variables that were missing
     chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)

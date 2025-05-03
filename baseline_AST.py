@@ -2281,6 +2281,8 @@ def main():
         logger.info("Using successfully loaded pickle data for training")
         train_files = []  # Empty list since we're using the pickle data directly
         val_files = []    # Empty list since we're using the pickle data directly
+        # Skip all the test data processing since we already have the test files loaded
+        test_data = None  # Will be computed later only if needed for evaluation
 
     debug_mode = param.get("debug", {}).get("enabled", False)
     debug_sample_size = param.get("debug", {}).get("sample_size", 100)

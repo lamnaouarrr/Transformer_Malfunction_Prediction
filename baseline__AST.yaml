@@ -31,29 +31,23 @@ feature:
       probability: 0.5
       min_factor: 0.001
       max_factor: 0.02
-  preprocessing_batch_size: 32  # Reduced from 64
+  preprocessing_batch_size: 64
   dataset_chunking:
     enabled: true
-    chunk_size: 500  # Reduced from 1000
+    chunk_size: 5000  # Process 5000 files at a time
     temp_directory: "./temp_chunks/temp_chunks__AST"
-  large_dataset:
-    enabled: true
-    temp_storage: "/tmp/ast_training"  # SSD if available
-    cache_spectrograms: false  # Disabled caching to reduce memory usage
-    max_files_in_memory: 1000  # Reduced from 5000
-    precompute_enabled: false
 
 
 # Fit algorithm parameters
 fit:
   compile:
-    optimizer: "AdamW"
+    optimizer: "adam"
     learning_rate: 0.0001
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
-  epochs: 50
-  batch_size: 8  # Reduced from 16
+  epochs: 30
+  batch_size: 16
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -94,49 +88,37 @@ fit:
 training:
   find_optimal_lr: false
   mixed_precision: true
-  xla_acceleration: true
-  optimize_batch_size: false  # Disable as we're manually setting it
-  gradient_accumulation_steps: 2  # Increased from 1 for memory efficiency
+  xla_acceleration: false
+  gradient_accumulation_steps: 1
   gradient_clip_norm: 1.0
   mixup:
     enabled: true
     alpha: 0.2
   checkpointing:
-    save_frequency: 1000
+    save_frequency: 1000  # Save every 1000 batches
     keep_checkpoints: 5
   memory_optimization:
-    clear_memory_frequency: 5  # Increased frequency from 25
-    prefetch_buffer_size: 2  # Reduced from 4
-  progressive_training:
-    enabled: false  # Disable progressive training to simplify
-  streaming_data:
-    enabled: true
-    prefetch_buffer_size: 1  # Reduced from 2
-    parallel_calls: 4  # Reduced from 8
-    cache_size: 500  # Reduced from 1000
-  efficient_attention:
-    enabled: true
-    type: "linear"
-  gradient_checkpointing:
-    enabled: true
+    clear_memory_frequency: 50  # Clear memory every 50 batches
+    prefetch_buffer_size: 4
 
 # Enhanced transformer model settings
 model:
   architecture:
     transformer:
-      num_heads: 1
-      dim_feedforward: 64  # Reduced from 128
-      num_encoder_layers: 1
+      num_heads: 4
+      dim_feedforward: 512
+      num_encoder_layers: 2
       positional_encoding: true
-      use_pretrained: false
+      use_pretrained: true
       pretrained_model: "google/vit-base-patch16-224"
       patch_size: 4
       attention_dropout: 0.1
+      # New parameters
       attention_type: "efficient"  # Options: "standard", "efficient", "linear"
       pos_encoding_type: "sinusoidal"  # Options: "sinusoidal", "learned", "alibi", "rotary"
       layer_norm_epsilon: 1.0e-6
       activation_fn: "gelu"  # Options: "gelu", "relu", "swish"
-      ff_dim_multiplier: 2  # Reduced from 4
+      ff_dim_multiplier: 4
       enable_rotary: false
   loss: "binary_crossentropy"
   l2_regularization: 0.00001
@@ -153,7 +135,7 @@ dataset:
 
 # Debug settings
 debug:
-  enabled: false  # Set to false for full dataset
+  enabled: true  # Set to false for full dataset
   sample_size: 500  # Number of samples to use in debug mode
 
 
@@ -164,7 +146,7 @@ visualization:
 
 # Directory paths
 base_directory: "./dataset"
-pickle_directory: "./pickle/pickle__AST"
+pickle_directory: "./pickle/pickle_AST"
 model_directory: "./model/AST_"
 result_directory: "./result/result__AST"
 result_file: "result__AST.yaml"

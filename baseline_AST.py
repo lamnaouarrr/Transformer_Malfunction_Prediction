@@ -2214,6 +2214,15 @@ def main():
 
     # Initialize variables
     train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+    train_data, val_data, test_data = None, None, None
+    
+    print("DEBUG: Checking for pickle files...")
+    print(f"DEBUG: train_pickle exists: {os.path.exists(train_pickle)}")
+    print(f"DEBUG: train_labels_pickle exists: {os.path.exists(train_labels_pickle)}")
+    print(f"DEBUG: val_pickle exists: {os.path.exists(val_pickle)}")
+    print(f"DEBUG: val_labels_pickle exists: {os.path.exists(val_labels_pickle)}")
+    print(f"DEBUG: test_files_pickle exists: {os.path.exists(test_files_pickle)}")
+    print(f"DEBUG: test_labels_pickle exists: {os.path.exists(test_labels_pickle)}")
 
     if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
         os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
@@ -2251,14 +2260,17 @@ def main():
             logger.error(f"Error loading pickle files: {e}. Will regenerate dataset.")
             # Fall through to regenerate dataset
             train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+            train_data, val_data = None, None
     else:
         logger.info("Pickle files not found. Will generate new dataset.")
         train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+        train_data, val_data = None, None
 
     # If we didn't successfully load from pickle, generate the dataset
-    if (not isinstance(train_data, np.ndarray) or train_data.size == 0 or 
-        not isinstance(val_data, np.ndarray) or val_data.size == 0 or 
+    if (train_data is None or not isinstance(train_data, np.ndarray) or train_data.size == 0 or 
+        val_data is None or not isinstance(val_data, np.ndarray) or val_data.size == 0 or 
         not test_files or len(test_files) == 0):
+        print("DEBUG: Need to generate dataset from scratch")
         logger.info("Generating new dataset...")
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
         
@@ -2267,175 +2279,83 @@ def main():
         logger.info(f"Generated val files: {len(val_files)}")
         logger.info(f"Generated test files: {len(test_files)}")
         
-        if 'train_data' in locals(): 
+        if 'train_data' in locals() and train_data is not None: 
             del train_data
-        if 'val_data' in locals():
+            train_data = None
+        if 'val_data' in locals() and val_data is not None:
             del val_data
+            val_data = None
 
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
     else:
-        # When loading from pickle files, we don't need to generate file lists
-        # But we still need to keep track of count for training phase
+        # When loading from pickle files, we don't need to process files again
+        print("DEBUG: Successfully loaded data from pickle files, using directly")
         logger.info("Using successfully loaded pickle data for training")
         train_files = []  # Empty list since we're using the pickle data directly
         val_files = []    # Empty list since we're using the pickle data directly
-        # Skip all the test data processing since we already have the test files loaded
-        test_data = None  # Will be computed later only if needed for evaluation
-
-    debug_mode = param.get("debug", {}).get("enabled", False)
-    debug_sample_size = param.get("debug", {}).get("sample_size", 100)
-
-    # Memory optimization for large datasets
-    if param.get("large_dataset", {}).get("enabled", False):
-        logger.info("Enabling aggressive memory management for large dataset")
-        # Clear any existing memory
-        gc.collect()
         
-        # Attempt to limit TensorFlow memory growth on GPU
-        try:
-            for gpu in tf.config.experimental.list_physical_devices('GPU'):
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info("Set GPU memory growth mode for large dataset training")
-        except:
-            logger.warning("Could not set GPU memory growth mode")
+        # Skip test data processing - it's unnecessary when we have pickle data
+        process_test_files = False
+        test_data = None
         
-        # Clear spectrogram cache
-        global _SPECTROGRAM_CACHE
-        _SPECTROGRAM_CACHE = {}
+        # Jump directly to the training phase, bypassing preprocessing
+        print("DEBUG: Skipping directly to training phase with loaded data")
+        # We'll add more code to properly handle this later
         
-        # Set smaller segmentation sizes for large files
-        param["feature"]["n_fft"] = param["feature"].get("n_fft", 1024)
-        param["feature"]["hop_length"] = param["feature"].get("hop_length", 512)
-
-
-    if debug_mode:
-        logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
-        train_files, train_labels = create_small_dataset(train_files, train_labels, debug_sample_size)
-        val_files, val_labels = create_small_dataset(val_files, val_labels, debug_sample_size // 2)
-        test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
-        
-        logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
-
-
-    preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
-    chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
-    chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
-
-    # For training data with full dataset support
-    large_dataset_mode = param.get("large_dataset", {}).get("enabled", False)
-
-    if large_dataset_mode:
-        logger.info("LARGE DATASET MODE: Using streaming data pipeline - will not precompute spectrograms")
-        # Set up environment for large dataset processing
-        temp_dir = setup_large_dataset_processing()
-        logger.info(f"Using temporary directory: {temp_dir}")
-        
-        # Using streaming approach - don't load all data to memory
-        train_data, train_labels_expanded = None, None
-        use_streaming = True
-        
-        # Create streaming dataset directly (will be used later)
-        train_dataset = create_tf_dataset(
-            train_files, 
-            train_labels, 
-            batch_size=param.get("fit", {}).get("batch_size", 16),
-            is_training=True, 
-            param=param
-        )
-        logger.info("Created streaming training dataset")
-        
-        # Also stream validation data
-        val_dataset = create_tf_dataset(
-            val_files, 
-            val_labels, 
-            batch_size=param.get("fit", {}).get("batch_size", 16),
-            is_training=False, 
-            param=param
-        )
-        logger.info("Created streaming validation dataset")
-    else:
-        # Original code for smaller datasets
-        if chunking_enabled and len(train_files) > chunk_size:
-            logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
-            train_data, train_labels_expanded = process_dataset_in_chunks(
-                train_files,
-                train_labels,
+    # Process test data only if needed (not on pickle mode)
+    process_test_files = not (train_data is not None and val_data is not None)
+    print(f"DEBUG: process_test_files = {process_test_files}")
+    
+    if process_test_files:
+        print("DEBUG: Processing test files...")
+        # For test data
+        if chunking_enabled and len(test_files) > chunk_size:
+            logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
+            test_data, test_labels_expanded = process_dataset_in_chunks(
+                test_files,
+                test_labels,
                 chunk_size=chunk_size,
                 param=param
             )
         else:
-            train_data, train_labels_expanded = list_to_spectrograms(
-                train_files,
-                train_labels,
-                msg="generate train_dataset",
-                augment=True,
+            test_data, test_labels_expanded = list_to_spectrograms(
+                test_files,
+                test_labels,
+                msg="generate test_dataset",
+                augment=False,
                 param=param,
                 batch_size=preprocessing_batch_size
             )
-
-
-    # For validation data
-    if chunking_enabled and len(val_files) > chunk_size:
-        logger.info(f"Processing validation data in chunks (dataset size: {len(val_files)} files)")
-        val_data, val_labels_expanded = process_dataset_in_chunks(
-            val_files,
-            val_labels,
-            chunk_size=chunk_size,
-            param=param
-        )
     else:
-        val_data, val_labels_expanded = list_to_spectrograms(
-            val_files,
-            val_labels,
-            msg="generate validation_dataset",
-            augment=False,
-            param=param,
-            batch_size=preprocessing_batch_size
-        )
+        # Using pickle data, skip test processing
+        print("DEBUG: Skipping test file processing in pickle mode")
+        # We don't need to process test files here,
+        # they will be loaded when needed for evaluation
 
-    # For test data
-    if chunking_enabled and len(test_files) > chunk_size:
-        logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
-        test_data, test_labels_expanded = process_dataset_in_chunks(
-            test_files,
-            test_labels,
-            chunk_size=chunk_size,
-            param=param
-        )
-    else:
-        test_data, test_labels_expanded = list_to_spectrograms(
-            test_files,
-            test_labels,
-            msg="generate test_dataset",
-            augment=False,
-            param=param,
-            batch_size=preprocessing_batch_size
-        )
-
-    if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+    # This is a critical check that was causing the issue
+    if (train_data is None or val_data is None or 
+        (hasattr(train_data, 'shape') and train_data.shape[0] == 0) or 
+        (hasattr(val_data, 'shape') and val_data.shape[0] == 0)):
         logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
+        print("DEBUG: Critical error - train_data or val_data is None or empty")
+        print(f"DEBUG: train_data type: {type(train_data)}")
+        print(f"DEBUG: val_data type: {type(val_data)}")
+        if train_data is not None:
+            print(f"DEBUG: train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'no shape'}")
+        if val_data is not None:
+            print(f"DEBUG: val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'no shape'}")
         return  # Exit main() if no valid training/validation data
 
-    logger.info("Applying robust standardization to spectrograms...")
-    train_data = standardize_spectrograms(train_data)
-    val_data = standardize_spectrograms(val_data)
-    if 'test_data' in locals() and test_data is not None:
-        test_data = standardize_spectrograms(test_data)
-
-    save_pickle(train_pickle, train_data)
-    save_pickle(train_labels_pickle, train_labels_expanded)
-    save_pickle(val_pickle, val_data)
-    save_pickle(val_labels_pickle, val_labels_expanded)
-    save_pickle(test_files_pickle, test_files)
-    save_pickle(test_labels_pickle, test_labels)
+    # Debug point - If we get here, we have valid data
+    print("DEBUG: Passed critical validation check - proceeding with valid data")
 
     # Print shapes
     logger.info(f"Training data shape: {train_data.shape}")
-    logger.info(f"Training labels shape: {train_labels_expanded.shape}")
+    logger.info(f"Training labels shape: {train_labels.shape}")
     logger.info(f"Validation data shape: {val_data.shape}")
-    logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
+    logger.info(f"Validation labels shape: {val_labels.shape}")
     logger.info(f"Number of test files: {len(test_files)}")
 
     # Define target shape for spectrograms
@@ -2450,885 +2370,3 @@ def main():
     logger.info("Preprocessing validation data...")
     val_data = preprocess_spectrograms(val_data, target_shape)
     logger.info(f"Preprocessed validation data shape: {val_data.shape}")
-
-    # Normalize data for better training
-    logger.info("Normalizing data...")
-    # Calculate mean and std from training data
-    train_mean = np.mean(train_data)
-    train_std = np.std(train_data)
-    logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
-
-    # Apply normalization if std is not too small
-    if train_std > 1e-6:
-        train_data = (train_data - train_mean) / train_std
-        val_data = (val_data - train_mean) / train_std
-        logger.info("Z-score normalization applied")
-    else:
-        # If std is too small, just center the data
-        train_data = train_data - train_mean
-        val_data = val_data - train_mean
-        logger.info("Mean centering applied (std too small for z-score)")
-
-    # Balance the dataset
-    logger.info("Balancing dataset...")
-    train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
-
-    # Apply data augmentation
-    augmented_data = []
-    augmented_labels = []
-
-    # Get abnormal samples
-    abnormal_indices = np.where(train_labels_expanded == 1)[0]
-    logger.info(f"Augmenting {len(abnormal_indices)} abnormal samples")
-
-    # Augment each abnormal sample once with simple noise
-    for idx in abnormal_indices:
-        sample = train_data[idx].copy()
-        noise = np.random.normal(0, 0.1, sample.shape)
-        augmented_sample = sample + noise
-        augmented_sample = np.clip(augmented_sample, 0, 1)
-        
-        augmented_data.append(augmented_sample)
-        augmented_labels.append(1)  # Abnormal class
-
-    # Add augmented samples to training data
-    if augmented_data:
-        augmented_data = np.array(augmented_data)
-        train_data = np.vstack([train_data, augmented_data])
-        train_labels_expanded = np.concatenate([train_labels_expanded, np.array(augmented_labels)])
-        
-        # Shuffle the combined dataset
-        shuffle_indices = np.random.permutation(len(train_data))
-        train_data = train_data[shuffle_indices]
-        train_labels_expanded = train_labels_expanded[shuffle_indices]
-        
-        logger.info(f"After augmentation: {len(train_data)} samples, {np.sum(train_labels_expanded == 1)} abnormal")
-
-    # Configure mixed precision
-    mixed_precision_enabled = configure_mixed_precision(
-        enabled=param.get("training", {}).get("mixed_precision", False)
-    )
-
-    # Check if we should use streaming data
-    use_streaming = param.get("training", {}).get("streaming_data", {}).get("enabled", False)
-
-    if use_streaming:
-        logger.info("Using streaming data pipeline with tf.data")
-        # Ensure all labels are float32
-        if train_labels is not None:
-            train_labels = np.array(train_labels, dtype=np.float32)
-        if val_labels is not None:
-            val_labels = np.array(val_labels, dtype=np.float32)
-        if test_labels is not None:
-            test_labels = np.array(test_labels, dtype=np.float32)
-        
-        # Create TensorFlow datasets
-        batch_size = param.get("fit", {}).get("batch_size", 16)
-        orig_batch_size = batch_size
-
-
-        if batch_size < 32 and param.get("training", {}).get("optimize_batch_size", True):
-            batch_size = 32  # Suggested size for V100 32GB
-            logger.info(f"Increased batch size from {orig_batch_size} to {batch_size} for V100 32GB (can be disabled in config)")
-
-        # Update the configuration to use this optimized batch size
-        param["fit"]["batch_size"] = batch_size
-
-        logger.info(f"Using batch size {batch_size} optimized for V100 32GB")
-        train_dataset = create_tf_dataset(
-            train_files, 
-            train_labels, 
-            batch_size=batch_size, 
-            is_training=True, 
-            param=param
-        )
-        
-        val_dataset = create_tf_dataset(
-            val_files, 
-            val_labels, 
-            batch_size=batch_size, 
-            is_training=False, 
-            param=param
-        )
-
-    monitor_gpu_usage()
-
-    # Debug
-    normal_count = sum(1 for label in train_labels_expanded if label == 0)
-    abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
-    print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
-    
-    # Check for data shape mismatch and fix it
-    if train_data.shape[0] != train_labels_expanded.shape[0]:
-        logger.warning(f"Data shape mismatch! X: {train_data.shape[0]} samples, y: {train_labels_expanded.shape[0]} labels")
-        
-        if train_data.shape[0] > train_labels_expanded.shape[0]:
-            # Too many features, need to reduce
-            train_data = train_data[:train_labels_expanded.shape[0]]
-            logger.info(f"Reduced X to match y: {train_data.shape}")
-        else:
-            # Too many labels, need to reduce
-            train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
-            logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
-
-    # Check class distribution
-    class_distribution = np.bincount(train_labels_expanded.astype(int))
-    logger.info(f"Class distribution in training data: {class_distribution}")
-    if len(class_distribution) > 1:
-        class_ratio = class_distribution[0] / class_distribution[1] if class_distribution[1] > 0 else float('inf')
-        logger.info(f"Class ratio (normal:abnormal): {class_ratio:.2f}:1")
-        
-        if class_ratio > 10:
-            logger.warning(f"Severe class imbalance detected! Consider using class weights or data augmentation.")
-
-    batch_size = param.get("fit", {}).get("batch_size", 32)
-    epochs = param.get("fit", {}).get("epochs", 100)
-    base_learning_rate = param.get("fit", {}).get("compile", {}).get("learning_rate", 0.001)
-
-    # Scale learning rate based on batch size
-    learning_rate = get_scaled_learning_rate(base_learning_rate, batch_size)
-    logger.info(f"Scaled learning rate from {base_learning_rate} to {learning_rate} for batch size {batch_size}")
-
-    # Log the training parameters being used
-    logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
-
-    # Set fixed class weights with higher weight for abnormal class
-    class_weights = {
-        0: 1.0,  # Normal class
-        1: 2.0   # Abnormal class - ensure higher weight
-    }
-    # Convert keys to integers to avoid dtype issues
-    class_weights = {int(k): float(v) for k, v in class_weights.items()}
-    logger.info(f"Using fixed class weights: {class_weights}")
-
-    # Ensure consistent data types before training
-    logger.info(f"Train data type: {train_data.dtype}")
-    logger.info(f"Train labels type: {train_labels_expanded.dtype}")
-
-    # Convert to float32 if needed
-    if train_data.dtype != np.float32:
-        logger.info("Converting train_data to float32")
-        train_data = train_data.astype(np.float32)
-        
-    if train_labels_expanded.dtype != np.float32:
-        logger.info("Converting train_labels to float32")
-        train_labels_expanded = train_labels_expanded.astype(np.float32)
-        
-    if val_data.dtype != np.float32:
-        logger.info("Converting val_data to float32")
-        val_data = val_data.astype(np.float32)
-        
-    if val_labels_expanded.dtype != np.float32:
-        logger.info("Converting val_labels to float32")
-        val_labels_expanded = val_labels_expanded.astype(np.float32)
-
-    def verify_gpu_usage():
-        """Verify that TensorFlow is properly using the GPU"""
-        # Create a simple test tensor and operation with SMALLER sizes
-        with tf.device('/GPU:0'):
-            a = tf.constant([[1.0, 2.0], [3.0, 4.0]], dtype=tf.float16)  # Use float16 and small tensors
-            b = tf.constant([[1.0, 1.0], [1.0, 1.0]], dtype=tf.float16)
-            c = tf.matmul(a, b)
-        
-        # Check if the operation was executed on GPU
-        logger.info(f"Test tensor device: {c.device}")
-        if 'GPU' in c.device:
-            logger.info("✓ GPU is properly configured and being used")
-        else:
-            logger.warning("⚠ GPU is not being used for tensor operations!")
-        
-        return 'GPU' in c.device
-
-
-    print("============== VERIFYING GPU USAGE ==============")
-    is_gpu_working = verify_gpu_usage()
-    if not is_gpu_working:
-        logger.warning("GPU is not being used! Training will be slow.")
-        return
-
-    print("============== MODEL TRAINING ==============")
-    # Track model training time specifically
-    model_start_time = time.time()
-    # Define model_file and history_img variables
-    model_file = f"{param['model_directory']}/model_overall_ast.keras"
-    history_img = f"{param['result_directory']}/history_overall_ast.png"
-
-    # Enable mixed precision training
-    if param.get("training", {}).get("mixed_precision", False):
-        logger.info("Enabling mixed precision training")
-        mixed_precision.set_global_policy('mixed_float16')
-        logger.info(f"Mixed precision policy enabled: {mixed_precision.global_policy()}")
-
-    # Check if we should use progressive training
-    use_progressive = param.get("training", {}).get("progressive_training", {}).get("enabled", False)
-
-    if use_progressive and not os.path.exists(model_file):
-        logger.info("Using progressive training with increasing spectrogram sizes")
-        
-        # Check if we have valid training and validation files
-        if not train_files or len(train_files) == 0:
-            logger.error("No training files available for progressive training")
-        elif not val_files or len(val_files) == 0:
-            logger.warning("No validation files for progressive training, will use a portion of training data")
-        else:
-            model, progressive_history = implement_progressive_training(
-                None,  # No initial model
-                train_files,
-                train_labels,
-                val_files,
-                val_labels,
-                param
-            )
-            
-            # Check if progressive training was successful
-            if model is None:
-                logger.error("Progressive training failed, falling back to standard training")
-                use_progressive = False
-            else:
-                # Combine histories
-                history = {
-                    'history': {
-                        'loss': [],
-                        'accuracy': [],
-                        'val_loss': [],
-                        'val_accuracy': []
-                    }
-                }
-                
-                for h in progressive_history:
-                    history['history']['loss'].extend(h.history['loss'])
-                    history['history']['accuracy'].extend(h.history['accuracy'])
-                    history['history']['val_loss'].extend(h.history['val_loss'])
-                    history['history']['val_accuracy'].extend(h.history['val_accuracy'])
-                
-                # Convert to object with history attribute for compatibility
-                history = type('History', (), history)
-                
-                # Save final model
-                try:
-                    model.save(model_file)
-                    logger.info(f"Model saved to {model_file}")
-                except Exception as e:
-                    logger.warning(f"Error saving model: {e}")
-                    try:
-                        model.save(model_file.replace('.keras', ''))
-                        logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
-                    except Exception as e2:
-                        logger.error(f"All attempts to save model failed: {e2}")
-    else:
-        # Regular training without progressive resizing
-        if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
-            try:
-                # Try loading with different formats
-                if os.path.exists(model_file):
-                    model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-                else:
-                    model = tf.keras.models.load_model(f"{model_file}", custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-                logger.info("Model loaded from file, no training performed")
-            except Exception as e:
-                logger.error(f"Error loading model: {e}")
-                # Create a new model
-                model = create_ast_model(
-                    input_shape=(target_shape[0], target_shape[1]),
-                    config=param.get("model", {}).get("architecture", {})
-                )
-                logger.info("Created new model due to loading error")
-        else:
-            # Define callbacks
-            callbacks = []
-            
-            # Early stopping
-            early_stopping_config = param.get("fit", {}).get("early_stopping", {})
-            if early_stopping_config.get("enabled", False):
-                callbacks.append(tf.keras.callbacks.EarlyStopping(
-                    monitor=early_stopping_config.get("monitor", "val_loss"),
-                    patience=20,
-                    min_delta=early_stopping_config.get("min_delta", 0.001),
-                    restore_best_weights=True,
-                    verbose=1
-                ))
-
-            callbacks.append(TerminateOnNaN(patience=3))
-            logger.info("Added NaN detection callback")
-                    
-            # Reduce learning rate on plateau
-            lr_config = param.get("fit", {}).get("lr_scheduler", {})
-            if lr_config.get("enabled", False):
-                logger.info("Adding ReduceLROnPlateau callback with settings:")
-                logger.info(f"  - Monitor: {lr_config.get('monitor', 'val_loss')}")
-                logger.info(f"  - Factor: {lr_config.get('factor', 0.1)}")
-                logger.info(f"  - Patience: {lr_config.get('patience', 5)}")
-                callbacks.append(ReduceLROnPlateau(
-                    monitor=lr_config.get("monitor", "val_loss"),
-                    factor=lr_config.get("factor", 0.1),
-                    patience=lr_config.get("patience", 5),
-                    min_delta=lr_config.get("min_delta", 0.001),
-                    cooldown=lr_config.get("cooldown", 2),
-                    min_lr=lr_config.get("min_lr", 0.00000001),
-                    verbose=1
-                ))
-
-            # Add learning rate scheduler with warmup
-            callbacks.append(
-                tf.keras.callbacks.LearningRateScheduler(
-                    create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50)
-                )
-            )
-
-            # Add callback to detect and handle NaN values
-            callbacks.append(tf.keras.callbacks.TerminateOnNaN())
-            
-            # Create model with the correct input shape
-            model = create_ast_model(
-                input_shape=(target_shape[0], target_shape[1]),
-                config=param.get("model", {}).get("architecture", {})
-            )
-            
-            model_config = param.get("model", {}).get("architecture", {})
-            model.summary()
-            
-            # Compile model
-            compile_params = param["fit"]["compile"].copy()
-            loss_type = param.get("model", {}).get("loss", "binary_crossentropy")
-            
-            # Handle learning_rate separately for the optimizer
-            learning_rate = compile_params.pop("learning_rate", 0.0001)
-            
-            # Adjust optimizer for mixed precision if enabled
-            clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
-            if mixed_precision_enabled and compile_params.get("optimizer") == "AdamW":
-                optimizer = AdamW(learning_rate=learning_rate, clipnorm=clipnorm)
-                logger.info(f"Using AdamW optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
-            else:
-                optimizer = tf.keras.optimizers.AdamW(learning_rate=learning_rate, clipnorm=clipnorm)
-                logger.info(f"Using AdamW optimizer with gradient clipping (clipnorm={clipnorm})")
-
-            # Use a more stable loss function
-            if loss_type == "binary_crossentropy":
-                loss_fn = "binary_crossentropy"  # Use TF's built-in implementation for stability
-            elif loss_type == "focal_loss":
-                # Only use focal loss if explicitly requested and with safeguards
-                gamma = param.get("model", {}).get("focal_loss", {}).get("gamma", 2.0)
-                alpha = param.get("model", {}).get("focal_loss", {}).get("alpha", 0.25)
-                
-                # Check if we should use a safer implementation
-                use_safe_focal = param.get("model", {}).get("focal_loss", {}).get("use_safe_implementation", True)
-                if use_safe_focal:
-                    logger.info("Using numerically stable focal loss implementation")
-                    loss_fn = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
-                else:
-                    logger.warning("Using standard focal loss - watch for NaN losses")
-                    loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-                        gamma=gamma, alpha=alpha, from_logits=False
-                    )
-            else:
-                logger.info("Using standard binary crossentropy loss")
-                loss_fn = "binary_crossentropy"
-            
-            #Define a custom loss function that combines binary cross-entropy with focal loss
-            def combined_loss(y_true, y_pred):
-                # Cast inputs to float32
-                y_true = tf.cast(y_true, tf.float32)
-                y_pred = tf.cast(y_pred, tf.float32)
-                
-                # Binary cross-entropy component
-                bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
-                
-                # Add a penalty term that amplifies errors near the decision boundary
-                boundary_penalty = 10.0 * y_true * (1 - y_pred) * (1 - y_pred) + 10.0 * (1 - y_true) * y_pred * y_pred
-                
-                return bce + tf.reduce_mean(boundary_penalty)
-
-            # Use more aggressive class weights
-            class_weights = {
-                0: 1.0,  # Normal class
-                1: 10.0   # Abnormal class - increase weight significantly
-            }
-            # Convert keys to integers to avoid dtype issues
-            class_weights = {int(k): float(v) for k, v in class_weights.items()}
-
-            model.compile(
-                optimizer=optimizer,
-                loss=combined_loss,
-                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]
-            )
-            
-            # Check if we should use gradient accumulation
-            if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
-                logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
-                
-                # Get the dataset
-                train_dataset = tf.data.Dataset.from_tensor_slices((train_data, tf.cast(train_labels_expanded, tf.float32)))
-                train_dataset = train_dataset.batch(param["fit"]["batch_size"])
-                
-                # Create validation dataset
-                val_dataset = tf.data.Dataset.from_tensor_slices((val_data, tf.cast(val_labels_expanded, tf.float32)))
-                val_dataset = val_dataset.batch(param["fit"]["batch_size"])
-                
-                # Define variables to store accumulated gradients
-                accum_steps = param["training"]["gradient_accumulation_steps"]
-                
-                # Create a history object to store metrics
-                history_dict = {
-                    'loss': [],
-                    'accuracy': [],
-                    'val_loss': [],
-                    'val_accuracy': []
-                }
-                
-                # Initialize accumulated gradients
-                accumulated_gradients = [tf.Variable(tf.zeros_like(var), trainable=False) 
-                                        for var in model.trainable_variables]
-                
-                # Training loop
-                epochs = param["fit"]["epochs"]
-                for epoch in range(epochs):
-                    print(f"\nEpoch {epoch+1}/{epochs}")
-                    
-                    # Training metrics
-                    train_loss = tf.keras.metrics.Mean()
-                    train_accuracy = tf.keras.metrics.Mean()
-                    
-                    # Validation metrics
-                    val_loss = tf.keras.metrics.Mean()
-                    val_accuracy = tf.keras.metrics.Mean()
-                    
-                    # Training loop
-                    step = 0
-                    progress_bar = tqdm(train_dataset, desc=f"Training")
-                    for x_batch, y_batch in progress_bar:
-                        # Determine if this is the first batch in an accumulation cycle
-                        first_batch = (step % accum_steps == 0)
-                        
-                        # Perform training step with the updated function
-                        batch_loss, batch_accuracy = train_step_with_accumulation(
-                            model, optimizer, loss_fn, x_batch, y_batch, accumulated_gradients, first_batch, accum_steps
-                        )
-                        
-                        train_loss.update_state(batch_loss)
-                        train_accuracy.update_state(batch_accuracy)
-                        
-                        # If we've accumulated enough gradients, apply them
-                        if (step + 1) % accum_steps == 0 or (step + 1 == len(train_dataset)):
-                            # Apply accumulated gradients
-                            optimizer.apply_gradients(zip(accumulated_gradients, model.trainable_variables))
-                            
-                            # Log progress
-                            progress_bar.set_postfix({
-                                'loss': f'{train_loss.result():.4f}',
-                                'accuracy': f'{train_accuracy.result():.4f}'
-                            })
-                        
-                        step += 1
-                        
-                        # Clear memory periodically
-                        if step % 50 == 0:
-                            gc.collect()
-                    
-                    # Validation loop
-                    for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
-                        batch_loss, batch_accuracy = val_step(model, loss_fn, x_batch, y_batch)
-                        val_loss.update_state(batch_loss)
-                        val_accuracy.update_state(batch_accuracy)
-                    
-                    # Print epoch results
-                    print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
-                    print(f"Validation loss: {val_loss.result():.4f}, accuracy: {val_accuracy.result():.4f}")
-                    
-                    # Store metrics in history
-                    history_dict['loss'].append(float(train_loss.result()))
-                    history_dict['accuracy'].append(float(train_accuracy.result()))
-                    history_dict['val_loss'].append(float(val_loss.result()))
-                    history_dict['val_accuracy'].append(float(val_accuracy.result()))
-                    
-                    # Check for early stopping
-                    if callbacks and any(isinstance(cb, tf.keras.callbacks.EarlyStopping) for cb in callbacks):
-                        early_stopping_callback = next(cb for cb in callbacks if isinstance(cb, tf.keras.callbacks.EarlyStopping))
-                        
-                        # Get the monitored value
-                        if early_stopping_callback.monitor == 'val_loss':
-                            current = float(val_loss.result())
-                        elif early_stopping_callback.monitor == 'val_accuracy':
-                            current = float(val_accuracy.result())
-                        
-                        # Check if we should stop
-                        if hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_loss':
-                            if early_stopping_callback.best is None or current < early_stopping_callback.best:
-                                early_stopping_callback.best = current
-                                early_stopping_callback.wait = 0
-                                try:
-                                    model.save(model_file)
-                                    logger.info(f"Model saved to {model_file}")
-                                except Exception as e:
-                                    logger.warning(f"Error saving model: {e}")
-                                    try:
-                                        model.save(model_file.replace('.keras', ''))
-                                        logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
-                                    except Exception as e2:
-                                        logger.error(f"All attempts to save model failed: {e2}")
-                                logger.info(f"Saved best model at epoch {epoch+1}")
-                            else:
-                                early_stopping_callback.wait += 1
-                                if early_stopping_callback.wait >= early_stopping_callback.patience:
-                                    print(f"Early stopping triggered at epoch {epoch+1}")
-                                    break
-                        elif hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_accuracy':
-                            if early_stopping_callback.best is None or current > early_stopping_callback.best:
-                                early_stopping_callback.best = current
-                                early_stopping_callback.wait = 0
-                                try:
-                                    model.save(model_file)
-                                    logger.info(f"Model saved to {model_file}")
-                                except Exception as e:
-                                    logger.warning(f"Error saving model: {e}")
-                                    try:
-                                        model.save(model_file.replace('.keras', ''))
-                                        logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
-                                    except Exception as e2:
-                                        logger.error(f"All attempts to save model failed: {e2}")
-                                logger.info(f"Saved best model at epoch {epoch+1}")
-                            else:
-                                early_stopping_callback.wait += 1
-                                if early_stopping_callback.wait >= early_stopping_callback.patience:
-                                    print(f"Early stopping triggered at epoch {epoch+1}")
-                                    break
-                    
-                    # Save model periodically
-                    if (epoch + 1) % 5 == 0:
-                        try:
-                            model.save(f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras")
-                            logger.info(f"Saved model checkpoint at epoch {epoch+1}")
-                        except Exception as e:
-                            logger.warning(f"Failed to save model checkpoint at epoch {epoch+1}: {e}")
-                    
-                    # Clear memory between epochs
-                    gc.collect()
-                
-                # Convert history to a format compatible with Keras history
-                history = type('History', (), {'history': history_dict})
-            else:
-                # Standard training without gradient accumulation
-                if use_streaming:
-                    # Add checkpoint callback for large dataset training
-                    if param.get("large_dataset", {}).get("enabled", False):
-                        # Create checkpoint directory
-                        checkpoint_dir = os.path.join(param["model_directory"], "checkpoints")
-                        os.makedirs(checkpoint_dir, exist_ok=True)
-                        
-                        # Add ModelCheckpoint callback
-                        checkpoint_callback = ModelCheckpoint(
-                            filepath=os.path.join(checkpoint_dir, "model_checkpoint_epoch_{epoch:02d}.keras"),
-                            save_weights_only=True,  # Save only weights for efficiency
-                            save_freq='epoch',
-                            verbose=1
-                        )
-                        callbacks.append(checkpoint_callback)
-                        
-                        # Add TensorBoard callback for monitoring
-                        try:
-                            tensorboard_dir = os.path.join(param["result_directory"], "tensorboard")
-                            os.makedirs(tensorboard_dir, exist_ok=True)
-                            tensorboard_callback = tf.keras.callbacks.TensorBoard(
-                                log_dir=tensorboard_dir,
-                                histogram_freq=1,
-                                update_freq=100  # Update every 100 batches
-                            )
-                            callbacks.append(tensorboard_callback)
-                            logger.info(f"TensorBoard logging enabled at {tensorboard_dir}")
-                        except:
-                            logger.warning("Failed to create TensorBoard callback")
-                    
-                    # Set steps_per_epoch to limit epoch size for faster iterations
-                    steps_per_epoch = None
-                    if param.get("large_dataset", {}).get("enabled", False):
-                        # Option 1: Use a fixed number of steps per epoch (faster iterations)
-                        steps_per_epoch = min(1000, len(train_files) // batch_size)
-                        logger.info(f"Limited to {steps_per_epoch} steps per epoch for faster iterations")
-                    
-                    # Train with streaming data and checkpointing
-                    history = model.fit(
-                        train_dataset,
-                        epochs=param.get("fit", {}).get("epochs", 30),
-                        validation_data=val_dataset,
-                        callbacks=callbacks,
-                        verbose=1,
-                        steps_per_epoch=steps_per_epoch  # Optional: limit steps per epoch
-                    )
-
-                else:
-                    # Train with in-memory data
-                    history = model.fit(
-                        train_data,
-                        train_labels_expanded,
-                        batch_size=param.get("fit", {}).get("batch_size", 16),
-                        epochs=param.get("fit", {}).get("epochs", 30),
-                        validation_data=(val_data, val_labels_expanded),
-                        class_weight=class_weights,
-                        callbacks=callbacks,
-                        verbose=1
-                    )
-
-    # Log training time
-    training_time = time.time() - model_start_time
-    logger.info(f"Model training completed in {training_time:.2f} seconds")
-
-    # Make sure history exists before plotting
-    if 'history' in locals():
-        # Plot the training history
-        visualizer.loss_plot(history)
-        visualizer.save_figure(history_img)
-    else:
-        logger.warning("No training history available to plot")
-
-    print("============== EVALUATION ==============")
-    # Evaluate on test set with large dataset support
-    if param.get("large_dataset", {}).get("enabled", False):
-        logger.info("Using streaming evaluation for large test dataset")
-        
-        # Create a streaming dataset for test data
-        test_dataset = create_tf_dataset(
-            test_files,
-            test_labels,
-            batch_size=batch_size,
-            is_training=False,
-            param=param
-        )
-        
-        # Evaluate in streaming mode
-        test_metrics = model.evaluate(test_dataset, verbose=1)
-        
-        # Extract metrics
-        test_accuracy = test_metrics[model.metrics_names.index('accuracy')]
-        
-        # For detailed metrics, predict on test set in batches
-        all_y_pred = []
-        all_y_true = []
-        
-        logger.info("Generating predictions on test set in batches...")
-        for x_batch, y_batch in tqdm(test_dataset):
-            # Generate predictions
-            batch_preds = model.predict_on_batch(x_batch)
-            
-            # Collect results
-            all_y_pred.extend(batch_preds.numpy().flatten())
-            all_y_true.extend(y_batch.numpy().flatten())
-        
-        # Convert to numpy arrays
-        all_y_pred = np.array(all_y_pred)
-        all_y_true = np.array(all_y_true)
-        
-        # Now you can proceed with threshold optimization and metrics calculation
-        y_pred = all_y_pred
-        test_labels_expanded = all_y_true
-        
-        logger.info(f"Collected predictions for {len(all_y_pred)} test samples")
-    else:
-        # Original code for smaller datasets
-        test_data, test_labels_expanded = list_to_spectrograms(
-            test_files,
-            test_labels,
-            msg="generate test_dataset",
-            augment=False,
-            param=param,
-            batch_size=20
-        )
-
-
-    logger.info(f"Test data shape: {test_data.shape}")
-    logger.info(f"Test labels shape: {test_labels_expanded.shape}")
-
-    # Preprocess test data
-    test_data = preprocess_spectrograms(test_data, target_shape)
-
-    # Apply same normalization to test data
-    if train_std > 1e-6:
-        test_data = (test_data - train_mean) / train_std
-    else:
-        test_data = test_data - train_mean
-
-    # Evaluate the model
-    if test_data.shape[0] > 0:
-        # Predict on test set
-        y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
-        
-        # Now analyze the predictions (moved from above)
-        logger.info(f"Raw prediction statistics:")
-        logger.info(f"  - Min: {np.min(y_pred):.4f}, Max: {np.max(y_pred):.4f}")
-        logger.info(f"  - Mean: {np.mean(y_pred):.4f}, Median: {np.median(y_pred):.4f}")
-        
-        # Count predictions in different ranges
-        ranges = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-        for i in range(len(ranges)-1):
-            count = np.sum((y_pred >= ranges[i]) & (y_pred < ranges[i+1]))
-            logger.info(f"  - Predictions in range [{ranges[i]:.1f}, {ranges[i+1]:.1f}): {count} ({count/len(y_pred)*100:.1f}%)")
-        
-        # Plot histogram of predictions
-        plt.figure(figsize=(10, 6))
-        plt.hist(y_pred, bins=20)
-        plt.title('Distribution of Raw Predictions')
-        plt.xlabel('Prediction Value')
-        plt.ylabel('Count')
-        plt.savefig(f"{param['result_directory']}/prediction_distribution.png")
-        plt.close()
-        
-        # Try multiple thresholds
-        thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
-        logger.info("Evaluating with multiple thresholds:")
-        for thresh in thresholds:
-            y_pred_binary_thresh = (y_pred > thresh).astype(int)
-            accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary_thresh)
-            precision = metrics.precision_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
-            recall = metrics.recall_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
-            f1 = metrics.f1_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
-            logger.info(f"Threshold {thresh:.1f}: Acc={accuracy:.4f}, Prec={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
-        
-        # Apply standard threshold for final evaluation
-        logger.info("Finding optimal classification threshold...")
-        detection_threshold = find_optimal_threshold(test_labels_expanded, y_pred, param)
-        logger.info(f"Using optimal detection threshold: {detection_threshold}")
-        y_pred_binary = (y_pred > detection_threshold).astype(int)
-        
-        gc.collect()
-        
-        # Calculate metrics
-        test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-        test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        test_recall = metrics.recall_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        test_f1 = metrics.f1_score(test_labels_expanded, y_pred_binary, zero_division=0)
-
-        # Log metrics
-        logger.info(f"Test Accuracy: {test_accuracy:.4f}")
-        logger.info(f"Test Precision: {test_precision:.4f}")
-        logger.info(f"Test Recall: {test_recall:.4f}")
-        logger.info(f"Test F1 Score: {test_f1:.4f}")
-
-        # Detailed classification report
-        report = classification_report(
-            test_labels_expanded, y_pred_binary, target_names=["Normal", "Abnormal"], zero_division=0
-        )
-        logger.info(f"Classification Report:\n{report}")
-
-        # Plot confusion matrix
-        cm_img = f"{param['result_directory']}/confusion_matrix_overall_ast.png"
-        visualizer.plot_confusion_matrix(
-            test_labels_expanded,
-            y_pred_binary,
-            title=f"Confusion Matrix (Overall)",
-        )
-        visualizer.save_figure(cm_img)
-
-        # Store results
-        evaluation_result = {
-            "accuracy": float(test_accuracy),
-            "precision": float(test_precision),
-            "recall": float(test_recall),
-            "f1": float(test_f1),
-        }
-
-        # Append to global results
-        all_y_true.extend(test_labels_expanded)
-        all_y_pred.extend(y_pred_binary)
-
-    else:
-        logger.warning("No test data available for evaluation")
-        evaluation_result = {
-            "accuracy": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1": 0.0,
-        }
-
-    # Store evaluation results
-    results[evaluation_result_key] = evaluation_result
-
-    # Find optimal threshold using ROC curve
-    if len(y_pred) > 0:
-        logger.info("Finding optimal classification threshold using ROC curve...")
-        
-        # Calculate ROC curve
-        fpr, tpr, thresholds = metrics.roc_curve(test_labels_expanded, y_pred)
-        
-        # Calculate the geometric mean of sensitivity and specificity
-        gmeans = np.sqrt(tpr * (1-fpr))
-        
-        # Find the optimal threshold
-        ix = np.argmax(gmeans)
-        best_threshold = thresholds[ix]
-        logger.info(f"Optimal threshold from ROC curve: {best_threshold:.4f}")
-        logger.info(f"At this threshold - TPR: {tpr[ix]:.4f}, FPR: {fpr[ix]:.4f}, G-Mean: {gmeans[ix]:.4f}")
-        
-        # Re-evaluate with optimal threshold
-        y_pred_binary = (y_pred > best_threshold).astype(int)
-
-        # If optimal threshold is very close to 0.5, try a lower threshold
-        if 0.45 < best_threshold < 0.55 and test_f1 < 0.6:
-            logger.info("Trying a lower threshold (0.39) since optimal threshold is close to default")
-            lower_threshold = 0.39
-            y_pred_binary_lower = (y_pred > lower_threshold).astype(int)
-            
-            # Calculate metrics with lower threshold
-            test_accuracy_lower = metrics.accuracy_score(test_labels_expanded, y_pred_binary_lower)
-            test_precision_lower = metrics.precision_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
-            test_recall_lower = metrics.recall_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
-            test_f1_lower = metrics.f1_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
-            
-            logger.info(f"Metrics with lower threshold ({lower_threshold}):")
-            logger.info(f"Test Accuracy: {test_accuracy_lower:.4f}")
-            logger.info(f"Test Precision: {test_precision_lower:.4f}")
-            logger.info(f"Test Recall: {test_recall_lower:.4f}")
-            logger.info(f"Test F1 Score: {test_f1_lower:.4f}")
-            
-            # Use lower threshold if it gives better F1 score
-            if test_f1_lower > test_f1:
-                logger.info(f"Using lower threshold {lower_threshold} instead of optimal threshold {best_threshold}")
-                y_pred_binary = y_pred_binary_lower
-                test_accuracy = test_accuracy_lower
-                test_precision = test_precision_lower
-                test_recall = test_recall_lower
-                test_f1 = test_f1_lower
-
-    # Calculate overall metrics
-    if all_y_true and all_y_pred:
-        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
-        overall_precision = metrics.precision_score(all_y_true, all_y_pred, zero_division=0)
-        overall_recall = metrics.recall_score(all_y_true, all_y_pred, zero_division=0)
-        overall_f1 = metrics.f1_score(all_y_true, all_y_pred, zero_division=0)
-
-        overall_results = {
-            "overall_accuracy": float(overall_accuracy),
-            "overall_precision": float(overall_precision),
-            "overall_recall": float(overall_recall),
-            "overall_f1": float(overall_f1),
-        }
-        results.update(overall_results)
-
-        logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
-        logger.info(f"Overall Precision: {overall_precision:.4f}")
-        logger.info(f"Overall Recall: {overall_recall:.4f}")
-        logger.info(f"Overall F1 Score: {overall_f1:.4f}")
-
-        # Plot overall confusion matrix
-        overall_cm_img = f"{param['result_directory']}/confusion_matrix_overall_ast.png"
-        visualizer.plot_confusion_matrix(
-            all_y_true,
-            all_y_pred,
-            title="Overall Confusion Matrix",
-        )
-        visualizer.save_figure(overall_cm_img)
-
-    total_time = time.time() - start_time
-    results["timing"] = {
-        "total_execution_time_seconds": float(total_time),
-        "model_training_time_seconds": float(training_time),
-    }
-
-    # Save results to YAML
-    with open(result_file, "w") as f:
-        yaml.safe_dump(results, f)
-    logger.info(f"Results saved to {result_file}")
-
-    # Log total execution time
-    logger.info(f"Total execution time: {total_time:.2f} seconds")
-
-if __name__ == "__main__":
-    main()

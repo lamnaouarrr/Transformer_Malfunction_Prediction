@@ -1497,6 +1497,16 @@ def main():
     # Set memory growth before any other TensorFlow operations
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
+        for device in physical_devices:
+            try:
+                tf.config.experimental.set_memory_growth(device, True)
+                logger.info(f"Enabled memory growth for {device}")
+            except Exception as e:
+                logger.warning(f"Could not set memory growth for {device}: {e}")
+        
+        logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
+        logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
+        
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
     abnormal_dir = Path(param["base_directory"]) / "abnormal"

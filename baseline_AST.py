@@ -118,8 +118,8 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    os.makedirs("./logs/log__AST", exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline__AST.log")
+    os.makedirs("./logs/log_AST", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline_AST.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -1495,7 +1495,7 @@ def main():
 
 
 
-    with open("baseline__AST.yaml", "r") as stream:
+    with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
@@ -1518,7 +1518,7 @@ def main():
     
     start_time = time.time()
 
-    with open("baseline__AST.yaml", "r") as stream:
+    with open("baseline_AST.yaml", "r") as stream:
         param = yaml.safe_load(stream)
 
     os.makedirs(param["pickle_directory"], exist_ok=True)
@@ -1596,7 +1596,7 @@ def main():
     results = {}
     all_y_true = []
     all_y_pred = []
-    result_file = f"{param['result_directory']}/result__AST.yaml"
+    result_file = f"{param['result_directory']}/result_AST.yaml"
 
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
@@ -1894,10 +1894,10 @@ def main():
 
     # Set fixed class weights with higher weight for abnormal class
     class_weights = {
-        0: 1.0,  # Normal class
-        1: 2.0   # Abnormal class - ensure higher weight
+        0: 1.0,   # Normal class
+        1: 10.0   # Abnormal class - significantly increased weight
     }
-    logger.info(f"Using fixed class weights: {class_weights}")
+    logger.info(f"Using fixed class weights: {class_weights} (abnormal class weight increased to 10.0)")
 
 
 
@@ -2430,7 +2430,7 @@ def main():
                     clipnorm=1.0,
                     epsilon=1e-7
                 ),
-                loss='binary_crossentropy',
+                loss=focal_loss,  # Using focal loss instead of binary_crossentropy
                 metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]
             )
 

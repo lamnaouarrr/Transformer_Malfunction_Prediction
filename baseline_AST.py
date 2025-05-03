@@ -53,7 +53,22 @@ from tensorflow.keras.losses import mse as mean_squared_error
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from skimage.metrics import structural_similarity as ssim
-from transformers import TFViTModel, ViTConfig
+try:
+    from transformers import TFViTModel, ViTConfig
+except ImportError:
+    print("Warning: transformers package not installed. Some features may not work.")
+    print("Install with: pip install transformers")
+
+# Add prominent startup message
+print("\n" + "="*80)
+print(" AUDIO SPECTROGRAM TRANSFORMER (AST) FOR MACHINE MALFUNCTION DETECTION ")
+print("="*80 + "\n")
+
+def print_with_timestamp(message):
+    """Print a message with a timestamp for better logging"""
+    current_time = time.strftime("%H:%M:%S", time.localtime())
+    print(f"[{current_time}] {message}")
+
 ########################################################################
 
 ########################################################################
@@ -576,7 +591,7 @@ def dataset_generator(target_dir, param=None):
     target_dir: Base directory ('normal' or 'abnormal')
     param: parameters dictionary from the YAML config
     """
-    print(f"DEBUG: dataset_generator called with target_dir: {target_dir}")
+    print_with_timestamp(f"DEBUG: dataset_generator called with target_dir: {target_dir}")
     logger.info(f"target_dir : {target_dir}")
     
     if param is None:
@@ -588,17 +603,17 @@ def dataset_generator(target_dir, param=None):
     # Determine if we're processing normal or abnormal files
     is_normal = "normal" in str(target_dir)
     condition = "normal" if is_normal else "abnormal"
-    print(f"DEBUG: Processing {condition} files")
+    print_with_timestamp(f"DEBUG: Processing {condition} files")
     
     # Get all files in the directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
-    print(f"Looking for files in: {target_dir}")
-    print(f"Found {len(files_in_dir)} files")
+    print_with_timestamp(f"Looking for files in: {target_dir}")
+    print_with_timestamp(f"Found {len(files_in_dir)} files")
 
     # If no files found, try listing the directory contents
     if len(files_in_dir) == 0:
-        print(f"DEBUG: No files with extension '{ext}' found in {target_dir}")
-        print(f"DEBUG: Directory contents: {list(Path(target_dir).iterdir())[:10]}")  # Show first 10 files
+        print_with_timestamp(f"DEBUG: No files with extension '{ext}' found in {target_dir}")
+        print_with_timestamp(f"DEBUG: Directory contents: {list(Path(target_dir).iterdir())[:10]}")  # Show first 10 files
     
     # Parse file names to extract db, machine_type, and machine_id
     normal_data = {}  # {(db, machine_type, machine_id): [files]}
@@ -804,1560 +819,15 @@ def dataset_generator(target_dir, param=None):
     logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
 
     # Debug info
-    print(f"Looking for files in: {target_dir}")
-    print(f"Found {len(files_in_dir)} files")
-    print(f"DEBUG - Dataset summary:")
-    print(f"  Normal files found: {len(normal_files)}")
-    print(f"  Abnormal files found: {len(abnormal_files)}")
-    print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
-    print(f"  Abnormal train: {len(abnormal_train_files)}, Abnormal val: {len(abnormal_val_files)}, Abnormal test: {len(abnormal_test_files)}")
+    print_with_timestamp(f"Looking for files in: {target_dir}")
+    print_with_timestamp(f"Found {len(files_in_dir)} files")
+    print_with_timestamp(f"DEBUG - Dataset summary:")
+    print_with_timestamp(f"  Normal files found: {len(normal_files)}")
+    print_with_timestamp(f"  Abnormal files found: {len(abnormal_files)}")
+    print_with_timestamp(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
+    print_with_timestamp(f"  Abnormal train: {len(abnormal_train_files)}, Abnormal val: {len(abnormal_val_files)}, Abnormal test: {len(abnormal_test_files)}")
 
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
-
-def setup_large_dataset_processing():
-    """Setup environment for large dataset processing"""
-    # Create temp directories
-    temp_dir = param.get("large_dataset", {}).get("temp_storage", "/tmp/ast_training")
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # Clear existing cached data
-    if os.path.exists(temp_dir):
-        for f in os.listdir(temp_dir):
-            if f.endswith('.tmp.npy'):
-                try:
-                    os.remove(os.path.join(temp_dir, f))
-                except:
-                    pass
-    
-    # Increase file descriptor limit if possible
-    try:
-        import resource
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-        logger.info(f"Increased file descriptor limit to {hard}")
-    except:
-        logger.warning("Could not increase file descriptor limit")
-    
-    return temp_dir
-
-
-def configure_mixed_precision(enabled=True):
-    """
-    Configure mixed precision training optimized for V100 GPU.
-    """
-    if not enabled:
-        logger.info("Mixed precision training disabled")
-        return False
-    
-    try:
-        # Check if GPU is available
-        if not tf.config.list_physical_devices('GPU'):
-            logger.warning("No GPU found, disabling mixed precision")
-            return False
-        
-        # Import mixed precision module
-        from tensorflow.keras import mixed_precision
-        
-        # Configure policy - V100 works well with mixed_float16
-        policy_name = 'mixed_float16'
-        logger.info(f"Enabling mixed precision with policy: {policy_name}")
-        mixed_precision.set_global_policy(policy_name)
-        
-        # Verify policy was set
-        current_policy = mixed_precision.global_policy()
-        logger.info(f"Mixed precision policy enabled: {current_policy}")
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error configuring mixed precision: {e}")
-        # Reset to default policy
-        try:
-            from tensorflow.keras import mixed_precision
-            mixed_precision.set_global_policy('float32')
-            logger.info("Reset to float32 policy after error")
-        except:
-            pass
-        return False
-
-class WarmUpCosineDecayScheduler(tf.keras.callbacks.Callback):
-    """
-    Learning rate scheduler with warmup and cosine decay
-    """
-    def __init__(self, learning_rate_base, total_steps, warmup_steps, hold_base_rate_steps=0):
-        super(WarmUpCosineDecayScheduler, self).__init__()
-        self.learning_rate_base = learning_rate_base
-        self.total_steps = total_steps
-        self.warmup_steps = warmup_steps
-        self.hold_base_rate_steps = hold_base_rate_steps
-        self.learning_rates = []
-        
-    def on_batch_begin(self, batch, logs=None):
-        # Calculate current learning rate
-        lr = self.calculate_learning_rate(self.global_step)
-        # Set learning rate
-        K.set_value(self.model.optimizer.lr, lr)
-        # Update global step
-        self.global_step += 1
-        # Store learning rate
-        self.learning_rates.append(lr)
-        
-    def on_train_begin(self, logs=None):
-        # Initialize global step
-        self.global_step = 0
-        
-    def calculate_learning_rate(self, global_step):
-        """
-        Calculate learning rate according to warmup and cosine decay schedule
-        """
-        # Warmup phase
-        if global_step < self.warmup_steps:
-            return self.learning_rate_base * (global_step / self.warmup_steps)
-        
-        # Hold phase
-        if self.hold_base_rate_steps > 0 and global_step < self.warmup_steps + self.hold_base_rate_steps:
-            return self.learning_rate_base
-        
-        # Cosine decay phase
-        cosine_steps = self.total_steps - self.warmup_steps - self.hold_base_rate_steps
-        global_step = global_step - self.warmup_steps - self.hold_base_rate_steps
-        
-        return 0.5 * self.learning_rate_base * (1 + np.cos(np.pi * global_step / cosine_steps))
-
-def get_scaled_learning_rate(base_lr, batch_size, base_batch_size=32):
-    """
-    Scale learning rate linearly with batch size
-    """
-    return base_lr * (batch_size / base_batch_size)
-
-class TerminateOnNaN(tf.keras.callbacks.Callback):
-    """
-    Callback that terminates training when a NaN loss is encountered
-    and reduces learning rate to attempt recovery.
-    """
-    def __init__(self, patience=3):
-        super(TerminateOnNaN, self).__init__()
-        self.nan_epochs = 0
-        self.patience = patience
-        
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        loss = logs.get('loss')
-        
-        if loss is not None and (np.isnan(loss) or np.isinf(loss)):
-            self.nan_epochs += 1
-            logger.warning(f"NaN loss detected (occurrence {self.nan_epochs}/{self.patience})")
-            
-            if self.nan_epochs >= self.patience:
-                logger.error(f"NaN loss persisted for {self.patience} epochs, terminating training")
-                self.model.stop_training = True
-            else:
-                # Try to recover by reducing learning rate
-                current_lr = float(K.get_value(self.model.optimizer.lr))
-                new_lr = current_lr * 0.1
-                logger.warning(f"Attempting to recover by reducing learning rate: {current_lr:.6f} -> {new_lr:.6f}")
-                K.set_value(self.model.optimizer.lr, new_lr)
-        else:
-            # Reset counter if we see a valid loss
-            self.nan_epochs = 0
-
-########################################################################
-# model
-########################################################################
-def create_ast_model(input_shape, config=None):
-    """
-    Create a complete Audio Spectrogram Transformer (AST) model with optimizations
-    for memory efficiency and performance.
-    
-    Args:
-        input_shape: The shape of the input spectrograms (freq_bins, time_frames)
-        config: Configuration dictionary for model architecture
-        
-    Returns:
-        A compiled TensorFlow Keras model
-    """
-    if config is None:
-        config = {}
-    
-    # Get transformer configuration with improved defaults
-    transformer_config = config.get("transformer", {})
-    num_heads = transformer_config.get("num_heads", 8)  # Increased heads for better attention
-    dim_feedforward = transformer_config.get("dim_feedforward", 768)  # Larger embedding dim
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 6)  # More layers for deeper representation
-    patch_size = transformer_config.get("patch_size", 16)  # Larger patches for memory efficiency
-    attention_dropout = transformer_config.get("attention_dropout", 0.1)
-    hidden_dropout = transformer_config.get("hidden_dropout", 0.1)
-    
-    # Calculate patches and sequence length
-    h_patches = input_shape[0] // patch_size
-    w_patches = input_shape[1] // patch_size
-    num_patches = h_patches * w_patches
-    embed_dim = dim_feedforward
-    
-    logger.info(f"AST Model: input_shape={input_shape}, patches={h_patches}x{w_patches}, " +
-                f"num_patches={num_patches}, embed_dim={embed_dim}")
-    
-    # Input layer
-    inputs = tf.keras.layers.Input(shape=input_shape)
-    
-    # Memory-efficient patch embedding
-    # Add channel dimension for 2D convolution
-    x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
-    
-    # Use efficient patch extraction with strided convolution
-    # This is more memory-efficient than reshaping operations
-    x = tf.keras.layers.Conv2D(
-        filters=embed_dim,
-        kernel_size=patch_size,
-        strides=patch_size,
-        padding='valid',
-        name='patch_embedding'
-    )(x)
-    
-    # Flatten patches to sequence format
-    batch_size = tf.shape(x)[0]
-    x = tf.keras.layers.Reshape((-1, embed_dim))(x)
-    
-    # Class token (CLS) and positional embedding
-    cls_token = tf.keras.layers.Dense(
-        embed_dim, 
-        name='cls_token',
-        use_bias=False,
-        kernel_initializer=tf.keras.initializers.Zeros()
-    )(tf.ones((batch_size, 1, 1)))
-    
-    # Concatenate CLS token with patch embeddings
-    x = tf.keras.layers.Concatenate(axis=1)([cls_token, x])
-    
-    # Add positional embeddings - learnable instead of fixed
-    pos_embed = tf.keras.layers.Embedding(
-        input_dim=num_patches + 1,  # +1 for CLS token
-        output_dim=embed_dim,
-        name='positional_embedding'
-    )(tf.range(start=0, limit=num_patches + 1, delta=1))
-    
-    # Add positional embedding to patch embeddings
-    x = x + pos_embed
-    
-    # Apply dropout to embeddings for regularization
-    x = tf.keras.layers.Dropout(hidden_dropout)(x)
-    
-    # Implement transformer encoder with gradient checkpointing for memory efficiency
-    for i in range(num_encoder_layers):
-        # Pre-normalization for stable training (different from post-norm in original transformers)
-        attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f'layer_norm1_{i}')(x)
-        
-        # Multi-head attention block
-        attn_output = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=embed_dim // num_heads,  # Divide embedding by number of heads
-            dropout=attention_dropout,
-            name=f'mha_{i}'
-        )(attn_input, attn_input)
-        
-        # Residual connection 1
-        x = tf.keras.layers.Add()([x, attn_output])
-        
-        # Feed-forward network with pre-normalization
-        ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f'layer_norm2_{i}')(x)
-        
-        # Two-layer MLP with GELU activation (better than ReLU for transformers)
-        ffn_output = tf.keras.layers.Dense(
-            dim_feedforward * 4,  # 4x expansion for FFN
-            activation='gelu',
-            name=f'ffn1_{i}'
-        )(ffn_input)
-        
-        # Dropout between dense layers
-        ffn_output = tf.keras.layers.Dropout(hidden_dropout)(ffn_output)
-        
-        # Second dense layer to project back to embedding dimension
-        ffn_output = tf.keras.layers.Dense(
-            embed_dim,
-            name=f'ffn2_{i}'
-        )(ffn_output)
-        
-        # Final dropout
-        ffn_output = tf.keras.layers.Dropout(hidden_dropout)(ffn_output)
-        
-        # Residual connection 2
-        x = tf.keras.layers.Add()([x, ffn_output])
-    
-    # Final layer normalization
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name='final_layer_norm')(x)
-    
-    # Extract CLS token representation (first token)
-    x = tf.keras.layers.Lambda(lambda x: x[:, 0], name='extract_cls')(x)
-    
-    # Classifier head with intermediate layer
-    x = tf.keras.layers.Dense(
-        dim_feedforward // 2,
-        activation='gelu',
-        name='classifier_intermediate'
-    )(x)
-    
-    x = tf.keras.layers.Dropout(0.1)(x)
-    
-    # Final classification layer
-    outputs = tf.keras.layers.Dense(
-        1, 
-        activation='sigmoid',
-        name='classifier_output'
-    )(x)
-    
-    # Create model
-    model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
-    
-    return model
-
-
-def preprocess_spectrograms(spectrograms, target_shape):
-    """
-    Resize all spectrograms to a consistent shape.
-    """
-    if spectrograms.shape[0] == 0:
-        return spectrograms
-        
-    batch_size = spectrograms.shape[0]
-    processed = np.zeros((batch_size, target_shape[0], target_shape[1]), dtype=np.float32)
-    
-    for i in range(batch_size):
-        # Get current spectrogram
-        spec = spectrograms[i]
-        
-        # Handle 3D input (when a single frame has an extra dimension)
-        if len(spec.shape) == 3 and spec.shape[2] == 1:
-            spec = spec[:, :, 0]  # Remove the last dimension
-        
-        # Skip if dimensions already match
-        if spec.shape[0] == target_shape[0] and spec.shape[1] == target_shape[1]:
-            processed[i] = spec
-            continue
-            
-        try:
-            # Simple resize using interpolation
-            from skimage.transform import resize
-            resized_spec = resize(spec, target_shape, anti_aliasing=True, mode='reflect')
-            processed[i] = resized_spec
-        except Exception as e:
-            logger.error(f"Error resizing spectrogram: {e}")
-            # If resize fails, use simple padding/cropping
-            temp_spec = np.zeros(target_shape)
-            # Copy as much as will fit
-            freq_dim = min(spec.shape[0], target_shape[0])
-            time_dim = min(spec.shape[1], target_shape[1])
-            temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
-            processed[i] = temp_spec
-        
-    return processed
-
-
-def balance_dataset(train_data, train_labels, augment_minority=True):
-    """
-    Balance the dataset by augmenting the minority class with more sophisticated techniques
-    """
-    # Count classes
-    unique_labels, counts = np.unique(train_labels, return_counts=True)
-    class_counts = dict(zip(unique_labels, counts))
-    logger.info(f"Original class distribution: {class_counts}")
-    
-    if len(unique_labels) <= 1:
-        logger.warning("Only one class present in training data!")
-        return train_data, train_labels
-    
-    # Find minority and majority classes
-    minority_class = unique_labels[np.argmin(counts)]
-    majority_class = unique_labels[np.argmax(counts)]
-    
-    if not augment_minority:
-        logger.info("Skipping minority class augmentation")
-        return train_data, train_labels
-    
-    # Get indices of minority class
-    minority_indices = np.where(train_labels == minority_class)[0]
-    
-    # Calculate how many samples to generate
-    n_to_add = class_counts[majority_class] - class_counts[minority_class]
-    
-    if n_to_add <= 0:
-        logger.info("Dataset already balanced")
-        return train_data, train_labels
-    
-    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
-    
-    # Create augmented samples with more sophisticated techniques
-    augmented_data = []
-    augmented_labels = []
-    
-    # Use multiple augmentation techniques
-    for _ in range(n_to_add):
-        # Randomly select a minority sample
-        idx = np.random.choice(minority_indices)
-        sample = train_data[idx].copy()
-        
-        # Apply a random augmentation technique
-        aug_type = np.random.choice(['noise', 'shift', 'flip', 'mixup'])
-        
-        if aug_type == 'noise':
-            # Add random noise with varying intensity
-            noise_level = np.random.uniform(0.05, 0.2)
-            noise = np.random.normal(0, noise_level, sample.shape)
-            augmented_sample = sample + noise
-            
-        elif aug_type == 'shift':
-            # Random shift in time or frequency
-            shift_dim = np.random.choice([0, 1])  # 0 for freq, 1 for time
-            shift_amount = np.random.randint(1, 5)
-            augmented_sample = np.roll(sample, shift_amount, axis=shift_dim)
-            
-        elif aug_type == 'flip':
-            # Frequency inversion (flip along frequency axis)
-            augmented_sample = np.flipud(sample)
-            
-        elif aug_type == 'mixup':
-            # Mix with another minority sample
-            idx2 = np.random.choice(minority_indices)
-            while idx2 == idx:  # Ensure different sample
-                idx2 = np.random.choice(minority_indices)
-            sample2 = train_data[idx2]
-            mix_ratio = np.random.uniform(0.3, 0.7)
-            augmented_sample = mix_ratio * sample + (1 - mix_ratio) * sample2
-        
-        # Clip values to valid range
-        augmented_sample = np.clip(augmented_sample, 0, 1)
-        
-        augmented_data.append(augmented_sample)
-        augmented_labels.append(minority_class)
-    
-    # Combine original and augmented data
-    balanced_data = np.vstack([train_data, np.array(augmented_data)])
-    balanced_labels = np.concatenate([train_labels, np.array(augmented_labels)])
-    
-    # Shuffle the data
-    indices = np.arange(len(balanced_labels))
-    np.random.shuffle(indices)
-    balanced_data = balanced_data[indices]
-    balanced_labels = balanced_labels[indices]
-    
-    logger.info(f"New dataset shape: {balanced_data.shape}")
-    new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
-    logger.info(f"New class distribution: {new_class_counts}")
-    
-    return balanced_data, balanced_labels
-
-def mixup_data(x, y, alpha=0.2):
-    """
-    Applies mixup augmentation to the data with improved stability
-    """
-    if alpha <= 0:
-        return x, y
-        
-    # Generate mixing coefficient
-    batch_size = x.shape[0]
-    lam = np.random.beta(alpha, alpha, batch_size)
-    lam = np.maximum(lam, 1-lam)  # Ensure lam is at least 0.5 for stability
-    lam = np.reshape(lam, (batch_size, 1, 1))  # Reshape for broadcasting
-    
-    # Create random permutation of the batch
-    index = np.random.permutation(batch_size)
-    
-    # Mix the data
-    mixed_x = lam * x + (1 - lam) * x[index]
-    
-    # Mix the labels (reshape lam for labels)
-    lam_y = np.reshape(lam, (batch_size,))
-    mixed_y = lam_y * y + (1 - lam_y) * y[index]
-    
-    # Ensure consistent dtype
-    return mixed_x.astype(np.float32), mixed_y.astype(np.float32)
-
-def normalize_spectrograms(spectrograms, method="minmax"):
-    """
-    Normalize spectrograms using different methods.
-    
-    Args:
-        spectrograms: Array of spectrograms to normalize
-        method: Normalization method ('minmax', 'zscore', or 'log')
-        
-    Returns:
-        Normalized spectrograms
-    """
-    if method == "minmax":
-        # Min-max normalization to range [0, 1]
-        min_val = np.min(spectrograms)
-        max_val = np.max(spectrograms)
-        if max_val == min_val:
-            return np.zeros_like(spectrograms)
-        return (spectrograms - min_val) / (max_val - min_val)
-    
-    elif method == "zscore":
-        # Z-score normalization (mean=0, std=1)
-        mean = np.mean(spectrograms)
-        std = np.std(spectrograms)
-        if std == 0:
-            return np.zeros_like(spectrograms)
-        return (spectrograms - mean) / std
-    
-    elif method == "log":
-        # Log normalization
-        return np.log1p(spectrograms)
-    
-    else:
-        logger.warning(f"Unknown normalization method: {method}, returning original data")
-        return spectrograms
-
-def monitor_gpu_usage():
-    """
-    Monitor GPU memory usage and log it
-    """
-    try:
-        import subprocess
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], 
-                               stdout=subprocess.PIPE, text=True)
-        memory_info = result.stdout.strip().split(',')
-        used_memory = int(memory_info[0])
-        total_memory = int(memory_info[1])
-        usage_percent = (used_memory / total_memory) * 100
-        
-        logger.info(f"GPU Memory: {used_memory}MB / {total_memory}MB ({usage_percent:.1f}%)")
-        return used_memory, total_memory, usage_percent
-    except Exception as e:
-        logger.warning(f"Failed to monitor GPU usage: {e}")
-        return None, None, None
-
-def process_dataset_in_chunks(file_list, labels=None, chunk_size=5000, param=None):
-    """
-    Process a large dataset in chunks to avoid memory issues
-    """
-
-    if param is None:
-        param = {}
-    
-    chunking_config = param.get("feature", {}).get("dataset_chunking", {})
-    if not chunking_config.get("enabled", False):
-        # Process normally if chunking is disabled
-        return list_to_spectrograms(file_list, labels, msg="Processing dataset", augment=False, param=param)
-    
-    # Use configured chunk size or default
-    chunk_size = chunking_config.get("chunk_size", chunk_size)
-    logger.info(f"Processing dataset in chunks of {chunk_size} files")
-    
-    # Create temporary directory if needed
-    temp_dir = chunking_config.get("temp_directory", "./temp_chunks")
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # Split dataset into chunks
-    num_chunks = (len(file_list) + chunk_size - 1) // chunk_size
-    all_spectrograms = []
-    all_labels = []
-    
-    for i in range(num_chunks):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, len(file_list))
-        
-        chunk_files = file_list[start_idx:end_idx]
-        chunk_labels = labels[start_idx:end_idx] if labels is not None else None
-        
-        logger.info(f"Processing chunk {i+1}/{num_chunks} ({len(chunk_files)} files)")
-        
-        # Process this chunk
-        chunk_spectrograms, chunk_labels_expanded = list_to_spectrograms(
-            chunk_files, 
-            chunk_labels, 
-            msg=f"Chunk {i+1}/{num_chunks}", 
-            augment=False, 
-            param=param
-        )
-        
-        # Save chunk to disk to free memory
-        chunk_file = f"{temp_dir}/chunk_{i}.npz"
-        np.savez_compressed(
-            chunk_file, 
-            spectrograms=chunk_spectrograms, 
-            labels=chunk_labels_expanded if chunk_labels_expanded is not None else np.array([])
-        )
-        
-        # Clear memory
-        del chunk_spectrograms, chunk_labels_expanded
-        gc.collect()
-        
-        # Monitor GPU usage
-        monitor_gpu_usage()
-    
-    # Now load and combine all chunks
-    target_shape = param.get("feature", {}).get("target_shape", None)
-    if target_shape is None:
-        # Determine target shape from first chunk
-        first_chunk = np.load(f"{temp_dir}/chunk_0.npz")
-        if len(first_chunk["spectrograms"]) > 0:
-            spec_shape = first_chunk["spectrograms"][0].shape
-            target_shape = (spec_shape[0], spec_shape[1])
-        else:
-            target_shape = (param.get("feature", {}).get("n_mels", 64), 128)
-    
-    # Count total samples
-    total_samples = 0
-    for i in range(num_chunks):
-        chunk_file = f"{temp_dir}/chunk_{i}.npz"
-        chunk_data = np.load(chunk_file)
-        total_samples += len(chunk_data["spectrograms"])
-    
-    # Pre-allocate arrays
-    all_spectrograms = np.zeros((total_samples, target_shape[0], target_shape[1]), dtype=np.float32)
-    all_labels = np.zeros(total_samples, dtype=np.float32) if labels is not None else None
-    
-    # Fill arrays
-    sample_idx = 0
-    for i in range(num_chunks):
-        chunk_file = f"{temp_dir}/chunk_{i}.npz"
-        chunk_data = np.load(chunk_file)
-        chunk_spectrograms = chunk_data["spectrograms"]
-        chunk_labels = chunk_data["labels"]
-        
-        # Resize spectrograms if needed
-        for j in range(len(chunk_spectrograms)):
-            spec = chunk_spectrograms[j]
-            if spec.shape[0] != target_shape[0] or spec.shape[1] != target_shape[1]:
-                from skimage.transform import resize
-                spec = resize(spec, target_shape, anti_aliasing=True)
-            
-            all_spectrograms[sample_idx] = spec
-            if labels is not None:
-                all_labels[sample_idx] = chunk_labels[j]
-            
-            sample_idx += 1
-        
-        # Clean up
-        os.remove(chunk_file)
-    
-    # Remove temporary directory if empty
-    if not os.listdir(temp_dir):
-        os.rmdir(temp_dir)
-    
-    return all_spectrograms, all_labels
-
-def create_tf_dataset(file_list, labels=None, batch_size=32, is_training=False, param=None):
-    """
-    Create a TensorFlow dataset that streams and processes audio files on-the-fly - optimized for speed
-    """
-    gc.collect()
-    if tf.config.list_physical_devices('GPU'):
-        try:
-            tf.keras.backend.clear_session()
-        except:
-            pass
-
-    # Check if file_list is empty or None
-    if file_list is None or len(file_list) == 0:
-        logger.error("Empty file list provided to create_tf_dataset")
-        return None
-        
-    # Create the initial dataset from file paths and labels
-    if labels is not None:
-        dataset = tf.data.Dataset.from_tensor_slices((file_list, labels))
-    else:
-        dataset = tf.data.Dataset.from_tensor_slices(file_list)
-        
-    # Define a function to process each file
-    def process_file(file_path, label=None):
-        # Convert string tensor to Python string
-        file_path_str = file_path.numpy().decode('utf-8') if isinstance(file_path, tf.Tensor) else file_path
-        
-        # Process the file to get spectrogram
-        spectrogram = tf.py_function(
-            lambda x: file_to_spectrogram(
-                x.numpy().decode('utf-8') if isinstance(x, tf.Tensor) else x,
-                n_mels=param.get("feature", {}).get("n_mels", 64),
-                n_fft=param.get("feature", {}).get("n_fft", 1024),
-                hop_length=param.get("feature", {}).get("hop_length", 512),
-                power=param.get("feature", {}).get("power", 2.0),
-                augment=is_training,
-                param=param
-            ),
-            [file_path],
-            tf.float32
-        )
-        
-        # Ensure the spectrogram has the correct shape
-        target_shape = param.get("feature", {}).get("target_shape", None)
-        if target_shape:
-            spectrogram = tf.ensure_shape(spectrogram, target_shape)
-        
-        if label is not None:
-            return spectrogram, label
-        else:
-            return spectrogram
-    
-    # Create a wrapper function compatible with tf.data.Dataset.map
-    @tf.function
-    def tf_process_file(file_path, label=None):
-        if label is not None:
-            spec, label = tf.py_function(
-                lambda x, y: process_file(x, y),
-                [file_path, label],
-                [tf.float32, tf.float32]
-            )
-            
-            # Ensure shapes are defined
-            target_shape = param.get("feature", {}).get("target_shape", None)
-            if target_shape:
-                spec = tf.ensure_shape(spec, target_shape)
-                
-            label = tf.ensure_shape(label, [])
-            return spec, label
-        else:
-            spec = tf.py_function(
-                lambda x: process_file(x),
-                [file_path],
-                tf.float32
-            )
-            
-            # Ensure shape is defined
-            target_shape = param.get("feature", {}).get("target_shape", None)
-            if target_shape:
-                spec = tf.ensure_shape(spec, target_shape)
-                
-            return spec
-        
-    # Optimize for V100 with large datasets
-    large_dataset_mode = param.get("large_dataset", {}).get("enabled", False)
-    if large_dataset_mode:
-        logger.info("Large dataset mode enabled - optimizing dataset pipeline")
-        
-        # Use smaller shuffle buffer for memory efficiency
-        shuffle_buffer_size = min(1000, len(file_list))
-        
-        # Increase prefetch to maximize GPU utilization
-        prefetch_size = 3
-        
-        # Use fewer parallel calls to avoid CPU bottleneck
-        num_parallel_calls = min(8, tf.data.AUTOTUNE)
-    else:
-        # Original settings
-        shuffle_buffer_size = min(len(file_list), 100)
-        prefetch_size = tf.data.AUTOTUNE
-        num_parallel_calls = min(8, tf.data.AUTOTUNE)
-    
-    # Apply transformations to the dataset
-    if is_training:
-        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size, reshuffle_each_iteration=True)
-    
-    # Apply the processing function
-    dataset = dataset.map(tf_process_file, num_parallel_calls=num_parallel_calls)
-    
-    # Batch the dataset
-    dataset = dataset.batch(batch_size)
-    
-    # Prefetch for better performance
-    dataset = dataset.prefetch(prefetch_size)
-    
-    return dataset
-
-def create_small_dataset(files, labels, max_files=100):
-    """
-    Create a small subset of the dataset for debugging
-    """
-    if len(files) <= max_files:
-        return files, labels
-    
-    # Ensure we get a balanced sample if labels are provided
-    if labels is not None and len(labels) > 0:
-        normal_indices = np.where(labels == 0)[0]
-        abnormal_indices = np.where(labels == 1)[0]
-        
-        # Take half from each class, or all if less than half of max_files
-        n_normal = min(len(normal_indices), max_files // 2)
-        n_abnormal = min(len(abnormal_indices), max_files // 2)
-        
-        # If one class has fewer samples, take more from the other
-        if n_normal < max_files // 2:
-            n_abnormal = min(len(abnormal_indices), max_files - n_normal)
-        if n_abnormal < max_files // 2:
-            n_normal = min(len(normal_indices), max_files - n_abnormal)
-        
-        # Randomly select samples from each class
-        selected_normal = np.random.choice(normal_indices, n_normal, replace=False)
-        selected_abnormal = np.random.choice(abnormal_indices, n_abnormal, replace=False)
-        
-        # Combine indices
-        selected_indices = np.concatenate([selected_normal, selected_abnormal])
-        np.random.shuffle(selected_indices)
-        
-        return [files[i] for i in selected_indices], labels[selected_indices]
-    else:
-        # If no labels, just take a random sample
-        indices = np.random.choice(len(files), min(max_files, len(files)), replace=False)
-        return [files[i] for i in indices], labels[indices] if labels is not None else None
-
-def weighted_binary_crossentropy(y_true, y_pred, pos_weight=2.0):
-    # Convert inputs to float32
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    pos_weight = tf.cast(pos_weight, tf.float32)
-    
-    # Clip predictions for numerical stability
-    epsilon = tf.keras.backend.epsilon()
-    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-    
-    # Calculate loss with higher weight for positive class
-    loss = -(pos_weight * y_true * tf.math.log(y_pred) + 
-            (1 - y_true) * tf.math.log(1 - y_pred))
-    
-    return tf.reduce_mean(loss)
-
-def create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50, min_lr=0.00001):
-    def lr_schedule(epoch):
-        # Warmup phase
-        if epoch < warmup_epochs:
-            return initial_lr * ((epoch + 1) / warmup_epochs)
-        
-        # Decay phase
-        decay_progress = (epoch - warmup_epochs) / decay_epochs
-        cosine_decay = 0.5 * (1 + np.cos(np.pi * min(decay_progress, 1.0)))
-        return min_lr + (initial_lr - min_lr) * cosine_decay
-    
-    return lr_schedule
-
-@tf.function(jit_compile=True)  # Enable XLA compilation for this function
-def train_step_with_accumulation(model, optimizer, loss_fn, x, y, accumulated_gradients, first_batch, accum_steps):
-    # Cast inputs to float32
-    x = tf.cast(x, tf.float32)
-    y = tf.cast(y, tf.float32)
-    
-    with tf.GradientTape() as tape:
-        # Forward pass
-        y_pred = model(x, training=True)
-        # Compute loss
-        loss = loss_fn(y, y_pred)
-        # Scale loss by accumulation steps
-        scaled_loss = loss / tf.cast(accum_steps, tf.float32)
-    
-    # Compute gradients
-    gradients = tape.gradient(scaled_loss, model.trainable_variables)
-    
-    # If this is the first batch in an accumulation cycle, reset the accumulated gradients
-    if first_batch:
-        for i in range(len(accumulated_gradients)):
-            accumulated_gradients[i].assign(tf.zeros_like(model.trainable_variables[i], dtype=tf.float32))
-    
-    # Accumulate gradients
-    for i in range(len(accumulated_gradients)):
-        accumulated_gradients[i].assign_add(tf.cast(gradients[i], tf.float32))
-    
-    # Compute accuracy
-    accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(y_pred), y), tf.float32))
-    
-    return loss, accuracy
-
-@tf.function(jit_compile=True)  # Enable XLA compilation for this function
-def val_step(model, loss_fn, x, y):
-    # Cast inputs to float32
-    x = tf.cast(x, tf.float32)
-    y = tf.cast(y, tf.float32)
-    
-    # Forward pass
-    y_pred = model(x, training=False)
-    # Compute loss
-    loss = loss_fn(y, y_pred)
-    # Compute accuracy
-    accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(y_pred), y), tf.float32))
-    
-    return loss, accuracy
-
-def implement_progressive_training(model, train_files, train_labels, val_files, val_labels, param):
-    """
-    Implement progressive training with increasing spectrogram sizes - optimized for speed
-    """
-
-    # Cache datasets between progressive steps
-    cached_datasets = {}
-
-    # Check if input data is valid
-    if not train_files or train_files is None or len(train_files) == 0:
-        logger.error("No training files provided for progressive training")
-        return None, None
-        
-    if not val_files or val_files is None or len(val_files) == 0:
-        logger.warning("No validation files provided for progressive training, using a portion of training data")
-        # Use a portion of training data for validation if no validation data is provided
-        split_idx = int(len(train_files) * 0.9)
-        val_files = train_files[split_idx:]
-        val_labels = train_labels[split_idx:] if train_labels is not None else None
-        train_files = train_files[:split_idx]
-        train_labels = train_labels[:split_idx] if train_labels is not None else None
-    
-    # Get base parameters
-    base_epochs = param.get("fit", {}).get("epochs", 30)
-    batch_size = param.get("fit", {}).get("batch_size", 16)
-    
-    # Define progressive sizes (start smaller, end with target size)
-    progressive_config = param.get("training", {}).get("progressive_training", {})
-    if not progressive_config.get("enabled", False):
-        logger.info("Progressive training disabled")
-        return None, None
-    
-    # Get sizes from config or use defaults
-    sizes = progressive_config.get("sizes", [[32, 48], [48, 64], [64, 96]])
-    epochs_per_size = progressive_config.get("epochs_per_size", [10, 10, 10])
-    
-    # Ensure we have enough epochs for each size
-    if len(epochs_per_size) != len(sizes):
-        epochs_per_size = [base_epochs // len(sizes)] * len(sizes)
-    
-    logger.info(f"Starting progressive training with sizes: {sizes}")
-    logger.info(f"Epochs per size: {epochs_per_size}")
-    
-    # Store history for each stage
-    all_history = []
-    
-    # Get gradient clipping norm from parameters
-    clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
-    
-    # Train progressively
-    for i, (size, epochs) in enumerate(zip(sizes, epochs_per_size)):
-        logger.info(f"Progressive training stage {i+1}/{len(sizes)}: size={size}, epochs={epochs}")
-        
-        # Update target shape in parameters
-        param["feature"]["target_shape"] = size
-        size_key = f"{size[0]}x{size[1]}"
-        
-        # Check if we already have this dataset cached
-        if size_key in cached_datasets:
-            logger.info(f"Using cached datasets for size {size}")
-            train_dataset, val_dataset = cached_datasets[size_key]
-        else:
-            # Check if we already have preprocessed data to use directly
-            if i == 0:
-                if 'train_data' in globals() and 'train_labels_expanded' in globals() and 'val_data' in globals() and 'val_labels_expanded' in globals():
-                    logger.info("Using pre-processed tensor data instead of files for progressive training")
-                    
-                    # Resize data to current target shape
-                    from skimage.transform import resize
-                    
-                    # Create resized training data
-                    resized_train = np.zeros((train_data.shape[0], size[0], size[1]), dtype=np.float32)
-                    for j in range(train_data.shape[0]):
-                        resized_train[j] = resize(train_data[j], size, anti_aliasing=True)
-                        
-                    # Create resized validation data
-                    resized_val = np.zeros((val_data.shape[0], size[0], size[1]), dtype=np.float32)
-                    for j in range(val_data.shape[0]):
-                        resized_val[j] = resize(val_data[j], size, anti_aliasing=True)
-                        
-                    # Create direct datasets from tensor data
-                    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
-                    train_dataset = train_dataset.batch(batch_size).shuffle(100).prefetch(tf.data.AUTOTUNE)
-                    
-                    val_dataset = tf.data.Dataset.from_tensor_slices((resized_val, val_labels_expanded))
-                    val_dataset = val_dataset.batch(batch_size).cache().prefetch(tf.data.AUTOTUNE)
-                    
-                    # Skip the file-based dataset creation
-                    use_file_based_dataset = False
-                else:
-                    use_file_based_dataset = True
-                    
-                # Only create file-based datasets if needed
-                if use_file_based_dataset:
-                    # Create datasets with current size
-                    try:
-                        # Set a smaller shuffle buffer for speed
-                        old_buffer_size = param.get("training", {}).get("streaming_data", {}).get("prefetch_buffer_size", 4)
-                        param["training"]["streaming_data"]["prefetch_buffer_size"] = 2
-                        
-                        train_dataset = create_tf_dataset(
-                            train_files, 
-                            train_labels, 
-                            batch_size=batch_size, 
-                            is_training=True, 
-                            param=param
-                        )
-                        
-                        val_dataset = create_tf_dataset(
-                            val_files, 
-                            val_labels, 
-                            batch_size=batch_size, 
-                            is_training=False, 
-                            param=param
-                        )
-                        
-                        # Restore original buffer size
-                        param["training"]["streaming_data"]["prefetch_buffer_size"] = old_buffer_size
-                        
-                        # Cache the datasets for future use
-                        cached_datasets[size_key] = (train_dataset, val_dataset)
-                        
-                    except Exception as e:
-                        logger.error(f"Error creating datasets for size {size}: {e}")
-                        return None, None
-            else:
-                # For subsequent stages, always use the file-based approach or resize tensor data if available
-                if 'train_data' in globals() and 'train_labels_expanded' in globals() and 'val_data' in globals() and 'val_labels_expanded' in globals():
-                    logger.info(f"Resizing pre-processed tensor data for size {size}")
-                    
-                    # Resize data to current target shape
-                    from skimage.transform import resize
-                    
-                    # Create resized training data
-                    resized_train = np.zeros((train_data.shape[0], size[0], size[1]), dtype=np.float32)
-                    for j in range(train_data.shape[0]):
-                        resized_train[j] = resize(train_data[j], size, anti_aliasing=True)
-                        
-                    # Create resized validation data
-                    resized_val = np.zeros((val_data.shape[0], size[0], size[1]), dtype=np.float32)
-                    for j in range(val_data.shape[0]):
-                        resized_val[j] = resize(val_data[j], size, anti_aliasing=True)
-                        
-                    # Create direct datasets from tensor data
-                    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
-                    train_dataset = train_dataset.batch(batch_size).shuffle(100).prefetch(tf.data.AUTOTUNE)
-                    
-                    val_dataset = tf.data.Dataset.from_tensor_slices((resized_val, val_labels_expanded))
-                    val_dataset = val_dataset.batch(batch_size).cache().prefetch(tf.data.AUTOTUNE)
-                    
-                    # Cache the datasets for future use
-                    cached_datasets[size_key] = (train_dataset, val_dataset)
-                else:
-                    # Create datasets with current size from files
-                    try:
-                        # Set a smaller shuffle buffer for speed
-                        old_buffer_size = param.get("training", {}).get("streaming_data", {}).get("prefetch_buffer_size", 4)
-                        param["training"]["streaming_data"]["prefetch_buffer_size"] = 2
-                        
-                        train_dataset = create_tf_dataset(
-                            train_files, 
-                            train_labels, 
-                            batch_size=batch_size, 
-                            is_training=True, 
-                            param=param
-                        )
-                        
-                        val_dataset = create_tf_dataset(
-                            val_files, 
-                            val_labels, 
-                            batch_size=batch_size, 
-                            is_training=False, 
-                            param=param
-                        )
-                        
-                        # Restore original buffer size
-                        param["training"]["streaming_data"]["prefetch_buffer_size"] = old_buffer_size
-                        
-                        # Cache the datasets for future use
-                        cached_datasets[size_key] = (train_dataset, val_dataset)
-                        
-                    except Exception as e:
-                        logger.error(f"Error creating datasets for size {size}: {e}")
-                        return None, None
-
-        # Check dataset shapes (this will iterate through one batch each)
-        logger.info(f"Checking dataset shapes for size {size}...")
-        try:
-            # Use a try-except block to safely check dataset shapes
-            for x_batch, y_batch in train_dataset.take(1):
-                logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
-            for x_batch, y_batch in val_dataset.take(1):
-                logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
-        except Exception as e:
-            logger.error(f"Error checking training dataset shape: {e}")
-            logger.info("Continuing with training despite shape check error")
-
-
-        # Use a Python iterator to track progress outside the graph context
-        logger.info("Starting dataset loading - this may take a while...")
-
-        # Define a simple Python iterator that won't use .numpy() in graph mode
-        class ProgressCallback:
-            def __init__(self, name="Dataset"):
-                self.count = 0
-                self.name = name
-                
-            def __call__(self, *args):
-                self.count += 1
-                if self.count % 10 == 0:
-                    logger.info(f"{self.name}: Loaded {self.count} batches")
-                return args
-
-        # Create the callbacks
-        train_callback = ProgressCallback("Training dataset")
-        val_callback = ProgressCallback("Validation dataset")
-
-        # Check dataset shapes (this will iterate through one batch each)
-        logger.info(f"Checking dataset shapes for size {size}...")
-        for x_batch, y_batch in train_dataset.take(1):
-            logger.info(f"Training batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
-            
-        for x_batch, y_batch in val_dataset.take(1):
-            logger.info(f"Validation batch shape: {x_batch.shape}, Labels shape: {y_batch.shape}")
-
-
-        # If first stage, create model from scratch
-        if i == 0:
-            model = create_ast_model(input_shape=size, config=param.get("model", {}).get("architecture", {}))
-            
-            # Compile model
-            model.compile(
-                optimizer = AdamW(
-                    learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001),
-                    weight_decay=0.01,  # Add weight decay
-                    clipnorm=clipnorm
-                ),
-                loss='binary_crossentropy',
-                metrics=['accuracy']
-            )
-        else:
-            # For later stages, we need to adjust the input layer
-            # Create a new model with the current size
-            new_model = create_ast_model(input_shape=size, config=param.get("model", {}).get("architecture", {}))
-            
-            # Copy weights from previous model where possible
-            for new_layer, old_layer in zip(new_model.layers[1:], model.layers[1:]):
-                try:
-                    new_layer.set_weights(old_layer.get_weights())
-                except:
-                    logger.warning(f"Could not transfer weights for layer {new_layer.name}")
-            
-            # Replace model
-            model = new_model
-            
-            # Recompile
-            model.compile(
-                optimizer = AdamW(
-                    learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001) * 0.5,  # Lower LR for fine-tuning
-                    weight_decay=0.01,  # Add weight decay
-                    clipnorm=clipnorm
-                ),
-                loss='binary_crossentropy',
-                metrics=['accuracy']
-            )
-        
-        # Define callbacks for this stage
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=5,
-                restore_best_weights=True
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=3,
-                min_delta=0.001
-            ),
-            tf.keras.callbacks.TerminateOnNaN()
-        ]
-        
-        # Train for this stage
-        try:
-            history = model.fit(
-                train_dataset,
-                epochs=epochs,
-                validation_data=val_dataset,
-                callbacks=callbacks,
-                verbose=1
-            )
-            
-            all_history.append(history)
-        except Exception as e:
-            logger.error(f"Error during training for size {size}: {e}")
-            # Continue with next size instead of failing completely
-            continue
-        
-        # Save intermediate model
-        try:
-            model.save(f"{param['model_directory']}/model_stage_{i+1}.keras")
-            logger.info(f"Saved model for stage {i+1}")
-        except Exception as e:
-            logger.warning(f"Error saving model for stage {i+1}: {e}")
-    
-    return model, all_history
-
-
-# Modify your find_optimal_threshold function definition:
-def find_optimal_threshold(y_true, y_pred_proba, param=None):
-    """
-    Find the optimal classification threshold using various metrics
-    """
-    thresholds = np.linspace(0.1, 0.9, 33)  # Test 33 thresholds from 0.1 to 0.9
-    f1_scores = []
-    precisions = []
-    recalls = []
-    specificities = []
-    
-    # Calculate metrics for each threshold
-    for threshold in thresholds:
-        y_pred = (y_pred_proba > threshold).astype(int)
-        
-        # Calculate metrics
-        precision = metrics.precision_score(y_true, y_pred, zero_division=0)
-        recall = metrics.recall_score(y_true, y_pred, zero_division=0)
-        f1 = metrics.f1_score(y_true, y_pred, zero_division=0)
-        
-        # Calculate specificity (true negative rate)
-        tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_pred).ravel()
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-        
-        # Store results
-        precisions.append(precision)
-        recalls.append(recall)
-        f1_scores.append(f1)
-        specificities.append(specificity)
-    
-    # Find threshold with best F1 score
-    best_f1_idx = np.argmax(f1_scores)
-    best_f1_threshold = thresholds[best_f1_idx]
-    
-    # Find threshold with best balance between precision and recall
-    pr_diffs = np.abs(np.array(precisions) - np.array(recalls))
-    best_balance_idx = np.argmin(pr_diffs)
-    best_balance_threshold = thresholds[best_balance_idx]
-    
-    # Find threshold with best geometric mean of recall and specificity
-    gmeans = np.sqrt(np.array(recalls) * np.array(specificities))
-    best_gmean_idx = np.argmax(gmeans)
-    best_gmean_threshold = thresholds[best_gmean_idx]
-    
-    # Log results
-    logger.info(f"Best F1 threshold: {best_f1_threshold:.3f} (F1={f1_scores[best_f1_idx]:.3f})")
-    logger.info(f"Best balanced threshold: {best_balance_threshold:.3f} (Precision={precisions[best_balance_idx]:.3f}, Recall={recalls[best_balance_idx]:.3f})")
-    logger.info(f"Best geometric mean threshold: {best_gmean_threshold:.3f} (G-mean={gmeans[best_gmean_idx]:.3f})")
-    
-    # Plot the metrics vs threshold
-    plt.figure(figsize=(12, 8))
-    plt.plot(thresholds, precisions, 'b-', label='Precision')
-    plt.plot(thresholds, recalls, 'g-', label='Recall')
-    plt.plot(thresholds, f1_scores, 'r-', label='F1 Score')
-    plt.plot(thresholds, specificities, 'c-', label='Specificity')
-    plt.plot(thresholds, gmeans, 'm-', label='G-Mean')
-    
-    # Mark the best thresholds
-    plt.axvline(x=best_f1_threshold, color='r', linestyle='--', alpha=0.5, label=f'Best F1 ({best_f1_threshold:.3f})')
-    plt.axvline(x=best_balance_threshold, color='g', linestyle='--', alpha=0.5, label=f'Best Balance ({best_balance_threshold:.3f})')
-    plt.axvline(x=best_gmean_threshold, color='m', linestyle='--', alpha=0.5, label=f'Best G-Mean ({best_gmean_threshold:.3f})')
-    
-    plt.xlabel('Threshold')
-    plt.ylabel('Metric Value')
-    plt.title('Metrics vs. Threshold')
-    plt.legend()
-    plt.grid(True)
-    
-    # Check if param exists before using it
-    if param is not None and 'result_directory' in param:
-        plt.savefig(f"{param['result_directory']}/threshold_optimization.png")
-    else:
-        plt.savefig("threshold_optimization.png")
-    plt.close()
-    
-    # Return the best threshold based on F1 score
-    return best_f1_threshold
-
-
-def standardize_spectrograms(spectrograms):
-    """
-    Standardize spectrograms using robust scaling to handle outliers
-    """
-    # Calculate robust statistics (less affected by outliers)
-    q1 = np.percentile(spectrograms, 25, axis=(1, 2), keepdims=True)
-    q3 = np.percentile(spectrograms, 75, axis=(1, 2), keepdims=True)
-    median = np.median(spectrograms, axis=(1, 2), keepdims=True)
-    
-    # Calculate IQR (Interquartile Range)
-    iqr = q3 - q1
-    
-    # Handle cases where IQR is too small
-    iqr = np.maximum(iqr, 1e-5)
-    
-    # Apply robust scaling: (X - median) / IQR
-    scaled_specs = (spectrograms - median) / iqr
-    
-    # Clip extreme values
-    scaled_specs = np.clip(scaled_specs, -3, 3)
-    
-    return scaled_specs
-
-
-def force_reload_pickles(param, evaluation_result_key="overall_model"):
-    """Emergency hack to force reloading of pickle files and debug the issue"""
-    import pickle
-    import numpy as np
-    import os
-    
-    pickle_dir = param['pickle_directory']
-    train_pickle = f"{pickle_dir}/train_overall.pickle"
-    train_labels_pickle = f"{pickle_dir}/train_labels_overall.pickle"
-    val_pickle = f"{pickle_dir}/val_overall.pickle"
-    val_labels_pickle = f"{pickle_dir}/val_labels_overall.pickle"
-    test_files_pickle = f"{pickle_dir}/test_files_overall.pickle"
-    test_labels_pickle = f"{pickle_dir}/test_labels_overall.pickle"
-    
-    # Check if all files exist
-    all_exist = (os.path.exists(train_pickle) and 
-                os.path.exists(train_labels_pickle) and
-                os.path.exists(val_pickle) and
-                os.path.exists(val_labels_pickle) and
-                os.path.exists(test_files_pickle) and
-                os.path.exists(test_labels_pickle))
-    
-    if not all_exist:
-        print("ERROR: Not all pickle files exist")
-        return None, None, None, None, None, None
-    
-    # Load pickle files directly with basic Python pickle
-    print("Loading pickles directly...")
-    try:
-        with open(train_pickle, 'rb') as f:
-            train_data = pickle.load(f)
-        with open(train_labels_pickle, 'rb') as f:
-            train_labels = pickle.load(f)
-        with open(val_pickle, 'rb') as f:
-            val_data = pickle.load(f)
-        with open(val_labels_pickle, 'rb') as f:
-            val_labels = pickle.load(f)
-        with open(test_files_pickle, 'rb') as f:
-            test_files = pickle.load(f)
-        with open(test_labels_pickle, 'rb') as f:
-            test_labels = pickle.load(f)
-            
-        # Print detailed information
-        print(f"Loaded train_data: {type(train_data)}, shape={train_data.shape}")
-        print(f"Loaded train_labels: {type(train_labels)}, shape={train_labels.shape}")
-        print(f"Loaded val_data: {type(val_data)}, shape={val_data.shape}")
-        print(f"Loaded val_labels: {type(val_labels)}, shape={val_labels.shape}")
-        print(f"Loaded test_files: {type(test_files)}, length={len(test_files)}")
-        print(f"Loaded test_labels: {type(test_labels)}, shape={test_labels.shape}")
-        
-        # Verify data is not empty
-        assert isinstance(train_data, np.ndarray) and train_data.size > 0, "Train data is empty"
-        assert isinstance(val_data, np.ndarray) and val_data.size > 0, "Validation data is empty"
-        assert isinstance(test_files, list) and len(test_files) > 0, "Test files list is empty"
-        
-        print("All data loaded and verified successfully!")
-        return train_data, train_labels, val_data, val_labels, test_files, test_labels
-    
-    except Exception as e:
-        print(f"ERROR loading pickle files directly: {e}")
-        return None, None, None, None, None, None
-
-def force_reload_and_train_directly(param, evaluation_result_key="overall_model"):
-    """
-    Emergency fix: Force load pickles and train directly
-    This is a self-contained fix that bypasses normal flow to make the model train
-    """
-    import pickle
-    import numpy as np
-    import os
-    import tensorflow as tf
-    from tensorflow.keras.optimizers import AdamW
-    from tensorflow.keras import mixed_precision
-    import matplotlib.pyplot as plt
-    
-    print("\n==================================================")
-    print("EMERGENCY FIX ACTIVATED - DIRECT PICKLE LOADING")
-    print("==================================================\n")
-    
-    # Configure paths
-    pickle_dir = param['pickle_directory']
-    train_pickle = f"{pickle_dir}/train_overall.pickle"
-    train_labels_pickle = f"{pickle_dir}/train_labels_overall.pickle"
-    val_pickle = f"{pickle_dir}/val_overall.pickle"
-    val_labels_pickle = f"{pickle_dir}/val_labels_overall.pickle"
-    test_files_pickle = f"{pickle_dir}/test_files_overall.pickle"
-    test_labels_pickle = f"{pickle_dir}/test_labels_overall.pickle"
-    
-    # Verify file existence
-    all_exist = all(os.path.exists(p) for p in [
-        train_pickle, train_labels_pickle, val_pickle, 
-        val_labels_pickle, test_files_pickle, test_labels_pickle
-    ])
-    
-    if not all_exist:
-        print("ERROR: Not all pickle files exist. Cannot proceed with direct pickle loading.")
-        return False
-    
-    print("All pickle files found. Loading data directly...")
-    
-    # Direct load with native pickle
-    try:
-        with open(train_pickle, 'rb') as f:
-            train_data = pickle.load(f)
-        with open(train_labels_pickle, 'rb') as f:
-            train_labels = pickle.load(f)
-        with open(val_pickle, 'rb') as f:
-            val_data = pickle.load(f)
-        with open(val_labels_pickle, 'rb') as f:
-            val_labels = pickle.load(f)
-        with open(test_files_pickle, 'rb') as f:
-            test_files = pickle.load(f)
-        with open(test_labels_pickle, 'rb') as f:
-            test_labels = pickle.load(f)
-    except Exception as e:
-        print(f"ERROR loading pickle data: {e}")
-        return False
-    
-    # Print data info
-    print(f"Loaded train_data: {type(train_data)}, shape={train_data.shape}")
-    print(f"Loaded train_labels: {type(train_labels)}, shape={train_labels.shape}")
-    print(f"Loaded val_data: {type(val_data)}, shape={val_data.shape}")
-    print(f"Loaded val_labels: {type(val_labels)}, shape={val_labels.shape}")
-    print(f"Loaded test_files: {type(test_files)}, count={len(test_files)}")
-    
-    # Verify data integrity
-    if (not isinstance(train_data, np.ndarray) or train_data.shape[0] == 0 or
-        not isinstance(val_data, np.ndarray) or val_data.shape[0] == 0):
-        print("ERROR: Invalid or empty data arrays")
-        return False
-    
-    print("All data loaded successfully. Preparing for training...")
-    
-    # Define target shape for spectrograms
-    target_shape = (param["feature"]["n_mels"], 96)
-    print(f"Target shape: {target_shape}")
-    
-    # Preprocess spectrograms to ensure consistent shapes
-    def preprocess_batch(specs, target_shape):
-        batch_size = specs.shape[0]
-        processed = np.zeros((batch_size, target_shape[0], target_shape[1]), dtype=np.float32)
-        
-        for i in range(batch_size):
-            spec = specs[i]
-            if spec.shape[0] == target_shape[0] and spec.shape[1] == target_shape[1]:
-                processed[i] = spec
-            else:
-                # Simple resize with zero padding
-                freq_dim = min(spec.shape[0], target_shape[0])
-                time_dim = min(spec.shape[1], target_shape[1])
-                processed[i, :freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
-        
-        return processed
-    
-    print("Preprocessing train data...")
-    train_data = preprocess_batch(train_data, target_shape)
-    print(f"Preprocessed train_data shape: {train_data.shape}")
-    
-    print("Preprocessing validation data...")
-    val_data = preprocess_batch(val_data, target_shape)
-    print(f"Preprocessed val_data shape: {val_data.shape}")
-    
-    # Normalize data
-    print("Normalizing data...")
-    # Calculate mean and std on training data
-    mean = np.mean(train_data)
-    std = np.std(train_data)
-    print(f"Training data statistics - Mean: {mean:.4f}, Std: {std:.4f}")
-    
-    # Apply Z-score normalization
-    if std > 0:
-        train_data = (train_data - mean) / std
-        val_data = (val_data - mean) / std
-        print("Z-score normalization applied")
-    
-    # Enable mixed precision
-    print("Enabling mixed precision...")
-    mixed_precision.set_global_policy('mixed_float16')
-    
-    # Create TensorFlow datasets
-    print("Creating TensorFlow datasets...")
-    batch_size = param.get("fit", {}).get("batch_size", 16)
-    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels))
-    train_dataset = train_dataset.batch(batch_size).shuffle(1000).prefetch(tf.data.AUTOTUNE)
-    
-    val_dataset = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
-    val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    
-    # Create model
-    print("Creating AST model...")
-    model = create_ast_model(input_shape=target_shape, 
-                           config=param.get("model", {}).get("architecture", {}))
-    
-    # Compile model with AdamW optimizer
-    model.compile(
-        optimizer=AdamW(
-            learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001),
-            weight_decay=0.01,
-            clipnorm=1.0
-        ),
-        loss='binary_crossentropy',
-        metrics=['accuracy']
-    )
-    
-    # Define callbacks
-    callbacks = []
-    
-    # Early stopping
-    callbacks.append(
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=param.get("fit", {}).get("early_stopping", {}).get("patience", 10),
-            restore_best_weights=True
-        )
-    )
-    
-    # Learning rate scheduler
-    callbacks.append(
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-7
-        )
-    )
-    
-    # Model checkpointing
-    os.makedirs(param["model_directory"], exist_ok=True)
-    callbacks.append(
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=f"{param['model_directory']}/best_model.keras",
-            monitor='val_accuracy',
-            save_best_only=True,
-            mode='max'
-        )
-    )
-    
-    # Train model
-    print(f"Starting model training for {param['fit']['epochs']} epochs...")
-    history = model.fit(
-        train_dataset,
-        epochs=param["fit"]["epochs"],
-        validation_data=val_dataset,
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    # Save trained model
-    try:
-        model.save(f"{param['model_directory']}/final_model.keras")
-        print("Model saved successfully!")
-    except Exception as e:
-        print(f"Error saving model: {e}")
-    
-    # Plot training history
-    print("Plotting training history...")
-    plt.figure(figsize=(15, 10))
-    
-    # Plot loss
-    plt.subplot(2, 1, 1)
-    plt.plot(history.history['loss'])
-    plt.plot(history.history['val_loss'])
-    plt.title("Model loss")
-    plt.ylabel("Loss")
-    plt.xlabel("Epoch")
-    plt.legend(["Train", "Validation"], loc="upper right")
-    
-    # Plot accuracy
-    plt.subplot(2, 1, 2)
-    plt.plot(history.history['accuracy'])
-    plt.plot(history.history['val_accuracy'])
-    plt.title("Model accuracy")
-    plt.ylabel("Accuracy")
-    plt.xlabel("Epoch")
-    plt.legend(["Train", "Validation"], loc="lower right")
-    
-    # Save figure
-    os.makedirs(param["result_directory"], exist_ok=True)
-    plt.savefig(f"{param['result_directory']}/training_history.png")
-    plt.close()
-    
-    print("Training complete!")
-    return True
 
 ########################################################################
 # main
@@ -2392,9 +862,26 @@ def main():
         except RuntimeError as e:
             logger.error(f"Error setting GPU memory configuration: {e}")
 
-
-    with open("baseline__AST.yaml", "r") as stream:
-        param = yaml.safe_load(stream)    
+    # Load configuration file (fixed path with single underscore)
+    config_file = "baseline_AST.yaml"
+    print_with_timestamp(f"Loading configuration from {config_file}")
+    
+    try:
+        with open(config_file, "r") as stream:
+            param = yaml.safe_load(stream)
+        print_with_timestamp("Configuration loaded successfully")
+    except Exception as e:
+        print_with_timestamp(f"Error loading configuration: {e}")
+        print_with_timestamp("Trying alternative configuration filename...")
+        try:
+            alt_config_file = "baseline__AST.yaml"
+            with open(alt_config_file, "r") as stream:
+                param = yaml.safe_load(stream)
+            print_with_timestamp(f"Configuration loaded successfully from {alt_config_file}")
+        except Exception as e2:
+            print_with_timestamp(f"Failed to load configuration from alternative file: {e2}")
+            print_with_timestamp("Please make sure 'baseline_AST.yaml' exists in the current directory")
+            return
 
     # Enable XLA compilation for faster GPU execution
     if param.get("training", {}).get("xla_acceleration", True):
@@ -2407,28 +894,25 @@ def main():
             logger.warning(f"Failed to enable XLA acceleration: {e}")
 
 
-    print("============== CHECKING DIRECTORY STRUCTURE ==============")
+    print_with_timestamp("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
     abnormal_dir = Path(param["base_directory"]) / "abnormal"
 
-    print(f"Normal directory exists: {normal_dir.exists()}")
+    print_with_timestamp(f"Normal directory exists: {normal_dir.exists()}")
     if normal_dir.exists():
         normal_files = list(normal_dir.glob("*.wav"))
-        print(f"Number of normal files found: {len(normal_files)}")
+        print_with_timestamp(f"Number of normal files found: {len(normal_files)}")
         if normal_files:
-            print(f"Sample normal filename: {normal_files[0].name}")
+            print_with_timestamp(f"Sample normal filename: {normal_files[0].name}")
 
-    print(f"Abnormal directory exists: {abnormal_dir.exists()}")
+    print_with_timestamp(f"Abnormal directory exists: {abnormal_dir.exists()}")
     if abnormal_dir.exists():
         abnormal_files = list(abnormal_dir.glob("*.wav"))
-        print(f"Number of abnormal files found: {len(abnormal_files)}")
+        print_with_timestamp(f"Number of abnormal files found: {len(abnormal_files)}")
         if abnormal_files:
-            print(f"Sample abnormal filename: {abnormal_files[0].name}")
+            print_with_timestamp(f"Sample abnormal filename: {abnormal_files[0].name}")
 
     start_time = time.time()
-
-    with open("baseline__AST.yaml", "r") as stream:
-        param = yaml.safe_load(stream)
 
     os.makedirs(param["pickle_directory"], exist_ok=True)
     os.makedirs(param["model_directory"], exist_ok=True)
@@ -2444,18 +928,18 @@ def main():
     test_files = list(normal_path.glob("*.wav"))[:1] if normal_path.exists() and list(normal_path.glob("*.wav")) else list(abnormal_path.glob("*.wav"))[:1]
     
     if test_files:
-        print(f"DEBUG: Testing direct audio load for: {test_files[0]}")
+        print_with_timestamp(f"DEBUG: Testing direct audio load for: {test_files[0]}")
         sr, y = demux_wav(str(test_files[0]))
         if y is not None:
-            print(f"DEBUG: Successfully loaded audio with sr={sr}, length={len(y)}")
+            print_with_timestamp(f"DEBUG: Successfully loaded audio with sr={sr}, length={len(y)}")
         else:
-            print(f"DEBUG: Failed to load audio file")
+            print_with_timestamp(f"DEBUG: Failed to load audio file")
     else:
-        print("DEBUG: No test files found to verify audio loading")
+        print_with_timestamp("DEBUG: No test files found to verify audio loading")
 
     base_path = Path(param["base_directory"])
 
-    print("============== COUNTING DATASET SAMPLES ==============")
+    print_with_timestamp("============== COUNTING DATASET SAMPLES ==============")
     logger.info("Counting all samples in the dataset...")
     
     normal_path = Path(param["base_directory"]) / "normal"
@@ -2478,8 +962,8 @@ def main():
 
     # Get model file information from the first file in the directory
     sample_files = list(Path(target_dir).glob(f"*.{param.get('dataset', {}).get('file_extension', 'wav')}"))
-    print(f"DEBUG: Found {len(sample_files)} files in {target_dir}")
-    print(f"DEBUG: First 5 files: {[f.name for f in sample_files[:5]]}")
+    print_with_timestamp(f"DEBUG: Found {len(sample_files)} files in {target_dir}")
+    print_with_timestamp(f"DEBUG: First 5 files: {[f.name for f in sample_files[:5]]}")
 
     if not sample_files:
         logger.warning(f"No files found in {target_dir}")
@@ -2488,7 +972,7 @@ def main():
     # Parse a sample filename to get db, machine_type, machine_id
     filename = sample_files[0].name
     parts = filename.split('_')
-    print(f"DEBUG: Parsing filename '{filename}' into parts: {parts}")
+    print_with_timestamp(f"DEBUG: Parsing filename '{filename}' into parts: {parts}")
 
     if len(parts) < 4:
         logger.warning(f"Filename format incorrect: {filename}")
@@ -2496,7 +980,7 @@ def main():
     
     # Use a straightforward key without unintended characters
     evaluation_result_key = "overall_model"
-    print(f"DEBUG: Using evaluation_result_key: {evaluation_result_key}")
+    print_with_timestamp(f"DEBUG: Using evaluation_result_key: {evaluation_result_key}")
 
     # Initialize evaluation result dictionary
     evaluation_result = {}
@@ -2512,234 +996,216 @@ def main():
     chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
     preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
     
-    print("============== DATASET_GENERATOR ==============")
+    print_with_timestamp("============== DATASET_GENERATOR ==============")
     
-    # EMERGENCY FIX - BYPASSING NORMAL FLOW
-    print("\n***************************************************************")
-    print("* EMERGENCY FIX ACTIVATED: BYPASSING NORMAL CODE FLOW          *")
-    print("* Using direct pickle loading and training to solve the issue  *")
-    print("***************************************************************\n")
+    # Generate dataset
+    train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
     
-    # Call our emergency direct training function
-    success = force_reload_and_train_directly(param)
+    # Verify generated dataset
+    logger.info(f"Generated train files: {len(train_files)}")
+    logger.info(f"Generated val files: {len(val_files)}")
+    logger.info(f"Generated test files: {len(test_files)}")
     
-    # If emergency direct training worked, exit
-    if success:
-        print("\nEmergency direct training completed successfully!")
-        return
+    # Check if dataset generation was successful
+    if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
+        logger.error(f"No files found for {evaluation_result_key}, skipping...")
+        return  # Exit main() if no files are found after generation
+    
+    # After dataset generation
+    # ... existing code for dataset_generator and verification ...
+    
+    # Simplified main flow with clear progress reporting
+    print_with_timestamp("\n============== STARTING DATA PROCESSING ==============")
+    
+    # Define pickle file paths
+    train_pickle = f"{param['pickle_directory']}/train_{evaluation_result_key}.pickle"
+    train_labels_pickle = f"{param['pickle_directory']}/train_labels_{evaluation_result_key}.pickle"
+    val_pickle = f"{param['pickle_directory']}/val_{evaluation_result_key}.pickle"
+    val_labels_pickle = f"{param['pickle_directory']}/val_labels_{evaluation_result_key}.pickle"
+    test_files_pickle = f"{param['pickle_directory']}/test_files_{evaluation_result_key}.pickle"
+    test_labels_pickle = f"{param['pickle_directory']}/test_labels_{evaluation_result_key}.pickle"
+    
+    # Check if preprocessed data already exists
+    if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
+        os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
+        os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
         
-    # Fall back to normal flow only if emergency approach fails
-    print("Emergency approach failed, falling back to regular implementation...")
-    
-    # Try the emergency force reload function
-    print("EMERGENCY FIX: Trying direct pickle loading...")
-    train_data, train_labels, val_data, val_labels, test_files, test_labels = force_reload_pickles(param)
-    
-    if train_data is not None:
-        # If direct loading worked, go straight to model training
-        print("SUCCESS: Direct pickle loading worked! Proceeding to model training...")
-        train_labels_expanded = train_labels
-        val_labels_expanded = val_labels
-        test_labels_expanded = test_labels
+        print_with_timestamp("Found existing preprocessed data. Loading from pickle files...")
+        
+        try:
+            train_data = load_pickle(train_pickle)
+            train_labels_expanded = load_pickle(train_labels_pickle)
+            val_data = load_pickle(val_pickle)
+            val_labels_expanded = load_pickle(val_labels_pickle)
+            test_files = load_pickle(test_files_pickle)
+            test_labels_expanded = load_pickle(test_labels_pickle)
+            
+            print_with_timestamp(f"Loaded train data shape: {train_data.shape}")
+            print_with_timestamp(f"Loaded validation data shape: {val_data.shape}")
+            print_with_timestamp(f"Loaded test files: {len(test_files)}")
+            
+        except Exception as e:
+            print_with_timestamp(f"Error loading pickle data: {e}")
+            print_with_timestamp("Will generate new preprocessed data...")
+            train_data = None  # Reset to trigger data generation
     else:
-        # If direct loading failed, continue with the regular flow
-        print("WARNING: Direct pickle loading failed, falling back to regular process")
-        train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
-        train_labels_pickle = f"{param['pickle_directory']}/train_labels_overall.pickle"
-        val_pickle = f"{param['pickle_directory']}/val_overall.pickle"
-        val_labels_pickle = f"{param['pickle_directory']}/val_labels_overall.pickle"
-        test_files_pickle = f"{param['pickle_directory']}/test_files_overall.pickle"
-        test_labels_pickle = f"{param['pickle_directory']}/test_labels_overall.pickle"
-
-        # Initialize variables
-        train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
-        train_data, val_data, test_data = None, None, None
-        train_labels_expanded, val_labels_expanded, test_labels_expanded = None, None, None
+        print_with_timestamp("No preprocessed data found. Will generate new data...")
+        train_data = None
+    
+    # Process data if needed (wasn't loaded from pickle)
+    if train_data is None:
+        print_with_timestamp("Processing training data...")
+        train_data, train_labels_expanded = list_to_spectrograms(
+            train_files, train_labels, msg="Generating train dataset", 
+            augment=False, param=param, batch_size=preprocessing_batch_size
+        )
         
-        # Debug variables and path existence
-        print(f"DEBUG: Checking pickle files")
-        print(f"  train_pickle exists: {os.path.exists(train_pickle)}")
-        print(f"  val_pickle exists: {os.path.exists(val_pickle)}")
-        print(f"  test_files_pickle exists: {os.path.exists(test_files_pickle)}")
-
-        if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
-            os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
-            os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
-            
-            print("DEBUG: All pickle files exist, attempting to load")
-            logger.info("Loading preprocessed data from pickle files...")
-            
-            try:
-                train_data = load_pickle(train_pickle)
-                train_labels = load_pickle(train_labels_pickle)
-                val_data = load_pickle(val_pickle)
-                val_labels = load_pickle(val_labels_pickle)
-                test_files = load_pickle(test_files_pickle)
-                test_labels = load_pickle(test_labels_pickle)
-                
-                # Set expanded labels (needed for actual training)
-                train_labels_expanded = train_labels
-                val_labels_expanded = val_labels
-                test_labels_expanded = test_labels
-                
-                # Validate loaded data
-                print(f"DEBUG: Loaded train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'unknown shape'}")
-                print(f"DEBUG: Loaded val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'unknown shape'}")
-                
-                logger.info(f"Loaded train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'unknown'}")
-                logger.info(f"Loaded train_labels shape: {train_labels.shape if hasattr(train_labels, 'shape') else 'unknown'}")
-                logger.info(f"Loaded val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'unknown'}")
-                logger.info(f"Loaded val_labels shape: {val_labels.shape if hasattr(val_labels, 'shape') else 'unknown'}")
-                logger.info(f"Number of loaded test files: {len(test_files)}")
-                
-                # Verify data is not empty
-                if train_data is None or not isinstance(train_data, np.ndarray) or train_data.shape[0] == 0:
-                    print("DEBUG: Loaded train_data is empty or invalid")
-                    logger.error("Loaded train_data is empty or invalid - will regenerate dataset")
-                    raise ValueError("Empty or invalid train_data")
-                    
-                if val_data is None or not isinstance(val_data, np.ndarray) or val_data.shape[0] == 0:
-                    print("DEBUG: Loaded val_data is empty or invalid")
-                    logger.error("Loaded val_data is empty or invalid - will regenerate dataset")
-                    raise ValueError("Empty or invalid val_data")
-                    
-                if test_files is None or len(test_files) == 0:
-                    print("DEBUG: Loaded test_files is empty")
-                    logger.warning("Loaded test_files is empty - will regenerate dataset")
-                    raise ValueError("Empty test_files")
-
-                # Data loaded successfully - skip preprocessing
-                print("DEBUG: Successfully loaded all pickle data")
-                logger.info("Successfully loaded pickle data, skipping file processing")
-                    
-            except Exception as e:
-                print(f"DEBUG: Error loading pickle files: {e}")
-                logger.error(f"Error loading pickle files: {e}. Will regenerate dataset.")
-                # Reset these variables to ensure we regenerate
-                train_data, val_data = None, None
-                test_files = []
-        else:
-            print("DEBUG: Pickle files not found, will generate dataset from scratch")
-            logger.info("Pickle files not found. Will generate new dataset.")
-            train_data, val_data = None, None
-            test_files = []
-
-        # If we couldn't load from pickle files, generate the dataset
-        if (train_data is None or val_data is None or len(test_files) == 0):
-            print("DEBUG: Generating dataset from scratch")
-            logger.info("Generating new dataset from files...")
-            
-            # Generate dataset from files
-            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
-            
-            # Verify generated dataset
-            logger.info(f"Generated train files: {len(train_files)}")
-            logger.info(f"Generated val files: {len(val_files)}")
-            logger.info(f"Generated test files: {len(test_files)}")
-            
-            # Check if dataset generation was successful
-            if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
-                logger.error(f"No files found for {evaluation_result_key}, skipping...")
-                return  # Exit main() if no files are found after generation
-                
-            # Process training data
-            logger.info("Processing train data from files...")
-            if chunking_enabled and len(train_files) > chunk_size:
-                logger.info(f"Processing train data in chunks ({len(train_files)} files)")
-                train_data, train_labels_expanded = process_dataset_in_chunks(
-                    train_files,
-                    train_labels,
-                    chunk_size=chunk_size,
-                    param=param
-                )
-            else:
-                train_data, train_labels_expanded = list_to_spectrograms(
-                    train_files,
-                    train_labels,
-                    msg="generate train_dataset",
-                    augment=False,
-                    param=param,
-                    batch_size=preprocessing_batch_size
-                )
-                
-            # Process validation data
-            logger.info("Processing validation data from files...")
-            if chunking_enabled and len(val_files) > chunk_size:
-                logger.info(f"Processing validation data in chunks ({len(val_files)} files)")
-                val_data, val_labels_expanded = process_dataset_in_chunks(
-                    val_files,
-                    val_labels,
-                    chunk_size=chunk_size,
-                    param=param
-                )
-            else:
-                val_data, val_labels_expanded = list_to_spectrograms(
-                    val_files,
-                    val_labels,
-                    msg="generate validation_dataset",
-                    augment=False,
-                    param=param,
-                    batch_size=preprocessing_batch_size
-                )
-            
-            # Process test files if needed
-            if len(test_files) > 0:
-                logger.info("Processing test files (metadata only)...")
-                # We don't actually process test files now, just save their paths
-                # They'll be processed during evaluation
-                test_labels_expanded = test_labels
-                
-            # Save processed data
-            try:
-                logger.info("Saving processed data to pickle files...")
-                save_pickle(train_pickle, train_data)
-                save_pickle(train_labels_pickle, train_labels_expanded)
-                save_pickle(val_pickle, val_data)
-                save_pickle(val_labels_pickle, val_labels_expanded)
-                save_pickle(test_files_pickle, test_files)
-                save_pickle(test_labels_pickle, test_labels)
-                logger.info("Saved all processed data to pickle files successfully")
-            except Exception as e:
-                logger.error(f"Error saving pickle files: {e}")
-                # Continue with training even if saving failed
-        else:
-            # We loaded the data from pickle files
-            print("DEBUG: Using loaded pickle data directly")
-            logger.info("Using loaded pickle data directly for training")
-            # Empty these lists to indicate we're using pickled data
-            train_files = []
-            val_files = []
+        print_with_timestamp("Processing validation data...")
+        val_data, val_labels_expanded = list_to_spectrograms(
+            val_files, val_labels, msg="Generating validation dataset", 
+            augment=False, param=param, batch_size=preprocessing_batch_size
+        )
         
-        # Final validation check - this is where the error was occurring
-        print(f"DEBUG: Final validation - train_data shape: {train_data.shape if train_data is not None else 'None'}")
-        print(f"DEBUG: Final validation - val_data shape: {val_data.shape if val_data is not None else 'None'}")
+        test_labels_expanded = test_labels
         
-        if (train_data is None or val_data is None or 
-            not isinstance(train_data, np.ndarray) or not isinstance(val_data, np.ndarray) or
-            train_data.shape[0] == 0 or val_data.shape[0] == 0):
-            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-            print("DEBUG: Critical error - no valid training/validation data")
-            return  # Exit main() if no valid training/validation data
-
-        # If we get here, we have valid training and validation data
-        print("DEBUG: Validation passed - proceeding with training")
-        
-        # Print shapes
-        logger.info(f"Training data shape: {train_data.shape}")
-        logger.info(f"Training labels shape: {train_labels_expanded.shape}")
-        logger.info(f"Validation data shape: {val_data.shape}")
-        logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
-        logger.info(f"Number of test files: {len(test_files)}")
-
-        # Define target shape for spectrograms
-        target_shape = (param["feature"]["n_mels"], 96)
-        logger.info(f"Target spectrogram shape: {target_shape}")
-
-        # Preprocess to ensure consistent shapes
-        logger.info("Preprocessing training data...")
-        train_data = preprocess_spectrograms(train_data, target_shape)
-        logger.info(f"Preprocessed train data shape: {train_data.shape}")
-
-        logger.info("Preprocessing validation data...")
-        val_data = preprocess_spectrograms(val_data, target_shape)
-        logger.info(f"Preprocessed validation data shape: {val_data.shape}")
+        # Save processed data
+        print_with_timestamp("Saving processed data to pickle files...")
+        try:
+            save_pickle(train_pickle, train_data)
+            save_pickle(train_labels_pickle, train_labels_expanded)
+            save_pickle(val_pickle, val_data)
+            save_pickle(val_labels_pickle, val_labels_expanded)
+            save_pickle(test_files_pickle, test_files)
+            save_pickle(test_labels_pickle, test_labels_expanded)
+            print_with_timestamp("Successfully saved processed data")
+        except Exception as e:
+            print_with_timestamp(f"Error saving processed data: {e}")
+    
+    # Print data summary
+    print_with_timestamp("\n============== DATA SUMMARY ==============")
+    print_with_timestamp(f"Training data: {train_data.shape}, labels: {train_labels_expanded.shape}")
+    print_with_timestamp(f"Validation data: {val_data.shape}, labels: {val_labels_expanded.shape}")
+    print_with_timestamp(f"Test files: {len(test_files)}")
+    
+    # Configure mixed precision
+    print_with_timestamp("\n============== CONFIGURING MODEL ==============")
+    if param.get("training", {}).get("mixed_precision", True):
+        print_with_timestamp("Enabling mixed precision training")
+        mixed_precision.set_global_policy('mixed_float16')
+        print_with_timestamp(f"Mixed precision policy: {mixed_precision.global_policy()}")
+    
+    # Define target shape for model input
+    target_shape = (param["feature"]["n_mels"], 96)  # Default shape
+    print_with_timestamp(f"Using target shape: {target_shape}")
+    
+    # Create model
+    print_with_timestamp("Creating AST model...")
+    model = create_ast_model(
+        input_shape=target_shape,
+        config=param.get("model", {}).get("architecture", {})
+    )
+    
+    # Print model summary
+    print_with_timestamp("Model architecture:")
+    model.summary(print_fn=lambda x: print_with_timestamp(x))
+    
+    # Compile model
+    print_with_timestamp("Compiling model...")
+    model.compile(
+        optimizer=AdamW(
+            learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001),
+            weight_decay=0.01,
+            clipnorm=param.get("training", {}).get("gradient_clip_norm", 1.0)
+        ),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    # Setup callbacks
+    print_with_timestamp("Setting up training callbacks...")
+    callbacks = []
+    
+    # Early stopping
+    if param.get("fit", {}).get("early_stopping", {}).get("enabled", True):
+        callbacks.append(
+            tf.keras.callbacks.EarlyStopping(
+                monitor=param.get("fit", {}).get("early_stopping", {}).get("monitor", "val_loss"),
+                patience=param.get("fit", {}).get("early_stopping", {}).get("patience", 15),
+                min_delta=param.get("fit", {}).get("early_stopping", {}).get("min_delta", 0.001),
+                restore_best_weights=param.get("fit", {}).get("early_stopping", {}).get("restore_best_weights", True)
+            )
+        )
+        print_with_timestamp("Added early stopping callback")
+    
+    # Learning rate scheduler
+    if param.get("fit", {}).get("lr_scheduler", {}).get("enabled", True):
+        callbacks.append(
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor=param.get("fit", {}).get("lr_scheduler", {}).get("monitor", "val_loss"),
+                factor=param.get("fit", {}).get("lr_scheduler", {}).get("factor", 0.1),
+                patience=param.get("fit", {}).get("lr_scheduler", {}).get("patience", 5),
+                min_delta=param.get("fit", {}).get("lr_scheduler", {}).get("min_delta", 0.001),
+                cooldown=param.get("fit", {}).get("lr_scheduler", {}).get("cooldown", 2),
+                min_lr=param.get("fit", {}).get("lr_scheduler", {}).get("min_lr", 0.00000001)
+            )
+        )
+        print_with_timestamp("Added learning rate scheduler callback")
+    
+    # Model checkpointing
+    if param.get("fit", {}).get("checkpointing", {}).get("enabled", True):
+        callbacks.append(
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=f"{param['model_directory']}/best_model.keras",
+                monitor=param.get("fit", {}).get("checkpointing", {}).get("monitor", "val_accuracy"),
+                mode=param.get("fit", {}).get("checkpointing", {}).get("mode", "max"),
+                save_best_only=param.get("fit", {}).get("checkpointing", {}).get("save_best_only", True)
+            )
+        )
+        print_with_timestamp("Added model checkpoint callback")
+    
+    # Create TensorFlow datasets
+    print_with_timestamp("\n============== CREATING TENSORFLOW DATASETS ==============")
+    batch_size = param.get("fit", {}).get("batch_size", 8)
+    
+    print_with_timestamp(f"Creating training dataset with batch size {batch_size}...")
+    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+    train_dataset = train_dataset.batch(batch_size).shuffle(1000).prefetch(tf.data.AUTOTUNE)
+    
+    print_with_timestamp("Creating validation dataset...")
+    val_dataset = tf.data.Dataset.from_tensor_slices((val_data, val_labels_expanded))
+    val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    
+    # Start training
+    print_with_timestamp("\n============== STARTING MODEL TRAINING ==============")
+    print_with_timestamp(f"Training for {param['fit']['epochs']} epochs...")
+    
+    history = model.fit(
+        train_dataset,
+        epochs=param["fit"]["epochs"],
+        validation_data=val_dataset,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    # Save trained model
+    print_with_timestamp("\n============== SAVING MODEL ==============")
+    try:
+        model.save(f"{param['model_directory']}/final_model.keras")
+        print_with_timestamp("Model saved successfully!")
+    except Exception as e:
+        print_with_timestamp(f"Error saving model: {e}")
+    
+    # Plot training history
+    print_with_timestamp("\n============== VISUALIZING RESULTS ==============")
+    visualizer.loss_plot(history)
+    visualizer.save_figure(f"{param['result_directory']}/training_history.png")
+    print_with_timestamp(f"Training history plot saved to {param['result_directory']}/training_history.png")
+    
+    # Calculate training time
+    total_time = time.time() - start_time
+    hours, remainder = divmod(total_time, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print_with_timestamp(f"\nTotal training time: {int(hours)}h {int(minutes)}m {int(seconds)}s")
+    
+    print_with_timestamp("\n============== TRAINING COMPLETE ==============")
+    return

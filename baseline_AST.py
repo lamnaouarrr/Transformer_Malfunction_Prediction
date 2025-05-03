@@ -2269,7 +2269,7 @@ def main():
     # If we didn't successfully load from pickle, generate the dataset
     if (train_data is None or not isinstance(train_data, np.ndarray) or train_data.size == 0 or 
         val_data is None or not isinstance(val_data, np.ndarray) or val_data.size == 0 or 
-        not test_files or len(test_files) == 0):
+        test_files is None or len(test_files) == 0):
         print("DEBUG: Need to generate dataset from scratch")
         logger.info("Generating new dataset...")
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
@@ -2290,20 +2290,20 @@ def main():
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
     else:
-        # When loading from pickle files, we don't need to process files again
-        print("DEBUG: Successfully loaded data from pickle files, using directly")
+        # Successfully loaded pickle data
+        print("DEBUG: Successfully loaded data from pickle files")
         logger.info("Using successfully loaded pickle data for training")
         train_files = []  # Empty list since we're using the pickle data directly
         val_files = []    # Empty list since we're using the pickle data directly
         
-        # Skip test data processing - it's unnecessary when we have pickle data
+        # Skip preprocessing and go directly to training with loaded data
+        print(f"DEBUG: train_data shape: {train_data.shape}")
+        print(f"DEBUG: val_data shape: {val_data.shape}")
+        print(f"DEBUG: Skipping preprocessing for test files in pickle mode")
+
+        # We'll skip the test file processing below
         process_test_files = False
-        test_data = None
-        
-        # Jump directly to the training phase, bypassing preprocessing
-        print("DEBUG: Skipping directly to training phase with loaded data")
-        # We'll add more code to properly handle this later
-        
+
     # Process test data only if needed (not on pickle mode)
     process_test_files = not (train_data is not None and val_data is not None)
     print(f"DEBUG: process_test_files = {process_test_files}")

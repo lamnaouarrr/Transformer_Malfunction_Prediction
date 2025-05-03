@@ -2194,14 +2194,57 @@ def main():
     if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
         os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
         os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
-        train_data = load_pickle(train_pickle)
-        train_labels = load_pickle(train_labels_pickle)
-        val_data = load_pickle(val_pickle)
-        val_labels = load_pickle(val_labels_pickle)
-        test_files = load_pickle(test_files_pickle)
-        test_labels = load_pickle(test_labels_pickle)
+        logger.info("Loading preprocessed data from pickle files...")
+        try:
+            train_data = load_pickle(train_pickle)
+            train_labels = load_pickle(train_labels_pickle)
+            val_data = load_pickle(val_pickle)
+            val_labels = load_pickle(val_labels_pickle)
+            test_files = load_pickle(test_files_pickle)
+            test_labels = load_pickle(test_labels_pickle)
+            
+            # Validate loaded data
+            logger.info(f"Loaded train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'unknown'}")
+            logger.info(f"Loaded train_labels shape: {train_labels.shape if hasattr(train_labels, 'shape') else 'unknown'}")
+            logger.info(f"Loaded val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'unknown'}")
+            logger.info(f"Loaded val_labels shape: {val_labels.shape if hasattr(val_labels, 'shape') else 'unknown'}")
+            logger.info(f"Number of loaded test files: {len(test_files)}")
+            
+            # Verify data is not empty
+            if (hasattr(train_data, 'shape') and train_data.shape[0] == 0) or (not hasattr(train_data, 'shape') and not train_data):
+                logger.error("Loaded train_data is empty - will regenerate dataset")
+                raise ValueError("Empty train_data")
+                
+            if (hasattr(val_data, 'shape') and val_data.shape[0] == 0) or (not hasattr(val_data, 'shape') and not val_data):
+                logger.error("Loaded val_data is empty - will regenerate dataset")
+                raise ValueError("Empty val_data")
+                
+            if not test_files or len(test_files) == 0:
+                logger.warning("Loaded test_files is empty - will regenerate dataset")
+                raise ValueError("Empty test_files")
+                
+        except Exception as e:
+            logger.error(f"Error loading pickle files: {e}. Will regenerate dataset.")
+            # Fall through to regenerate dataset
+            train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
     else:
+        logger.info("Pickle files not found. Will generate new dataset.")
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+
+    # If we didn't successfully load from pickle, generate the dataset
+    if not train_data or not val_data or not test_files or len(train_files) == 0:
+        logger.info("Generating new dataset...")
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
+        
+        # Print details about generated dataset
+        logger.info(f"Generated train files: {len(train_files)}")
+        logger.info(f"Generated val files: {len(val_files)}")
+        logger.info(f"Generated test files: {len(test_files)}")
+        
+        if 'train_data' in locals(): 
+            del train_data
+        if 'val_data' in locals():
+            del val_data
 
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
             logger.error(f"No files found for {evaluation_result_key}, skipping...")

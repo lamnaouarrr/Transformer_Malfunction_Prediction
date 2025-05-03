@@ -1576,7 +1576,7 @@ def create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50, min_l
     
     return lr_schedule
 
-@tf.function
+@tf.function(jit_compile=True)  # Enable XLA compilation for this function
 def train_step_with_accumulation(model, optimizer, loss_fn, x, y, accumulated_gradients, first_batch, accum_steps):
     # Cast inputs to float32
     x = tf.cast(x, tf.float32)
@@ -1607,7 +1607,7 @@ def train_step_with_accumulation(model, optimizer, loss_fn, x, y, accumulated_gr
     
     return loss, accuracy
 
-@tf.function
+@tf.function(jit_compile=True)  # Enable XLA compilation for this function
 def val_step(model, loss_fn, x, y):
     # Cast inputs to float32
     x = tf.cast(x, tf.float32)

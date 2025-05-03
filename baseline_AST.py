@@ -2275,6 +2275,12 @@ def main():
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
+    else:
+        # When loading from pickle files, we don't need to generate file lists
+        # But we still need to keep track of count for training phase
+        logger.info("Using successfully loaded pickle data for training")
+        train_files = []  # Empty list since we're using the pickle data directly
+        val_files = []    # Empty list since we're using the pickle data directly
 
     debug_mode = param.get("debug", {}).get("enabled", False)
     debug_sample_size = param.get("debug", {}).get("sample_size", 100)

@@ -441,7 +441,6 @@ def file_to_spectrogram(file_name,
         return None
 
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
-
     """
     Process a list of files into spectrograms with optional labels - memory optimized version
     """
@@ -449,6 +448,22 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     n_fft = param.get("feature", {}).get("n_fft", 1024)
     hop_length = param.get("feature", {}).get("hop_length", 512)
     power = param.get("feature", {}).get("power", 2.0)
+    
+    # Handle edge case of empty file list - return empty arrays with correct shapes
+    if not file_list or len(file_list) == 0:
+        # Use target shape from parameters if available
+        target_shape = param.get("feature", {}).get("target_shape", [64, 96])
+        if isinstance(target_shape, (list, tuple)) and len(target_shape) == 2:
+            shape = target_shape
+        else:
+            shape = (n_mels, 64)  # Default shape
+            
+        logger.info(f"Empty file list provided to list_to_spectrograms, returning empty array with shape ({0}, {shape[0]}, {shape[1]})")
+        empty_specs = np.zeros((0, shape[0], shape[1]), dtype=np.float32)
+        if labels is not None:
+            empty_labels = np.array([], dtype=np.float32)
+            return empty_specs, empty_labels
+        return empty_specs
     
     # First pass: determine dimensions and count valid files
     valid_files = []
@@ -483,6 +498,15 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         max_time = ((max_time + 7) // 8) * 8
     
     logger.info(f"Using target shape: ({max_freq}, {max_time})")
+    
+    # Check if we have any valid files
+    if not valid_files:
+        logger.warning("No valid files found after dimension check")
+        empty_specs = np.zeros((0, max_freq, max_time), dtype=np.float32)
+        if labels is not None:
+            empty_labels = np.array([], dtype=np.float32)
+            return empty_specs, empty_labels
+        return empty_specs
     
     # Second pass: process files in batches
     total_valid = len(valid_files)

@@ -1613,118 +1613,125 @@ def main():
         os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
         os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
         train_data = load_pickle(train_pickle)
-        train_labels = load_pickle(train_labels_pickle)
+        train_labels_expanded = load_pickle(train_labels_pickle)
         val_data = load_pickle(val_pickle)
-        val_labels = load_pickle(val_labels_pickle)
+        val_labels_expanded = load_pickle(val_labels_pickle)
         test_files = load_pickle(test_files_pickle)
         test_labels = load_pickle(test_labels_pickle)
         
         # Debug info to check loaded pickle data
         print(f"DEBUG: Loaded pickle data shapes:")
         print(f"  - Train data: {train_data.shape if hasattr(train_data, 'shape') else 'No shape'}")
-        print(f"  - Train labels: {train_labels.shape if hasattr(train_labels, 'shape') else 'No shape'}")
+        print(f"  - Train labels: {train_labels_expanded.shape if hasattr(train_labels_expanded, 'shape') else 'No shape'}")
         print(f"  - Val data: {val_data.shape if hasattr(val_data, 'shape') else 'No shape'}")
-        print(f"  - Val labels: {val_labels.shape if hasattr(val_labels, 'shape') else 'No shape'}")
+        print(f"  - Val labels: {val_labels_expanded.shape if hasattr(val_labels_expanded, 'shape') else 'No shape'}")
         print(f"  - Test files: {len(test_files) if isinstance(test_files, list) else 'Not a list'}")
         print(f"  - Test labels: {test_labels.shape if hasattr(test_labels, 'shape') else 'No shape'}")
         
-        # Skip debug mode if we've already loaded the pickles
-        debug_mode = False
-        logger.info("Using pre-existing pickle files, debug mode disabled")
+        # Skip debug mode entirely when using pre-existing pickle files
+        logger.info("Using pre-existing pickle files, skipping data generation and debug mode")
+        
+        # Verification of loaded data
+        if hasattr(train_data, 'shape') and train_data.shape[0] == 0:
+            logger.error("Loaded training data is empty! Check pickle files.")
+            return
+        
+        if hasattr(val_data, 'shape') and val_data.shape[0] == 0:
+            logger.error("Loaded validation data is empty! Check pickle files.")
+            return
+            
+        # Skip to normalization step
+        print("============== USING EXISTING PICKLED DATA ==============")
     else:
+        # Only use debug mode when generating new data
+        debug_mode = param.get("debug", {}).get("enabled", False)
+        debug_sample_size = param.get("debug", {}).get("sample_size", 100)
+        
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
 
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
+            
+        if debug_mode:
+            logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
+            train_files, train_labels = create_small_dataset(train_files, train_labels, debug_sample_size)
+            val_files, val_labels = create_small_dataset(val_files, val_labels, debug_sample_size // 2)
+            test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
+            
+            logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
 
+        preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
+        chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
+        chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
 
-    debug_mode = param.get("debug", {}).get("enabled", False)
-    debug_sample_size = param.get("debug", {}).get("sample_size", 100)
+        # For training data
+        if chunking_enabled and len(train_files) > chunk_size:
+            logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
+            train_data, train_labels_expanded = process_dataset_in_chunks(
+                train_files,
+                train_labels,
+                chunk_size=chunk_size,
+                param=param
+            )
+        else:
+            train_data, train_labels_expanded = list_to_spectrograms(
+                train_files,
+                train_labels,
+                msg="generate train_dataset",
+                augment=True,
+                param=param,
+                batch_size=preprocessing_batch_size
+            )
 
+        # For validation data
+        if chunking_enabled and len(val_files) > chunk_size:
+            logger.info(f"Processing validation data in chunks (dataset size: {len(val_files)} files)")
+            val_data, val_labels_expanded = process_dataset_in_chunks(
+                val_files,
+                val_labels,
+                chunk_size=chunk_size,
+                param=param
+            )
+        else:
+            val_data, val_labels_expanded = list_to_spectrograms(
+                val_files,
+                val_labels,
+                msg="generate validation_dataset",
+                augment=False,
+                param=param,
+                batch_size=preprocessing_batch_size
+            )
 
-    if debug_mode:
-        logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
-        train_files, train_labels = create_small_dataset(train_files, train_labels, debug_sample_size)
-        val_files, val_labels = create_small_dataset(val_files, val_labels, debug_sample_size // 2)
-        test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
-        
-        logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
+        # For test data
+        if chunking_enabled and len(test_files) > chunk_size:
+            logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
+            test_data, test_labels_expanded = process_dataset_in_chunks(
+                test_files,
+                test_labels,
+                chunk_size=chunk_size,
+                param=param
+            )
+        else:
+            test_data, test_labels_expanded = list_to_spectrograms(
+                test_files,
+                test_labels,
+                msg="generate test_dataset",
+                augment=False,
+                param=param,
+                batch_size=preprocessing_batch_size
+            )
 
+        if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
+            return  # Exit main() if no valid training/validation data
 
-    preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
-    chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
-    chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
-
-    # For training data
-    if chunking_enabled and len(train_files) > chunk_size:
-        logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
-        train_data, train_labels_expanded = process_dataset_in_chunks(
-            train_files,
-            train_labels,
-            chunk_size=chunk_size,
-            param=param
-        )
-    else:
-        train_data, train_labels_expanded = list_to_spectrograms(
-            train_files,
-            train_labels,
-            msg="generate train_dataset",
-            augment=True,
-            param=param,
-            batch_size=preprocessing_batch_size
-        )
-
-    # For validation data
-    if chunking_enabled and len(val_files) > chunk_size:
-        logger.info(f"Processing validation data in chunks (dataset size: {len(val_files)} files)")
-        val_data, val_labels_expanded = process_dataset_in_chunks(
-            val_files,
-            val_labels,
-            chunk_size=chunk_size,
-            param=param
-        )
-    else:
-        val_data, val_labels_expanded = list_to_spectrograms(
-            val_files,
-            val_labels,
-            msg="generate validation_dataset",
-            augment=False,
-            param=param,
-            batch_size=preprocessing_batch_size
-        )
-
-    # For test data
-    if chunking_enabled and len(test_files) > chunk_size:
-        logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
-        test_data, test_labels_expanded = process_dataset_in_chunks(
-            test_files,
-            test_labels,
-            chunk_size=chunk_size,
-            param=param
-        )
-    else:
-        test_data, test_labels_expanded = list_to_spectrograms(
-            test_files,
-            test_labels,
-            msg="generate test_dataset",
-            augment=False,
-            param=param,
-            batch_size=preprocessing_batch_size
-        )
-
-
-
-    if train_data.shape[0] == 0 or val_data.shape[0] == 0:
-        logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-        return  # Exit main() if no valid training/validation data
-
-    save_pickle(train_pickle, train_data)
-    save_pickle(train_labels_pickle, train_labels_expanded)
-    save_pickle(val_pickle, val_data)
-    save_pickle(val_labels_pickle, val_labels_expanded)
-    save_pickle(test_files_pickle, test_files)
-    save_pickle(test_labels_pickle, test_labels)
+        save_pickle(train_pickle, train_data)
+        save_pickle(train_labels_pickle, train_labels_expanded)
+        save_pickle(val_pickle, val_data)
+        save_pickle(val_labels_pickle, val_labels_expanded)
+        save_pickle(test_files_pickle, test_files)
+        save_pickle(test_labels_pickle, test_labels)
 
     # Print shapes
     logger.info(f"Training data shape: {train_data.shape}")

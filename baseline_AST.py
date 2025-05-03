@@ -1466,37 +1466,37 @@ def verify_gpu_usage():
         return False
 
 
+def save_test_data(file_path, test_data, test_labels):
+    """Save test data and labels to avoid reprocessing every time"""
+    try:
+        logger.info(f"Saving processed test data to {file_path}")
+        np.savez_compressed(
+            file_path,
+            test_data=test_data,
+            test_labels=test_labels
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error saving test data: {e}")
+        return False
+
+def load_test_data(file_path):
+    """Load processed test data if available"""
+    try:
+        if os.path.exists(file_path):
+            logger.info(f"Loading processed test data from {file_path}")
+            data = np.load(file_path)
+            return data['test_data'], data['test_labels']
+        return None, None
+    except Exception as e:
+        logger.error(f"Error loading test data: {e}")
+        return None, None
+
+
 def main():
     # Set memory growth before any other TensorFlow operations
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
-        for device in physical_devices:
-            try:
-                # Enable memory growth for better memory management
-                tf.config.experimental.set_memory_growth(device, True)
-                logger.info(f"Enabled memory growth for {device}")
-            except Exception as e:
-                logger.warning(f"Could not set memory growth for {device}: {e}")
-        
-        # Verify GPU is being used
-        logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
-        logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
-    
-    # Configure GPU memory for V100 32GB
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            # Allow TensorFlow to allocate memory as needed, but set a growth limit
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info("GPU memory growth enabled for V100")
-        except RuntimeError as e:
-            logger.error(f"Error setting GPU memory growth: {e}")
-
-
-
-    with open("baseline_AST.yaml", "r") as stream:
-        param = yaml.safe_load(stream)
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
     abnormal_dir = Path(param["base_directory"]) / "abnormal"

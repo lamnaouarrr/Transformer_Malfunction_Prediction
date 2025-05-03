@@ -1504,8 +1504,10 @@ def main():
             except Exception as e:
                 logger.warning(f"Could not set memory growth for {device}: {e}")
         
-        logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
-        logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
+        # Replace deprecated is_gpu_available with recommended approach
+        gpu_available = len(physical_devices) > 0
+        logger.info(f"TensorFlow is using GPU: {gpu_available}")
+        logger.info(f"Available GPUs: {physical_devices}")
     
     # Load parameters from YAML file first
     with open("baseline_AST.yaml", "r") as stream:

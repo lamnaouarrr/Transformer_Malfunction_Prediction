@@ -576,7 +576,7 @@ def dataset_generator(target_dir, param=None):
             db = parts[1]
             machine_type = parts[2]
             machine_id_with_file = parts[3]
-            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
+            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id
             
             key = (db, machine_type, machine_id)
             
@@ -1152,15 +1152,36 @@ def monitor_gpu_usage():
     """
     try:
         import subprocess
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], 
+        import tensorflow as tf
+        
+        # Get GPU device information from TensorFlow
+        gpus = tf.config.list_physical_devices('GPU')
+        if not gpus:
+            logger.warning("No GPUs detected by TensorFlow")
+            return None, None, None
+            
+        # Get GPU memory usage using nvidia-smi
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits'], 
                                stdout=subprocess.PIPE, text=True)
         memory_info = result.stdout.strip().split(',')
+        
+        # Parse the memory information
         used_memory = int(memory_info[0])
         total_memory = int(memory_info[1])
+        gpu_utilization = int(memory_info[2]) if len(memory_info) > 2 else 0
+        
         usage_percent = (used_memory / total_memory) * 100
         
+        # Log detailed GPU information
         logger.info(f"GPU Memory: {used_memory}MB / {total_memory}MB ({usage_percent:.1f}%)")
+        logger.info(f"GPU Utilization: {gpu_utilization}%")
+        
+        # Print to console as well for immediate visibility
+        print(f"GPU Memory: {used_memory}MB / {total_memory}MB ({usage_percent:.1f}%)")
+        print(f"GPU Utilization: {gpu_utilization}%")
+        
         return used_memory, total_memory, usage_percent
+        
     except Exception as e:
         logger.warning(f"Failed to monitor GPU usage: {e}")
         return None, None, None
@@ -1341,11 +1362,110 @@ def create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50, min_l
     return lr_schedule
 
 
+def verify_gpu_usage_during_training():
+    """Monitor GPU usage during training to ensure the GPU is being used"""
+    try:
+        # Check GPU memory usage with nvidia-smi
+        import subprocess
+        import time
+        
+        # Print initial GPU status
+        print("\n==== GPU STATUS BEFORE TRAINING OPERATIONS ====")
+        subprocess.run(['nvidia-smi'], check=True)
+        
+        # Run a small test operation that should use the GPU
+        print("\n==== PERFORMING TEST OPERATIONS ON GPU ====")
+        import tensorflow as tf
+        import numpy as np
+        
+        # Create two large tensors and perform matrix multiplication
+        with tf.device('/GPU:0'):
+            # Create large tensors to ensure GPU is utilized
+            a = tf.random.normal([1000, 1000])
+            b = tf.random.normal([1000, 1000])
+            
+            # Time the operation
+            start_time = time.time()
+            # Perform multiple operations to ensure GPU utilization
+            for _ in range(10):
+                c = tf.matmul(a, b)
+                c = tf.nn.relu(c)
+            
+            # Force evaluation
+            result = c.numpy()
+            end_time = time.time()
+            
+        print(f"Matrix operation completed in {end_time - start_time:.4f} seconds")
+        print(f"Result shape: {result.shape}, device: {c.device}")
+        
+        # Check GPU memory usage after operation
+        print("\n==== GPU STATUS AFTER TRAINING OPERATIONS ====")
+        subprocess.run(['nvidia-smi'], check=True)
+        
+        # If the operation happened on GPU, it should be fast
+        gpu_working = 'GPU' in c.device
+        
+        if gpu_working and (end_time - start_time) < 2.0:
+            print("✓ GPU is properly working and performing calculations")
+            return True
+        elif gpu_working:
+            print("⚠ GPU is being used but performing slowly")
+            return True
+        else:
+            print("❌ Operations are not running on GPU")
+            return False
+        
+    except Exception as e:
+        print(f"Error during GPU verification: {e}")
+        return False
 
 
 ########################################################################
 # main
 ########################################################################
+def verify_gpu_usage():
+    """Verify that TensorFlow is properly using the GPU"""
+    # Create a simple test tensor and operation
+    try:
+        import tensorflow as tf
+        
+        # Print available physical devices to confirm GPU detection
+        physical_devices = tf.config.list_physical_devices()
+        print(f"Available physical devices:")
+        for device in physical_devices:
+            print(f"  {device.name} - {device.device_type}")
+            
+        gpus = tf.config.list_physical_devices('GPU')
+        print(f"Available GPUs: {len(gpus)}")
+        
+        if not gpus:
+            logger.warning("No GPUs detected by TensorFlow!")
+            return False
+            
+        # Try a simple matrix operation on GPU
+        with tf.device('/GPU:0'):
+            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
+            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
+            c = tf.matmul(a, b)
+        
+        # Check if the operation was executed on GPU
+        print(f"Test tensor operation result: {c}")
+        print(f"Test tensor device: {c.device}")
+        if 'GPU' in c.device:
+            logger.info("✓ GPU is properly configured and being used")
+            print("✓ GPU is properly configured and being used")
+            return True
+        else:
+            logger.warning("⚠ GPU is not being used for tensor operations!")
+            print("⚠ GPU is not being used for tensor operations!")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error checking GPU usage: {e}")
+        print(f"Error checking GPU usage: {e}")
+        return False
+
+
 def main():
     # Set memory growth before any other TensorFlow operations
     physical_devices = tf.config.list_physical_devices('GPU')
@@ -1498,6 +1618,19 @@ def main():
         val_labels = load_pickle(val_labels_pickle)
         test_files = load_pickle(test_files_pickle)
         test_labels = load_pickle(test_labels_pickle)
+        
+        # Debug info to check loaded pickle data
+        print(f"DEBUG: Loaded pickle data shapes:")
+        print(f"  - Train data: {train_data.shape if hasattr(train_data, 'shape') else 'No shape'}")
+        print(f"  - Train labels: {train_labels.shape if hasattr(train_labels, 'shape') else 'No shape'}")
+        print(f"  - Val data: {val_data.shape if hasattr(val_data, 'shape') else 'No shape'}")
+        print(f"  - Val labels: {val_labels.shape if hasattr(val_labels, 'shape') else 'No shape'}")
+        print(f"  - Test files: {len(test_files) if isinstance(test_files, list) else 'Not a list'}")
+        print(f"  - Test labels: {test_labels.shape if hasattr(test_labels, 'shape') else 'No shape'}")
+        
+        # Skip debug mode if we've already loaded the pickles
+        debug_mode = False
+        logger.info("Using pre-existing pickle files, debug mode disabled")
     else:
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
 
@@ -1669,6 +1802,12 @@ def main():
 
 
 
+    print("\n============== VERIFYING GPU CONFIGURATION BEFORE TRAINING ==============")
+    verify_gpu_usage()
+    verify_gpu_usage_during_training()
+    print("\n============== GPU MEMORY USAGE BEFORE MODEL CREATION ==============")
+    monitor_gpu_usage()
+    
     # Configure mixed precision
     mixed_precision_enabled = configure_mixed_precision(
         enabled=param.get("training", {}).get("mixed_precision", False)
@@ -1680,6 +1819,28 @@ def main():
         config=param.get("model", {}).get("architecture", {})
     )
 
+    # Add debug prints for data verification
+    print("\n============== TRAINING DATA DEBUG INFO ==============")
+    print(f"Training data shape: {train_data.shape}, dtype: {train_data.dtype}")
+    print(f"Training labels shape: {train_labels_expanded.shape}, dtype: {train_labels_expanded.dtype}")
+    print(f"Min/Max values - Train data: {np.min(train_data):.4f}/{np.max(train_data):.4f}")
+    print(f"Min/Max values - Train labels: {np.min(train_labels_expanded) if len(train_labels_expanded) > 0 else 'N/A'}/{np.max(train_labels_expanded) if len(train_labels_expanded) > 0 else 'N/A'}")
+    print(f"Class distribution - Normal: {np.sum(train_labels_expanded == 0)}, Abnormal: {np.sum(train_labels_expanded == 1)}")
+    
+    print("\n============== VALIDATION DATA DEBUG INFO ==============")
+    print(f"Validation data shape: {val_data.shape}, dtype: {val_data.dtype}")
+    print(f"Validation labels shape: {val_labels_expanded.shape}, dtype: {val_labels_expanded.dtype}")
+    print(f"Class distribution - Normal: {np.sum(val_labels_expanded == 0)}, Abnormal: {np.sum(val_labels_expanded == 1)}")
+    
+    # Verify that data is non-zero and properly loaded
+    if np.all(train_data == 0) or np.all(val_data == 0):
+        print("WARNING: Training or validation data contains all zeros! Check data loading.")
+    
+    if len(train_labels_expanded) == 0 or len(val_labels_expanded) == 0:
+        print("WARNING: No training or validation labels! Check label loading.")
+    
+    # After model creation, monitor GPU memory again
+    print("\n============== GPU MEMORY USAGE AFTER MODEL CREATION ==============")
     monitor_gpu_usage()
 
     #debug
@@ -1827,23 +1988,6 @@ def main():
 
 
 
-
-    def verify_gpu_usage():
-        """Verify that TensorFlow is properly using the GPU"""
-        # Create a simple test tensor and operation
-        with tf.device('/GPU:0'):
-            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
-            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
-            c = tf.matmul(a, b)
-        
-        # Check if the operation was executed on GPU
-        logger.info(f"Test tensor device: {c.device}")
-        if 'GPU' in c.device:
-            logger.info("âœ“ GPU is properly configured and being used")
-        else:
-            logger.warning("âš  GPU is not being used for tensor operations!")
-        
-        return 'GPU' in c.device
 
     print("============== VERIFYING GPU USAGE ==============")
     is_gpu_working = verify_gpu_usage()

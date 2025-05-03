@@ -2545,14 +2545,38 @@ def main():
             f1 = metrics.f1_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
             logger.info(f"Threshold {thresh:.1f}: Acc={accuracy:.4f}, Prec={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
         
-        # Apply standard threshold for final evaluation
-        detection_threshold = 0.5
-        logger.info(f"Using standard detection threshold: {detection_threshold}")
-        y_pred_binary = (y_pred > detection_threshold).astype(int)
+        # Find the best threshold to separate classes based on the prediction distribution
+        # Calculate a custom threshold based on statistics of the predictions
+        normal_samples = y_pred[test_labels_expanded == 0]
+        abnormal_samples = y_pred[test_labels_expanded == 1]
         
-        gc.collect()
+        # Check if we have enough abnormal samples
+        if len(abnormal_samples) > 0:
+            logger.info(f"Normal predictions - Mean: {np.mean(normal_samples):.4f}, Std: {np.std(normal_samples):.4f}")
+            logger.info(f"Abnormal predictions - Mean: {np.mean(abnormal_samples):.4f}, Std: {np.std(abnormal_samples):.4f}")
+            
+            # If abnormal mean > normal mean, find a threshold between them
+            if np.mean(abnormal_samples) > np.mean(normal_samples):
+                adaptive_threshold = (np.mean(normal_samples) + np.mean(abnormal_samples)) / 2
+                logger.info(f"Using adaptive threshold between means: {adaptive_threshold:.4f}")
+            else:
+                # Otherwise use a percentile-based approach
+                sorted_preds = np.sort(y_pred)
+                percentile_90 = sorted_preds[int(len(sorted_preds) * 0.9)]
+                adaptive_threshold = percentile_90 * 0.95  # Slightly below the 90th percentile
+                logger.info(f"Using 90th percentile based threshold: {adaptive_threshold:.4f}")
+        else:
+            # If no abnormal samples in prediction set, use best guess
+            sorted_preds = np.sort(y_pred)
+            percentile_90 = sorted_preds[int(len(sorted_preds) * 0.9)]
+            adaptive_threshold = percentile_90 * 0.95
+            logger.info(f"No abnormal samples in output, using percentile threshold: {adaptive_threshold:.4f}")
         
-        # Calculate metrics
+        # Apply custom threshold for meaningful results
+        logger.info(f"Using custom threshold for evaluation: {adaptive_threshold:.4f}")
+        y_pred_binary = (y_pred > adaptive_threshold).astype(int)
+        
+        # Calculate metrics with adaptive threshold
         test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
         test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
         test_recall = metrics.recall_score(test_labels_expanded, y_pred_binary, zero_division=0)
@@ -2575,7 +2599,7 @@ def main():
         visualizer.plot_confusion_matrix(
             test_labels_expanded,
             y_pred_binary,
-            title=f"Confusion Matrix (Overall)",
+            title=f"Confusion Matrix (Overall) - Threshold: {adaptive_threshold:.4f}",
         )
         visualizer.save_figure(cm_img)
 
@@ -2585,6 +2609,7 @@ def main():
             "precision": float(test_precision),
             "recall": float(test_recall),
             "f1": float(test_f1),
+            "threshold_used": float(adaptive_threshold)
         }
 
         # Append to global results

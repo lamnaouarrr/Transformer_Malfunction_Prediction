@@ -2232,7 +2232,9 @@ def main():
         train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
 
     # If we didn't successfully load from pickle, generate the dataset
-    if not train_data or not val_data or not test_files or len(train_files) == 0:
+    if (not isinstance(train_data, np.ndarray) or train_data.size == 0 or 
+        not isinstance(val_data, np.ndarray) or val_data.size == 0 or 
+        not test_files or len(test_files) == 0):
         logger.info("Generating new dataset...")
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
         

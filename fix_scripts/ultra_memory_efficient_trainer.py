@@ -325,10 +325,47 @@ class GradientAccumulationModel:
         # Create gradient accumulators
         self.accum_grads = [tf.Variable(tf.zeros_like(var), trainable=False) for var in self.trainable_vars]
         
-        # Store metric names - fix for AttributeError issue
+        # Store metric names
         self.metric_names = ["accuracy", "auc"]
         
+        # Create metric objects outside of tf.function to avoid variable creation issues
+        self.train_loss = tf.keras.metrics.Mean(name='train_loss')
+        self.train_accuracy = tf.keras.metrics.BinaryAccuracy(name='train_accuracy')
+        self.train_auc = tf.keras.metrics.AUC(name='train_auc')
+        
+        self.val_loss = tf.keras.metrics.Mean(name='val_loss')
+        self.val_accuracy = tf.keras.metrics.BinaryAccuracy(name='val_accuracy')
+        self.val_auc = tf.keras.metrics.AUC(name='val_auc')
+        
+        # Initialize the train step to make TF trace it on first call
+        # This will prevent the variable creation error on subsequent calls
+        dummy_x = tf.ones((1, model.input_shape[1], model.input_shape[2]), 
+                         dtype=tf.float16 if mixed_precision.global_policy().name == 'mixed_float16' else tf.float32)
+        dummy_y = tf.zeros((1,), dtype=tf.float32)
+        self._initialize_train_step(dummy_x, dummy_y)
+        self._initialize_test_step(dummy_x, dummy_y)
+        
         print(f"Created gradient accumulation model with {accumulation_steps} accumulation steps")
+    
+    def _initialize_train_step(self, dummy_x, dummy_y):
+        """Initialize the train step function with dummy data"""
+        # This triggers function tracing once, so that variables are created only the first time
+        self.train_step(dummy_x, dummy_y, 0)
+        # Clear metrics after initialization
+        self.train_loss.reset_states()
+        self.train_accuracy.reset_states()
+        self.train_auc.reset_states()
+        # Clear accumulated gradients
+        self.reset_gradients()
+    
+    def _initialize_test_step(self, dummy_x, dummy_y):
+        """Initialize the test step function with dummy data"""
+        # This triggers function tracing once, so that variables are created only the first time
+        self.test_step(dummy_x, dummy_y)
+        # Clear metrics after initialization
+        self.val_loss.reset_states()
+        self.val_accuracy.reset_states()
+        self.val_auc.reset_states()
     
     def reset_gradients(self):
         """Reset accumulated gradients to zero"""
@@ -365,14 +402,17 @@ class GradientAccumulationModel:
             # Reset gradients
             self.reset_gradients()
         
-        # Update metrics - fixed to use indices instead of names
-        metrics = {}
-        metrics['loss'] = loss
+        # Update metrics using the metrics objects
+        self.train_loss(loss)
+        self.train_accuracy(y, predictions)
+        self.train_auc(y, predictions)
         
-        # Calculate metrics directly instead of using __name__ attribute
-        metrics['accuracy'] = self.metric_fns[0](y, predictions)
-        if len(self.metric_fns) > 1:
-            metrics['auc'] = self.metric_fns[1](y, predictions)
+        # Return metrics dictionary
+        metrics = {
+            'loss': self.train_loss.result(),
+            'accuracy': self.train_accuracy.result(),
+            'auc': self.train_auc.result()
+        }
         
         return metrics
     
@@ -384,16 +424,30 @@ class GradientAccumulationModel:
         # Calculate loss
         loss = self.loss_fn(y, predictions)
         
-        # Update metrics - fixed to use indices instead of names
-        metrics = {}
-        metrics['loss'] = loss
+        # Update metrics using the metrics objects
+        self.val_loss(loss)
+        self.val_accuracy(y, predictions)
+        self.val_auc(y, predictions)
         
-        # Calculate metrics directly instead of using __name__ attribute
-        metrics['accuracy'] = self.metric_fns[0](y, predictions)
-        if len(self.metric_fns) > 1:
-            metrics['auc'] = self.metric_fns[1](y, predictions)
+        # Return metrics dictionary
+        metrics = {
+            'loss': self.val_loss.result(),
+            'accuracy': self.val_accuracy.result(),
+            'auc': self.val_auc.result()
+        }
         
         return metrics
+        
+    def reset_metrics(self, training=True):
+        """Reset metric states"""
+        if training:
+            self.train_loss.reset_states()
+            self.train_accuracy.reset_states()
+            self.train_auc.reset_states()
+        else:
+            self.val_loss.reset_states()
+            self.val_accuracy.reset_states()
+            self.val_auc.reset_states()
 
 # Load dataset statistics or calculate them if needed
 def get_dataset_statistics(train_pickle, target_shape, sample_size=1000):
@@ -486,6 +540,11 @@ def main():
     # Get dataset statistics for normalization
     mean, std = get_dataset_statistics(train_pickle, target_shape)
     
+    # Handle infinity values in std - this can happen with spectrograms
+    if not np.isfinite(std) or std == 0:
+        print("Warning: Standard deviation is infinite or zero. Using 1.0 instead.")
+        std = 1.0
+    
     print_memory_usage("After statistics calculation")
     
     # Create data generators with extremely small micro-batch size
@@ -561,7 +620,7 @@ def main():
     
     # Training parameters
     epochs = param.get("fit", {}).get("epochs", 50)
-    steps_per_epoch = len(train_gen) * accumulation_steps
+    steps_per_epoch = len(train_gen)  # We don't multiply by accumulation_steps here
     validation_steps = len(val_gen)
     
     # Initialize history dictionary
@@ -581,9 +640,7 @@ def main():
         print(f"\nEpoch {epoch+1}/{epochs}")
         
         # Reset metrics for new epoch
-        train_loss = []
-        train_accuracy = []
-        train_auc = []
+        ga_model.reset_metrics(training=True)
         
         # Reset gradient accumulators at the start of each epoch
         ga_model.reset_gradients()
@@ -594,15 +651,10 @@ def main():
             # Execute train step
             metrics = ga_model.train_step(x_batch, y_batch, i % accumulation_steps)
             
-            # Store metrics
-            train_loss.append(metrics['loss'].numpy())
-            train_accuracy.append(metrics['accuracy'].numpy())
-            train_auc.append(metrics['auc'].numpy())
-            
             # Update progress bar
             train_pbar.set_postfix({
-                'loss': np.mean(train_loss[-50:]),
-                'accuracy': np.mean(train_accuracy[-50:])
+                'loss': metrics['loss'].numpy(),
+                'accuracy': metrics['accuracy'].numpy()
             })
             
             # Periodic memory cleanup
@@ -610,40 +662,34 @@ def main():
                 # Only perform garbage collection (avoid clearing the whole session)
                 gc.collect()
         
-        # Calculate average training metrics
-        epoch_train_loss = np.mean(train_loss)
-        epoch_train_accuracy = np.mean(train_accuracy)
-        epoch_train_auc = np.mean(train_auc)
+        # Calculate average training metrics at the end of the epoch
+        epoch_train_loss = ga_model.train_loss.result().numpy()
+        epoch_train_accuracy = ga_model.train_accuracy.result().numpy()
+        epoch_train_auc = ga_model.train_auc.result().numpy()
         
         # Memory cleanup after training
         clean_memory()
         print_memory_usage("After training")
         
-        # Validation loop
-        val_loss = []
-        val_accuracy = []
-        val_auc = []
+        # Reset validation metrics
+        ga_model.reset_metrics(training=False)
         
+        # Validation loop
         val_pbar = tqdm(enumerate(val_gen), total=len(val_gen), desc="Validation")
         for i, (x_batch, y_batch) in val_pbar:
             # Execute validation step
             metrics = ga_model.test_step(x_batch, y_batch)
             
-            # Store metrics
-            val_loss.append(metrics['loss'].numpy())
-            val_accuracy.append(metrics['accuracy'].numpy())
-            val_auc.append(metrics['auc'].numpy())
-            
             # Update progress bar
             val_pbar.set_postfix({
-                'val_loss': np.mean(val_loss[-50:]), 
-                'val_accuracy': np.mean(val_accuracy[-50:])
+                'val_loss': metrics['loss'].numpy(), 
+                'val_accuracy': metrics['accuracy'].numpy()
             })
         
         # Calculate average validation metrics
-        epoch_val_loss = np.mean(val_loss)
-        epoch_val_accuracy = np.mean(val_accuracy)
-        epoch_val_auc = np.mean(val_auc)
+        epoch_val_loss = ga_model.val_loss.result().numpy()
+        epoch_val_accuracy = ga_model.val_accuracy.result().numpy()
+        epoch_val_auc = ga_model.val_auc.result().numpy()
         
         # Memory cleanup after validation
         clean_memory()
@@ -765,12 +811,3 @@ def main():
     
     print("Test evaluation results saved")
     print("\nTraining and evaluation completed successfully!")
-
-# Run the main function if script is executed directly
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        import traceback
-        print(f"Error: {e}")
-        print(traceback.format_exc())

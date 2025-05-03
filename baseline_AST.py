@@ -2021,30 +2021,45 @@ def main():
 
     if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
         try:
-            # Create a fresh model first to ensure custom objects are registered
-            temp_model = create_ast_model(
-                input_shape=(target_shape[0], target_shape[1]),
-                config=param.get("model", {}).get("architecture", {})
-            )
+            # Create model-loading-specific versions of the custom functions
+            # These must be defined directly, not as lambdas, to be serializable
+            def focal_loss_loading(y_true, y_pred, gamma=2.0, alpha=0.25):
+                epsilon = K.epsilon()
+                y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+                bce = K.binary_crossentropy(y_true, y_pred)
+                p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
+                alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
+                modulating_factor = K.pow(1.0 - p_t, gamma)
+                return K.mean(alpha_factor * modulating_factor * bce)
             
-            # Define custom objects dictionary with focal_loss function
+            def binary_cross_entropy_loss_loading(y_true, y_pred):
+                return tf.keras.losses.binary_crossentropy(y_true, y_pred)
+            
+            # Define custom objects with the loading-specific functions
             custom_objects = {
-                "binary_cross_entropy_loss": binary_cross_entropy_loss,
-                "focal_loss": focal_loss
+                "binary_cross_entropy_loss": binary_cross_entropy_loss_loading,
+                "focal_loss": focal_loss_loading
             }
+            
+            logger.info("Attempting to load model with custom objects dictionary")
             
             # Try loading with different formats
             if os.path.exists(model_file):
-                model = tf.keras.models.load_model(model_file, custom_objects=custom_objects)
-                logger.info("Model loaded from file (keras format)")
+                try:
+                    model = tf.keras.models.load_model(model_file, custom_objects=custom_objects)
+                    logger.info("Model successfully loaded from keras format file")
+                except Exception as e1:
+                    logger.warning(f"Failed to load with keras format: {e1}")
+                    # Try loading with TF SavedModel format
+                    model = tf.keras.models.load_model(model_file, custom_objects=custom_objects)
             else:
                 model = tf.keras.models.load_model(f"{model_file}", custom_objects=custom_objects)
-                logger.info("Model loaded from file (tf format)")
                 
-            logger.info("Model loaded from file, no training performed")
+            logger.info("Model loaded from file, no training needed")
         except Exception as e:
             logger.error(f"Error loading model: {e}")
-            # Create a new model
+            # Create a new model with the target shape
+            logger.info("Creating new model with input shape: {target_shape}")
             model = create_ast_model(
                 input_shape=(target_shape[0], target_shape[1]),
                 config=param.get("model", {}).get("architecture", {})

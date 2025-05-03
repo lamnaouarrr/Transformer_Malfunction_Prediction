@@ -1506,6 +1506,10 @@ def main():
         
         logger.info(f"TensorFlow is using GPU: {tf.test.is_gpu_available()}")
         logger.info(f"Available GPUs: {tf.config.list_physical_devices('GPU')}")
+    
+    # Load parameters from YAML file first
+    with open("baseline_AST.yaml", "r") as stream:
+        param = yaml.safe_load(stream)
         
     print("============== CHECKING DIRECTORY STRUCTURE ==============")
     normal_dir = Path(param["base_directory"]) / "normal"
@@ -1527,9 +1531,6 @@ def main():
 
     
     start_time = time.time()
-
-    with open("baseline_AST.yaml", "r") as stream:
-        param = yaml.safe_load(stream)
 
     os.makedirs(param["pickle_directory"], exist_ok=True)
     os.makedirs(param["model_directory"], exist_ok=True)

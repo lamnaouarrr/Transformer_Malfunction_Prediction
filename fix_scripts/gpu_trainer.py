@@ -86,6 +86,21 @@ except Exception as e:
     print(f"Error loading configuration: {e}")
     sys.exit(1)
 
+# Reduce batch size to prevent OOM errors
+param['fit']['batch_size'] = 8  # Reduced from 16 to 8
+
+# Enable memory optimizations
+param['training']['memory_optimization']['clear_memory_frequency'] = 5  # Clear memory more frequently
+param['training']['gradient_accumulation_steps'] = 2  # Accumulate gradients over multiple batches
+param['training']['gradient_checkpointing']['enabled'] = True  # Enable gradient checkpointing
+
+# Disable features that consume a lot of memory
+param['training']['mixup']['enabled'] = False  # Disable mixup augmentation
+param['model']['architecture']['transformer']['attention_type'] = "linear"  # Use memory-efficient attention
+
+# Limit prefetch buffer size
+param['training']['streaming_data']['prefetch_buffer_size'] = 1
+
 # Enable mixed precision for faster training
 print("Enabling mixed precision...")
 policy = mixed_precision.Policy('mixed_float16')

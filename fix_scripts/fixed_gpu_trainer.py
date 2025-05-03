@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gpu_trainer.py - A fixed script that properly utilizes GPU computation for AST model training
+fixed_gpu_trainer.py - A fixed script that properly utilizes GPU computation and saves models in .keras format
 """
 
 import os
@@ -15,24 +15,13 @@ from tensorflow.keras import mixed_precision
 import matplotlib.pyplot as plt
 import gc  # For garbage collection
 
-# Clear any existing TF sessions
+# Clear any existing TF sessions and set up GPU properly
 tf.keras.backend.clear_session()
 
-# Force TensorFlow to use the GPU
+# Force TensorFlow to use the GPU with proper memory management
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
-os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
-
-# Add explicit memory cleanup settings
-os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
-os.environ['TF_GPU_THREAD_COUNT'] = '1'
-
-# Force XLA compilation
-os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices --tf_xla_auto_jit=2'
-
-# Add explicit GPU memory release settings for CUDA
-os.environ['CUDA_CACHE_DISABLE'] = '1'
 
 # Print system information
 print("\n===== SYSTEM INFORMATION =====")
@@ -40,7 +29,6 @@ print("TensorFlow version:", tf.__version__)
 import platform
 print("Python version:", platform.python_version())
 print("System:", platform.system(), platform.version())
-print("CPU:", platform.processor())
 
 # Check GPU availability
 print("\n===== GPU CONFIGURATION =====")
@@ -61,13 +49,6 @@ else:
         for gpu in physical_devices:
             tf.config.experimental.set_memory_growth(gpu, True)
         print("Memory growth enabled for all GPUs")
-        
-        # Set memory limit but don't limit too aggressively
-        tf.config.set_logical_device_configuration(
-            physical_devices[0],
-            [tf.config.LogicalDeviceConfiguration(memory_limit=28000)]  # 28GB limit
-        )
-        print("GPU memory limited to 28GB")
     except RuntimeError as e:
         print(f"Error configuring GPU: {e}")
 
@@ -367,7 +348,7 @@ class EffectiveDataGenerator(tf.keras.utils.Sequence):
 print("\n===== VERIFYING GPU USAGE =====")
 print("Running test computation on GPU...")
 
-# This is the critical part - check if TensorFlow actually using the GPU
+# Test if TensorFlow is actually using the GPU
 try:
     with tf.device('/GPU:0'):
         a = tf.random.normal([1000, 1000])
@@ -473,6 +454,24 @@ callbacks.append(
     )
 )
 
+# Memory cleanup callback
+class MemoryCleanupCallback(tf.keras.callbacks.Callback):
+    def __init__(self, cleanup_frequency=5):
+        super(MemoryCleanupCallback, self).__init__()
+        self.cleanup_frequency = cleanup_frequency
+        
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % self.cleanup_frequency == 0:
+            print("\nPerforming memory cleanup...")
+            gc.collect()
+            try:
+                tf.keras.backend.clear_session()
+                print("Session cleared successfully")
+            except:
+                pass
+            
+callbacks.append(MemoryCleanupCallback(cleanup_frequency=5))
+
 # GPU usage marker
 class GPUUsageMarker(tf.keras.callbacks.Callback):
     def on_batch_end(self, batch, logs=None):
@@ -530,18 +529,18 @@ training_end_time = time.time()
 training_duration = training_end_time - training_start_time
 print(f"\nTraining completed in {training_duration:.2f} seconds ({training_duration/60:.2f} minutes)")
 
-# Save trained model
+# Save trained model properly with .keras extension
 try:
-    # Save model in the native Keras format without options parameter
-    model_path = f"{param['model_directory']}/final_model"
-    model.save(f"{model_path}.keras", save_format='keras')
-    print("Model saved successfully in .keras format")
+    # Using the native Keras format with .keras extension
+    model_path = f"{param['model_directory']}/final_model.keras"
     
-    # Explicitly clean up to free GPU memory
+    # First make sure we don't have conflicts with old TF versions
     tf.keras.backend.clear_session()
     
-    # Force garbage collection
-    gc.collect()
+    # For TF 2.10+ with native Keras format
+    save_options = tf.saved_model.SaveOptions(experimental_io_device='/job:localhost')
+    model.save(model_path, save_format='keras')
+    print(f"Model saved successfully to {model_path}")
     
 except Exception as e:
     print(f"Error saving model: {e}")
@@ -549,19 +548,11 @@ except Exception as e:
     # Try alternative saving method
     try:
         print("Attempting alternative saving method...")
-        # Save as TensorFlow SavedModel format
-        model.save(f"{param['model_directory']}/final_model", save_format='tf')
-        print("Model saved with TensorFlow format")
+        model_path_alt = f"{param['model_directory']}/final_model_tf"
+        model.save(model_path_alt, save_format='tf')
+        print(f"Model saved with TensorFlow format to {model_path_alt}")
     except Exception as e2:
         print(f"Alternative saving method also failed: {e2}")
-        
-        # Try one more approach - save weights only
-        try:
-            print("Attempting to save weights only...")
-            model.save_weights(f"{model_path}_weights.keras")
-            print("Model weights saved successfully")
-        except Exception as e3:
-            print(f"All saving methods failed: {e3}")
 
 # Plot training history
 print("Plotting training history...")
@@ -595,42 +586,18 @@ print("GPU-accelerated training completed successfully!")
 print(f"Model saved to: {param['model_directory']}/final_model.keras")
 print(f"Training history plot saved to: {param['result_directory']}/training_history.png")
 
-# Add final cleanup function
-def release_gpu_memory():
-    print("\n===== RELEASING GPU MEMORY =====")
-    # Clear TensorFlow session
-    tf.keras.backend.clear_session()
-    
-    # Force garbage collection
-    gc.collect()
-    
-    # Free CPU memory
-    import sys
-    for name in dir():
-        if not name.startswith('_'):
-            del globals()[name]
-    gc.collect()
-    
-    # Try to manually release CUDA memory
-    try:
-        print("Attempting to run CUDA memory cleanup...")
-        from numba import cuda
-        cuda.select_device(0)
-        cuda.close()
-        print("CUDA memory cleanup successful")
-    except:
-        print("Could not explicitly release CUDA memory")
-        
-    # Use Linux process cleanup
-    try:
-        import os
-        print("Attempting OS-level memory sync...")
-        os.system('sync')
-        print("OS memory sync complete")
-    except:
-        pass
-    
-    print("GPU memory cleanup completed. If memory remains allocated, try manually restarting your Python kernel.")
+# Release memory before exit
+print("\n===== RELEASING GPU MEMORY =====")
+tf.keras.backend.clear_session()
+gc.collect()
 
-# Release GPU memory before exit
-release_gpu_memory()
+# Try to explicitly release more memory
+try:
+    from numba import cuda
+    device = cuda.get_current_device()
+    device.reset()
+    print("CUDA memory explicitly released")
+except:
+    print("No CUDA tools available for explicit memory release")
+    
+print("GPU memory cleanup completed. If memory remains allocated, restart your Python kernel.")

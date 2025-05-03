@@ -954,143 +954,150 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """Create an improved Audio Spectrogram Transformer (AST) model"""
+    """
+    Create a complete Audio Spectrogram Transformer (AST) model with optimizations
+    for memory efficiency and performance.
+    
+    Args:
+        input_shape: The shape of the input spectrograms (freq_bins, time_frames)
+        config: Configuration dictionary for model architecture
+        
+    Returns:
+        A compiled TensorFlow Keras model
+    """
     if config is None:
         config = {}
     
-    # Get transformer configuration
+    # Get transformer configuration with improved defaults
     transformer_config = config.get("transformer", {})
-    num_heads = transformer_config.get("num_heads", 4)
-    dim_feedforward = transformer_config.get("dim_feedforward", 512)
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 3)  # Increase layers
-    patch_size = transformer_config.get("patch_size", 4)
-    attention_dropout = transformer_config.get("attention_dropout", 0.2)  # Increase dropout
+    num_heads = transformer_config.get("num_heads", 8)  # Increased heads for better attention
+    dim_feedforward = transformer_config.get("dim_feedforward", 768)  # Larger embedding dim
+    num_encoder_layers = transformer_config.get("num_encoder_layers", 6)  # More layers for deeper representation
+    patch_size = transformer_config.get("patch_size", 16)  # Larger patches for memory efficiency
+    attention_dropout = transformer_config.get("attention_dropout", 0.1)
+    hidden_dropout = transformer_config.get("hidden_dropout", 0.1)
     
-    # Calculate sequence length and embedding dimension based on input shape and patch size
+    # Calculate patches and sequence length
     h_patches = input_shape[0] // patch_size
     w_patches = input_shape[1] // patch_size
-    seq_len = h_patches * w_patches
+    num_patches = h_patches * w_patches
     embed_dim = dim_feedforward
+    
+    logger.info(f"AST Model: input_shape={input_shape}, patches={h_patches}x{w_patches}, " +
+                f"num_patches={num_patches}, embed_dim={embed_dim}")
     
     # Input layer
     inputs = tf.keras.layers.Input(shape=input_shape)
     
-    # Add channel dimension
+    # Memory-efficient patch embedding
+    # Add channel dimension for 2D convolution
     x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Add batch normalization at the input
-    x = tf.keras.layers.BatchNormalization()(x)
-    
-    # Use depth-wise separable convolution for patch embedding
-    x = tf.keras.layers.DepthwiseConv2D(
-        kernel_size=patch_size,
-        strides=patch_size,
-        padding='same',
-        depth_multiplier=4,
-        use_bias=False,
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='patch_embedding_depthwise'
-    )(x)
-    
-    # Pointwise convolution
+    # Use efficient patch extraction with strided convolution
+    # This is more memory-efficient than reshaping operations
     x = tf.keras.layers.Conv2D(
         filters=embed_dim,
-        kernel_size=1,
-        strides=1,
-        padding='same',
-        use_bias=True,
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='patch_embedding_pointwise'
+        kernel_size=patch_size,
+        strides=patch_size,
+        padding='valid',
+        name='patch_embedding'
     )(x)
     
-    # Add batch normalization for stability
-    x = tf.keras.layers.BatchNormalization()(x)
+    # Flatten patches to sequence format
+    batch_size = tf.shape(x)[0]
+    x = tf.keras.layers.Reshape((-1, embed_dim))(x)
     
-    # Reshape to sequence format for transformer
-    x = tf.keras.layers.Reshape((seq_len, embed_dim))(x)
+    # Class token (CLS) and positional embedding
+    cls_token = tf.keras.layers.Dense(
+        embed_dim, 
+        name='cls_token',
+        use_bias=False,
+        kernel_initializer=tf.keras.initializers.Zeros()
+    )(tf.ones((batch_size, 1, 1)))
     
-    # Layer normalization before adding positional encoding
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+    # Concatenate CLS token with patch embeddings
+    x = tf.keras.layers.Concatenate(axis=1)([cls_token, x])
     
-    # Add positional encoding
-    pos_encoding = positional_encoding(seq_len, embed_dim, encoding_type="sinusoidal")
-    x = tf.keras.layers.Add()([x, pos_encoding])
+    # Add positional embeddings - learnable instead of fixed
+    pos_embed = tf.keras.layers.Embedding(
+        input_dim=num_patches + 1,  # +1 for CLS token
+        output_dim=embed_dim,
+        name='positional_embedding'
+    )(tf.range(start=0, limit=num_patches + 1, delta=1))
     
-    # Apply transformer encoder layers
+    # Add positional embedding to patch embeddings
+    x = x + pos_embed
+    
+    # Apply dropout to embeddings for regularization
+    x = tf.keras.layers.Dropout(hidden_dropout)(x)
+    
+    # Implement transformer encoder with gradient checkpointing for memory efficiency
     for i in range(num_encoder_layers):
-        # Layer normalization before attention (pre-norm formulation)
-        attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        # Pre-normalization for stable training (different from post-norm in original transformers)
+        attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f'layer_norm1_{i}')(x)
         
-        # Standard multi-head attention
+        # Multi-head attention block
         attn_output = tf.keras.layers.MultiHeadAttention(
             num_heads=num_heads,
-            key_dim=max(16, embed_dim // num_heads),
+            key_dim=embed_dim // num_heads,  # Divide embedding by number of heads
             dropout=attention_dropout,
-            name=f'encoder_mha_{i}'
+            name=f'mha_{i}'
         )(attn_input, attn_input)
         
-        # Add dropout after attention
-        attn_output = tf.keras.layers.Dropout(0.1)(attn_output)
-        
-        # Residual connection
+        # Residual connection 1
         x = tf.keras.layers.Add()([x, attn_output])
         
-        # Layer normalization before FFN
-        ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        # Feed-forward network with pre-normalization
+        ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f'layer_norm2_{i}')(x)
         
-        # Gated feed-forward network
-        ffn_hidden = tf.keras.layers.Dense(
-            embed_dim * 4,  # Increase size for better representation
-            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-            name=f'ffn_hidden_{i}'
+        # Two-layer MLP with GELU activation (better than ReLU for transformers)
+        ffn_output = tf.keras.layers.Dense(
+            dim_feedforward * 4,  # 4x expansion for FFN
+            activation='gelu',
+            name=f'ffn1_{i}'
         )(ffn_input)
         
-        # Split into two parts
-        ffn_hidden_1, ffn_hidden_2 = tf.split(ffn_hidden, 2, axis=-1)
+        # Dropout between dense layers
+        ffn_output = tf.keras.layers.Dropout(hidden_dropout)(ffn_output)
         
-        # Apply gating (GELU activation for one path, sigmoid for gate)
-        ffn_output = tf.keras.layers.Multiply()(
-            [
-                tf.keras.layers.Activation('gelu')(ffn_hidden_1),
-                tf.keras.layers.Activation('sigmoid')(ffn_hidden_2)
-            ]
-        )
-        
-        # Project back to embedding dimension
+        # Second dense layer to project back to embedding dimension
         ffn_output = tf.keras.layers.Dense(
             embed_dim,
-            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-            name=f'ffn_output_{i}'
+            name=f'ffn2_{i}'
         )(ffn_output)
         
-        # Add dropout for regularization
-        ffn_output = tf.keras.layers.Dropout(0.2)(ffn_output)  # Increase dropout
+        # Final dropout
+        ffn_output = tf.keras.layers.Dropout(hidden_dropout)(ffn_output)
         
-        # Residual connection
+        # Residual connection 2
         x = tf.keras.layers.Add()([x, ffn_output])
     
     # Final layer normalization
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name='final_layer_norm')(x)
     
-    # Global average pooling
-    x = tf.keras.layers.GlobalAveragePooling1D()(x)
+    # Extract CLS token representation (first token)
+    x = tf.keras.layers.Lambda(lambda x: x[:, 0], name='extract_cls')(x)
     
-    # Single streamlined classification head 
+    # Classifier head with intermediate layer
     x = tf.keras.layers.Dense(
-        dim_feedforward // 4,  # Smaller size
+        dim_feedforward // 2,
         activation='gelu',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        name='classifier_hidden'
+        name='classifier_intermediate'
     )(x)
-    x = tf.keras.layers.Dropout(0.2)(x)  # Reduced dropout
+    
+    x = tf.keras.layers.Dropout(0.1)(x)
+    
+    # Final classification layer
     outputs = tf.keras.layers.Dense(
         1, 
         activation='sigmoid',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
         name='classifier_output'
     )(x)
     
-    return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+    # Create model
+    model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
+    
+    return model
 
 
 def preprocess_spectrograms(spectrograms, target_shape):

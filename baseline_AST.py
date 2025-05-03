@@ -2048,7 +2048,7 @@ def main():
             def binary_ce_loading(y_true, y_pred):
                 return tf.keras.losses.binary_crossentropy(y_true, y_pred)
             
-            # Define custom objects with flat structure
+            # Define custom objects with flat structure - ensure all keys are strings
             custom_objects = {
                 "focal_loss": focal_loss_loading,
                 "binary_cross_entropy_loss": binary_ce_loading
@@ -2070,7 +2070,7 @@ def main():
                         # Then manually compile
                         model.compile(
                             optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-                            loss=focal_loss,
+                            loss="binary_crossentropy",  # Use string identifier instead of function
                             metrics=['accuracy']
                         )
                         logger.info("Model loaded successfully with option 2 (compile=False)")
@@ -2081,6 +2081,12 @@ def main():
                         temp_model = create_ast_model(
                             input_shape=(target_shape[0], target_shape[1]),
                             config=param.get("model", {}).get("architecture", {})
+                        )
+                        # Compile the model before loading weights
+                        temp_model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                            loss="binary_crossentropy",
+                            metrics=['accuracy']
                         )
                         try:
                             temp_model.load_weights(model_file)

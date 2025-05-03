@@ -24,8 +24,15 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
+# Add explicit memory cleanup settings
+os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
+os.environ['TF_GPU_THREAD_COUNT'] = '1'
+
 # Force XLA compilation
 os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices --tf_xla_auto_jit=2'
+
+# Add explicit GPU memory release settings for CUDA
+os.environ['CUDA_CACHE_DISABLE'] = '1'
 
 # Print system information
 print("\n===== SYSTEM INFORMATION =====")
@@ -525,10 +532,43 @@ print(f"\nTraining completed in {training_duration:.2f} seconds ({training_durat
 
 # Save trained model
 try:
-    model.save(f"{param['model_directory']}/final_model.keras")
-    print("Model saved successfully")
+    # Use save_weights instead of save to avoid the 'options' parameter issue
+    model_path = f"{param['model_directory']}/final_model"
+    model.save_weights(f"{model_path}.weights.h5")
+    
+    # Save model architecture separately as JSON
+    model_json = model.to_json()
+    with open(f"{model_path}.json", "w") as json_file:
+        json_file.write(model_json)
+        
+    print("Model saved successfully (architecture and weights separately)")
+    
+    # Explicitly clean up to free GPU memory
+    tf.keras.backend.clear_session()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Attempt to explicitly release GPU memory
+    if physical_devices:
+        try:
+            import ctypes
+            libgpuarray = ctypes.CDLL("libgpuarray.so")
+            libgpuarray.gpu_clean_up()
+            print("Explicitly released GPU memory")
+        except:
+            print("Could not explicitly release GPU memory via libgpuarray")
+    
 except Exception as e:
     print(f"Error saving model: {e}")
+    
+    # Try alternative saving method
+    try:
+        print("Attempting alternative saving method...")
+        model.save(f"{param['model_directory']}/final_model", save_format='tf')
+        print("Model saved with TensorFlow format")
+    except Exception as e2:
+        print(f"Alternative saving method also failed: {e2}")
 
 # Plot training history
 print("Plotting training history...")
@@ -561,3 +601,43 @@ print("\n===== TRAINING COMPLETE =====")
 print("GPU-accelerated training completed successfully!")
 print(f"Model saved to: {param['model_directory']}/final_model.keras")
 print(f"Training history plot saved to: {param['result_directory']}/training_history.png")
+
+# Add final cleanup function
+def release_gpu_memory():
+    print("\n===== RELEASING GPU MEMORY =====")
+    # Clear TensorFlow session
+    tf.keras.backend.clear_session()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Free CPU memory
+    import sys
+    for name in dir():
+        if not name.startswith('_'):
+            del globals()[name]
+    gc.collect()
+    
+    # Try to manually release CUDA memory
+    try:
+        print("Attempting to run CUDA memory cleanup...")
+        from numba import cuda
+        cuda.select_device(0)
+        cuda.close()
+        print("CUDA memory cleanup successful")
+    except:
+        print("Could not explicitly release CUDA memory")
+        
+    # Use Linux process cleanup
+    try:
+        import os
+        print("Attempting OS-level memory sync...")
+        os.system('sync')
+        print("OS memory sync complete")
+    except:
+        pass
+    
+    print("GPU memory cleanup completed. If memory remains allocated, try manually restarting your Python kernel.")
+
+# Release GPU memory before exit
+release_gpu_memory()

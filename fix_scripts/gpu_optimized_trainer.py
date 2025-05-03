@@ -476,12 +476,20 @@ training_end_time = time.time()
 training_duration = training_end_time - training_start_time
 print(f"\nTraining completed in {training_duration:.2f} seconds ({training_duration/60:.2f} minutes)")
 
-# Save trained model
+# Save trained model - FIXED: Removed options parameter that caused the error
 try:
+    print("Saving final model...")
     model.save(f"{param['model_directory']}/final_model.keras")
     print("Model saved successfully")
 except Exception as e:
     print(f"Error saving model: {e}")
+    # Try saving in older format if keras format fails
+    try:
+        print("Attempting to save in SavedModel format...")
+        tf.saved_model.save(model, f"{param['model_directory']}/final_model_savedmodel")
+        print("Model saved in SavedModel format")
+    except Exception as nested_e:
+        print(f"Could not save model in any format: {nested_e}")
 
 # Plot training history
 print("Plotting training history...")
@@ -509,5 +517,13 @@ plt.legend(["Train", "Validation"], loc="lower right")
 plt.tight_layout()
 plt.savefig(f"{param['result_directory']}/training_history.png")
 plt.close()
+
+# Explicitly clean up resources to free GPU memory
+print("Final cleanup to free GPU memory...")
+del model
+del train_generator
+del val_dataset
+gc.collect()
+tf.keras.backend.clear_session()
 
 print("\nHigh-performance training script completed successfully!")

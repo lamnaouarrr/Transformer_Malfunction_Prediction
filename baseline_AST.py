@@ -2119,6 +2119,228 @@ def force_reload_pickles(param, evaluation_result_key="overall_model"):
         print(f"ERROR loading pickle files directly: {e}")
         return None, None, None, None, None, None
 
+def force_reload_and_train_directly(param, evaluation_result_key="overall_model"):
+    """
+    Emergency fix: Force load pickles and train directly
+    This is a self-contained fix that bypasses normal flow to make the model train
+    """
+    import pickle
+    import numpy as np
+    import os
+    import tensorflow as tf
+    from tensorflow.keras.optimizers import AdamW
+    from tensorflow.keras import mixed_precision
+    import matplotlib.pyplot as plt
+    
+    print("\n==================================================")
+    print("EMERGENCY FIX ACTIVATED - DIRECT PICKLE LOADING")
+    print("==================================================\n")
+    
+    # Configure paths
+    pickle_dir = param['pickle_directory']
+    train_pickle = f"{pickle_dir}/train_overall.pickle"
+    train_labels_pickle = f"{pickle_dir}/train_labels_overall.pickle"
+    val_pickle = f"{pickle_dir}/val_overall.pickle"
+    val_labels_pickle = f"{pickle_dir}/val_labels_overall.pickle"
+    test_files_pickle = f"{pickle_dir}/test_files_overall.pickle"
+    test_labels_pickle = f"{pickle_dir}/test_labels_overall.pickle"
+    
+    # Verify file existence
+    all_exist = all(os.path.exists(p) for p in [
+        train_pickle, train_labels_pickle, val_pickle, 
+        val_labels_pickle, test_files_pickle, test_labels_pickle
+    ])
+    
+    if not all_exist:
+        print("ERROR: Not all pickle files exist. Cannot proceed with direct pickle loading.")
+        return False
+    
+    print("All pickle files found. Loading data directly...")
+    
+    # Direct load with native pickle
+    try:
+        with open(train_pickle, 'rb') as f:
+            train_data = pickle.load(f)
+        with open(train_labels_pickle, 'rb') as f:
+            train_labels = pickle.load(f)
+        with open(val_pickle, 'rb') as f:
+            val_data = pickle.load(f)
+        with open(val_labels_pickle, 'rb') as f:
+            val_labels = pickle.load(f)
+        with open(test_files_pickle, 'rb') as f:
+            test_files = pickle.load(f)
+        with open(test_labels_pickle, 'rb') as f:
+            test_labels = pickle.load(f)
+    except Exception as e:
+        print(f"ERROR loading pickle data: {e}")
+        return False
+    
+    # Print data info
+    print(f"Loaded train_data: {type(train_data)}, shape={train_data.shape}")
+    print(f"Loaded train_labels: {type(train_labels)}, shape={train_labels.shape}")
+    print(f"Loaded val_data: {type(val_data)}, shape={val_data.shape}")
+    print(f"Loaded val_labels: {type(val_labels)}, shape={val_labels.shape}")
+    print(f"Loaded test_files: {type(test_files)}, count={len(test_files)}")
+    
+    # Verify data integrity
+    if (not isinstance(train_data, np.ndarray) or train_data.shape[0] == 0 or
+        not isinstance(val_data, np.ndarray) or val_data.shape[0] == 0):
+        print("ERROR: Invalid or empty data arrays")
+        return False
+    
+    print("All data loaded successfully. Preparing for training...")
+    
+    # Define target shape for spectrograms
+    target_shape = (param["feature"]["n_mels"], 96)
+    print(f"Target shape: {target_shape}")
+    
+    # Preprocess spectrograms to ensure consistent shapes
+    def preprocess_batch(specs, target_shape):
+        batch_size = specs.shape[0]
+        processed = np.zeros((batch_size, target_shape[0], target_shape[1]), dtype=np.float32)
+        
+        for i in range(batch_size):
+            spec = specs[i]
+            if spec.shape[0] == target_shape[0] and spec.shape[1] == target_shape[1]:
+                processed[i] = spec
+            else:
+                # Simple resize with zero padding
+                freq_dim = min(spec.shape[0], target_shape[0])
+                time_dim = min(spec.shape[1], target_shape[1])
+                processed[i, :freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+        
+        return processed
+    
+    print("Preprocessing train data...")
+    train_data = preprocess_batch(train_data, target_shape)
+    print(f"Preprocessed train_data shape: {train_data.shape}")
+    
+    print("Preprocessing validation data...")
+    val_data = preprocess_batch(val_data, target_shape)
+    print(f"Preprocessed val_data shape: {val_data.shape}")
+    
+    # Normalize data
+    print("Normalizing data...")
+    # Calculate mean and std on training data
+    mean = np.mean(train_data)
+    std = np.std(train_data)
+    print(f"Training data statistics - Mean: {mean:.4f}, Std: {std:.4f}")
+    
+    # Apply Z-score normalization
+    if std > 0:
+        train_data = (train_data - mean) / std
+        val_data = (val_data - mean) / std
+        print("Z-score normalization applied")
+    
+    # Enable mixed precision
+    print("Enabling mixed precision...")
+    mixed_precision.set_global_policy('mixed_float16')
+    
+    # Create TensorFlow datasets
+    print("Creating TensorFlow datasets...")
+    batch_size = param.get("fit", {}).get("batch_size", 16)
+    train_dataset = tf.data.Dataset.from_tensor_slices((train_data, train_labels))
+    train_dataset = train_dataset.batch(batch_size).shuffle(1000).prefetch(tf.data.AUTOTUNE)
+    
+    val_dataset = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
+    val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    
+    # Create model
+    print("Creating AST model...")
+    model = create_ast_model(input_shape=target_shape, 
+                           config=param.get("model", {}).get("architecture", {}))
+    
+    # Compile model with AdamW optimizer
+    model.compile(
+        optimizer=AdamW(
+            learning_rate=param.get("fit", {}).get("compile", {}).get("learning_rate", 0.0001),
+            weight_decay=0.01,
+            clipnorm=1.0
+        ),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    # Define callbacks
+    callbacks = []
+    
+    # Early stopping
+    callbacks.append(
+        tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=param.get("fit", {}).get("early_stopping", {}).get("patience", 10),
+            restore_best_weights=True
+        )
+    )
+    
+    # Learning rate scheduler
+    callbacks.append(
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7
+        )
+    )
+    
+    # Model checkpointing
+    os.makedirs(param["model_directory"], exist_ok=True)
+    callbacks.append(
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=f"{param['model_directory']}/best_model.keras",
+            monitor='val_accuracy',
+            save_best_only=True,
+            mode='max'
+        )
+    )
+    
+    # Train model
+    print(f"Starting model training for {param['fit']['epochs']} epochs...")
+    history = model.fit(
+        train_dataset,
+        epochs=param["fit"]["epochs"],
+        validation_data=val_dataset,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    # Save trained model
+    try:
+        model.save(f"{param['model_directory']}/final_model.keras")
+        print("Model saved successfully!")
+    except Exception as e:
+        print(f"Error saving model: {e}")
+    
+    # Plot training history
+    print("Plotting training history...")
+    plt.figure(figsize=(15, 10))
+    
+    # Plot loss
+    plt.subplot(2, 1, 1)
+    plt.plot(history.history['loss'])
+    plt.plot(history.history['val_loss'])
+    plt.title("Model loss")
+    plt.ylabel("Loss")
+    plt.xlabel("Epoch")
+    plt.legend(["Train", "Validation"], loc="upper right")
+    
+    # Plot accuracy
+    plt.subplot(2, 1, 2)
+    plt.plot(history.history['accuracy'])
+    plt.plot(history.history['val_accuracy'])
+    plt.title("Model accuracy")
+    plt.ylabel("Accuracy")
+    plt.xlabel("Epoch")
+    plt.legend(["Train", "Validation"], loc="lower right")
+    
+    # Save figure
+    os.makedirs(param["result_directory"], exist_ok=True)
+    plt.savefig(f"{param['result_directory']}/training_history.png")
+    plt.close()
+    
+    print("Training complete!")
+    return True
+
 ########################################################################
 # main
 ########################################################################
@@ -2273,6 +2495,24 @@ def main():
     preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
     
     print("============== DATASET_GENERATOR ==============")
+    
+    # EMERGENCY FIX - BYPASSING NORMAL FLOW
+    print("\n***************************************************************")
+    print("* EMERGENCY FIX ACTIVATED: BYPASSING NORMAL CODE FLOW          *")
+    print("* Using direct pickle loading and training to solve the issue  *")
+    print("***************************************************************\n")
+    
+    # Call our emergency direct training function
+    success = force_reload_and_train_directly(param)
+    
+    # If emergency direct training worked, exit
+    if success:
+        print("\nEmergency direct training completed successfully!")
+        return
+        
+    # Fall back to normal flow only if emergency approach fails
+    print("Emergency approach failed, falling back to regular implementation...")
+    
     # Try the emergency force reload function
     print("EMERGENCY FIX: Trying direct pickle loading...")
     train_data, train_labels, val_data, val_labels, test_files, test_labels = force_reload_pickles(param)

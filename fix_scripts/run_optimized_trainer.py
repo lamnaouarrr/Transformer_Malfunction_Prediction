@@ -60,6 +60,9 @@ def setup_memory_optimizations():
     # Enable XLA JIT compilation
     os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices --tf_xla_auto_jit=2'
     
+    # Add debug flag to show more information
+    os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
+    
     print("Memory optimizations enabled through environment variables")
 
 def main():
@@ -85,8 +88,10 @@ def main():
     print("\nStarting the ultra memory-efficient AST trainer...\n")
     
     try:
-        # Run the trainer script
-        result = subprocess.run([sys.executable, trainer_path], check=True)
+        # Run the trainer script with debug output
+        result = subprocess.run([sys.executable, trainer_path], 
+                               stderr=subprocess.STDOUT,
+                               check=False)
         
         if result.returncode == 0:
             print("\n" + "=" * 80)
@@ -95,7 +100,8 @@ def main():
             print("\nResults are saved in the result/result_AST directory")
         else:
             print("\nTraining failed with error code:", result.returncode)
-    
+            print("Check the log output above for details.")
+            
     except Exception as e:
         print("\nAn error occurred during training:")
         traceback.print_exc()

@@ -325,6 +325,9 @@ class GradientAccumulationModel:
         # Create gradient accumulators
         self.accum_grads = [tf.Variable(tf.zeros_like(var), trainable=False) for var in self.trainable_vars]
         
+        # Store metric names - fix for AttributeError issue
+        self.metric_names = ["accuracy", "auc"]
+        
         print(f"Created gradient accumulation model with {accumulation_steps} accumulation steps")
     
     def reset_gradients(self):
@@ -362,9 +365,14 @@ class GradientAccumulationModel:
             # Reset gradients
             self.reset_gradients()
         
-        # Update metrics
-        metrics = {m.__name__: m(y, predictions) for m in self.metric_fns}
+        # Update metrics - fixed to use indices instead of names
+        metrics = {}
         metrics['loss'] = loss
+        
+        # Calculate metrics directly instead of using __name__ attribute
+        metrics['accuracy'] = self.metric_fns[0](y, predictions)
+        if len(self.metric_fns) > 1:
+            metrics['auc'] = self.metric_fns[1](y, predictions)
         
         return metrics
     
@@ -375,9 +383,15 @@ class GradientAccumulationModel:
         predictions = self.model(x, training=False)
         # Calculate loss
         loss = self.loss_fn(y, predictions)
-        # Update metrics
-        metrics = {m.__name__: m(y, predictions) for m in self.metric_fns}
+        
+        # Update metrics - fixed to use indices instead of names
+        metrics = {}
         metrics['loss'] = loss
+        
+        # Calculate metrics directly instead of using __name__ attribute
+        metrics['accuracy'] = self.metric_fns[0](y, predictions)
+        if len(self.metric_fns) > 1:
+            metrics['auc'] = self.metric_fns[1](y, predictions)
         
         return metrics
 

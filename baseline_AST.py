@@ -2021,11 +2021,26 @@ def main():
 
     if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
         try:
+            # Create a fresh model first to ensure custom objects are registered
+            temp_model = create_ast_model(
+                input_shape=(target_shape[0], target_shape[1]),
+                config=param.get("model", {}).get("architecture", {})
+            )
+            
+            # Define custom objects dictionary with focal_loss function
+            custom_objects = {
+                "binary_cross_entropy_loss": binary_cross_entropy_loss,
+                "focal_loss": focal_loss
+            }
+            
             # Try loading with different formats
             if os.path.exists(model_file):
-                model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
+                model = tf.keras.models.load_model(model_file, custom_objects=custom_objects)
+                logger.info("Model loaded from file (keras format)")
             else:
-                model = tf.keras.models.load_model(f"{model_file}", custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
+                model = tf.keras.models.load_model(f"{model_file}", custom_objects=custom_objects)
+                logger.info("Model loaded from file (tf format)")
+                
             logger.info("Model loaded from file, no training performed")
         except Exception as e:
             logger.error(f"Error loading model: {e}")

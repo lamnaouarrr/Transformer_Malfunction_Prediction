@@ -2204,6 +2204,11 @@ def main():
     all_y_pred = []
     result_file = f"{param['result_directory']}/result_AST.yaml"
 
+    # Get chunking parameters - add these variables that were missing
+    chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
+    chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
+    preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
+    
     print("============== DATASET_GENERATOR ==============")
     train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
     train_labels_pickle = f"{param['pickle_directory']}/train_labels_overall.pickle"
@@ -2215,19 +2220,21 @@ def main():
     # Initialize variables
     train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
     train_data, val_data, test_data = None, None, None
+    train_labels_expanded, val_labels_expanded, test_labels_expanded = None, None, None
     
-    print("DEBUG: Checking for pickle files...")
-    print(f"DEBUG: train_pickle exists: {os.path.exists(train_pickle)}")
-    print(f"DEBUG: train_labels_pickle exists: {os.path.exists(train_labels_pickle)}")
-    print(f"DEBUG: val_pickle exists: {os.path.exists(val_pickle)}")
-    print(f"DEBUG: val_labels_pickle exists: {os.path.exists(val_labels_pickle)}")
-    print(f"DEBUG: test_files_pickle exists: {os.path.exists(test_files_pickle)}")
-    print(f"DEBUG: test_labels_pickle exists: {os.path.exists(test_labels_pickle)}")
+    # Debug variables and path existence
+    print(f"DEBUG: Checking pickle files")
+    print(f"  train_pickle exists: {os.path.exists(train_pickle)}")
+    print(f"  val_pickle exists: {os.path.exists(val_pickle)}")
+    print(f"  test_files_pickle exists: {os.path.exists(test_files_pickle)}")
 
     if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
         os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
         os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
+        
+        print("DEBUG: All pickle files exist, attempting to load")
         logger.info("Loading preprocessed data from pickle files...")
+        
         try:
             train_data = load_pickle(train_pickle)
             train_labels = load_pickle(train_labels_pickle)
@@ -2236,7 +2243,15 @@ def main():
             test_files = load_pickle(test_files_pickle)
             test_labels = load_pickle(test_labels_pickle)
             
+            # Set expanded labels (needed for actual training)
+            train_labels_expanded = train_labels
+            val_labels_expanded = val_labels
+            test_labels_expanded = test_labels
+            
             # Validate loaded data
+            print(f"DEBUG: Loaded train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'unknown shape'}")
+            print(f"DEBUG: Loaded val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'unknown shape'}")
+            
             logger.info(f"Loaded train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'unknown'}")
             logger.info(f"Loaded train_labels shape: {train_labels.shape if hasattr(train_labels, 'shape') else 'unknown'}")
             logger.info(f"Loaded val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'unknown'}")
@@ -2244,118 +2259,142 @@ def main():
             logger.info(f"Number of loaded test files: {len(test_files)}")
             
             # Verify data is not empty
-            if (hasattr(train_data, 'shape') and train_data.shape[0] == 0) or (not hasattr(train_data, 'shape') and not train_data):
-                logger.error("Loaded train_data is empty - will regenerate dataset")
-                raise ValueError("Empty train_data")
+            if train_data is None or not isinstance(train_data, np.ndarray) or train_data.shape[0] == 0:
+                print("DEBUG: Loaded train_data is empty or invalid")
+                logger.error("Loaded train_data is empty or invalid - will regenerate dataset")
+                raise ValueError("Empty or invalid train_data")
                 
-            if (hasattr(val_data, 'shape') and val_data.shape[0] == 0) or (not hasattr(val_data, 'shape') and not val_data):
-                logger.error("Loaded val_data is empty - will regenerate dataset")
-                raise ValueError("Empty val_data")
+            if val_data is None or not isinstance(val_data, np.ndarray) or val_data.shape[0] == 0:
+                print("DEBUG: Loaded val_data is empty or invalid")
+                logger.error("Loaded val_data is empty or invalid - will regenerate dataset")
+                raise ValueError("Empty or invalid val_data")
                 
-            if not test_files or len(test_files) == 0:
+            if test_files is None or len(test_files) == 0:
+                print("DEBUG: Loaded test_files is empty")
                 logger.warning("Loaded test_files is empty - will regenerate dataset")
                 raise ValueError("Empty test_files")
+
+            # Data loaded successfully - skip preprocessing
+            print("DEBUG: Successfully loaded all pickle data")
+            logger.info("Successfully loaded pickle data, skipping file processing")
                 
         except Exception as e:
+            print(f"DEBUG: Error loading pickle files: {e}")
             logger.error(f"Error loading pickle files: {e}. Will regenerate dataset.")
-            # Fall through to regenerate dataset
-            train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
+            # Reset these variables to ensure we regenerate
             train_data, val_data = None, None
+            test_files = []
     else:
+        print("DEBUG: Pickle files not found, will generate dataset from scratch")
         logger.info("Pickle files not found. Will generate new dataset.")
-        train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
         train_data, val_data = None, None
+        test_files = []
 
-    # If we didn't successfully load from pickle, generate the dataset
-    if (train_data is None or not isinstance(train_data, np.ndarray) or train_data.size == 0 or 
-        val_data is None or not isinstance(val_data, np.ndarray) or val_data.size == 0 or 
-        test_files is None or len(test_files) == 0):
-        print("DEBUG: Need to generate dataset from scratch")
-        logger.info("Generating new dataset...")
+    # If we couldn't load from pickle files, generate the dataset
+    if (train_data is None or val_data is None or len(test_files) == 0):
+        print("DEBUG: Generating dataset from scratch")
+        logger.info("Generating new dataset from files...")
+        
+        # Generate dataset from files
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
         
-        # Print details about generated dataset
+        # Verify generated dataset
         logger.info(f"Generated train files: {len(train_files)}")
         logger.info(f"Generated val files: {len(val_files)}")
         logger.info(f"Generated test files: {len(test_files)}")
         
-        if 'train_data' in locals() and train_data is not None: 
-            del train_data
-            train_data = None
-        if 'val_data' in locals() and val_data is not None:
-            del val_data
-            val_data = None
-
+        # Check if dataset generation was successful
         if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
-    else:
-        # Successfully loaded pickle data
-        print("DEBUG: Successfully loaded data from pickle files")
-        logger.info("Using successfully loaded pickle data for training")
-        train_files = []  # Empty list since we're using the pickle data directly
-        val_files = []    # Empty list since we're using the pickle data directly
-        
-        # Skip preprocessing and go directly to training with loaded data
-        print(f"DEBUG: train_data shape: {train_data.shape}")
-        print(f"DEBUG: val_data shape: {val_data.shape}")
-        print(f"DEBUG: Skipping preprocessing for test files in pickle mode")
-
-        # We'll skip the test file processing below
-        process_test_files = False
-
-    # Process test data only if needed (not on pickle mode)
-    process_test_files = not (train_data is not None and val_data is not None)
-    print(f"DEBUG: process_test_files = {process_test_files}")
-    
-    if process_test_files:
-        print("DEBUG: Processing test files...")
-        # For test data
-        if chunking_enabled and len(test_files) > chunk_size:
-            logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
-            test_data, test_labels_expanded = process_dataset_in_chunks(
-                test_files,
-                test_labels,
+            
+        # Process training data
+        logger.info("Processing train data from files...")
+        if chunking_enabled and len(train_files) > chunk_size:
+            logger.info(f"Processing train data in chunks ({len(train_files)} files)")
+            train_data, train_labels_expanded = process_dataset_in_chunks(
+                train_files,
+                train_labels,
                 chunk_size=chunk_size,
                 param=param
             )
         else:
-            test_data, test_labels_expanded = list_to_spectrograms(
-                test_files,
-                test_labels,
-                msg="generate test_dataset",
+            train_data, train_labels_expanded = list_to_spectrograms(
+                train_files,
+                train_labels,
+                msg="generate train_dataset",
                 augment=False,
                 param=param,
                 batch_size=preprocessing_batch_size
             )
+            
+        # Process validation data
+        logger.info("Processing validation data from files...")
+        if chunking_enabled and len(val_files) > chunk_size:
+            logger.info(f"Processing validation data in chunks ({len(val_files)} files)")
+            val_data, val_labels_expanded = process_dataset_in_chunks(
+                val_files,
+                val_labels,
+                chunk_size=chunk_size,
+                param=param
+            )
+        else:
+            val_data, val_labels_expanded = list_to_spectrograms(
+                val_files,
+                val_labels,
+                msg="generate validation_dataset",
+                augment=False,
+                param=param,
+                batch_size=preprocessing_batch_size
+            )
+        
+        # Process test files if needed
+        if len(test_files) > 0:
+            logger.info("Processing test files (metadata only)...")
+            # We don't actually process test files now, just save their paths
+            # They'll be processed during evaluation
+            test_labels_expanded = test_labels
+            
+        # Save processed data
+        try:
+            logger.info("Saving processed data to pickle files...")
+            save_pickle(train_pickle, train_data)
+            save_pickle(train_labels_pickle, train_labels_expanded)
+            save_pickle(val_pickle, val_data)
+            save_pickle(val_labels_pickle, val_labels_expanded)
+            save_pickle(test_files_pickle, test_files)
+            save_pickle(test_labels_pickle, test_labels)
+            logger.info("Saved all processed data to pickle files successfully")
+        except Exception as e:
+            logger.error(f"Error saving pickle files: {e}")
+            # Continue with training even if saving failed
     else:
-        # Using pickle data, skip test processing
-        print("DEBUG: Skipping test file processing in pickle mode")
-        # We don't need to process test files here,
-        # they will be loaded when needed for evaluation
-
-    # This is a critical check that was causing the issue
+        # We loaded the data from pickle files
+        print("DEBUG: Using loaded pickle data directly")
+        logger.info("Using loaded pickle data directly for training")
+        # Empty these lists to indicate we're using pickled data
+        train_files = []
+        val_files = []
+    
+    # Final validation check - this is where the error was occurring
+    print(f"DEBUG: Final validation - train_data shape: {train_data.shape if train_data is not None else 'None'}")
+    print(f"DEBUG: Final validation - val_data shape: {val_data.shape if val_data is not None else 'None'}")
+    
     if (train_data is None or val_data is None or 
-        (hasattr(train_data, 'shape') and train_data.shape[0] == 0) or 
-        (hasattr(val_data, 'shape') and val_data.shape[0] == 0)):
+        not isinstance(train_data, np.ndarray) or not isinstance(val_data, np.ndarray) or
+        train_data.shape[0] == 0 or val_data.shape[0] == 0):
         logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-        print("DEBUG: Critical error - train_data or val_data is None or empty")
-        print(f"DEBUG: train_data type: {type(train_data)}")
-        print(f"DEBUG: val_data type: {type(val_data)}")
-        if train_data is not None:
-            print(f"DEBUG: train_data shape: {train_data.shape if hasattr(train_data, 'shape') else 'no shape'}")
-        if val_data is not None:
-            print(f"DEBUG: val_data shape: {val_data.shape if hasattr(val_data, 'shape') else 'no shape'}")
+        print("DEBUG: Critical error - no valid training/validation data")
         return  # Exit main() if no valid training/validation data
 
-    # Debug point - If we get here, we have valid data
-    print("DEBUG: Passed critical validation check - proceeding with valid data")
-
+    # If we get here, we have valid training and validation data
+    print("DEBUG: Validation passed - proceeding with training")
+    
     # Print shapes
     logger.info(f"Training data shape: {train_data.shape}")
-    logger.info(f"Training labels shape: {train_labels.shape}")
+    logger.info(f"Training labels shape: {train_labels_expanded.shape}")
     logger.info(f"Validation data shape: {val_data.shape}")
-    logger.info(f"Validation labels shape: {val_labels.shape}")
+    logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
     logger.info(f"Number of test files: {len(test_files)}")
 
     # Define target shape for spectrograms

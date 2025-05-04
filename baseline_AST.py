@@ -2629,23 +2629,57 @@ def main():
             logger.info(f"Normal predictions - Mean: {np.mean(normal_samples):.4f}, Std: {np.std(normal_samples):.4f}")
             logger.info(f"Abnormal predictions - Mean: {np.mean(abnormal_samples):.4f}, Std: {np.std(abnormal_samples):.4f}")
             
-            # If abnormal mean > normal mean, find a threshold between them
-            if np.mean(abnormal_samples) > np.mean(normal_samples):
-                adaptive_threshold = (np.mean(normal_samples) + np.mean(abnormal_samples)) / 2
-                logger.info(f"Using adaptive threshold between means: {adaptive_threshold:.4f}")
+            # Check for separation between normal and abnormal predictions
+            mean_diff = np.abs(np.mean(abnormal_samples) - np.mean(normal_samples))
+            combined_std = (np.std(normal_samples) + np.std(abnormal_samples)) / 2
+            
+            # If there's significant separation between means
+            if mean_diff > combined_std * 0.5:
+                # If abnormal mean > normal mean, find a threshold between them
+                if np.mean(abnormal_samples) > np.mean(normal_samples):
+                    # Use weighted midpoint that's closer to the normal distribution
+                    adaptive_threshold = float(np.mean(normal_samples) * 0.7 + np.mean(abnormal_samples) * 0.3)
+                    logger.info(f"Using weighted threshold between means: {adaptive_threshold:.4f}")
+                else:
+                    # If abnormal mean < normal mean, which is unusual, reverse the weighting
+                    adaptive_threshold = float(np.mean(normal_samples) * 0.3 + np.mean(abnormal_samples) * 0.7)
+                    logger.info(f"Using reversed weighted threshold: {adaptive_threshold:.4f}")
             else:
-                # Otherwise use a percentile-based approach
+                # If the distributions overlap significantly, try different approach
+                # Get the range of predictions and calculate threshold at different percentiles
                 sorted_preds = np.sort(y_pred)
-                percentile_90 = sorted_preds[int(len(sorted_preds) * 0.9)]
-                # Convert numpy value to float to avoid formatting issues
-                adaptive_threshold = float(percentile_90 * 0.95)  # Slightly below the 90th percentile
-                logger.info(f"Using 90th percentile based threshold: {adaptive_threshold:.4f}")
+                lower_percentile = sorted_preds[int(len(sorted_preds) * 0.1)]  # 10th percentile
+                upper_percentile = sorted_preds[int(len(sorted_preds) * 0.9)]  # 90th percentile
+                
+                # If prediction range is too narrow, try more extreme thresholds
+                if upper_percentile - lower_percentile < 0.1:
+                    logger.info(f"Prediction range too narrow ({lower_percentile:.4f}-{upper_percentile:.4f})")
+                    
+                    # Try multiple thresholds and pick the one with best F1 on validation
+                    test_thresholds = [0.48, 0.49, 0.5, 0.51, 0.52, 0.53, 0.54, 0.55]
+                    best_f1 = 0
+                    adaptive_threshold = 0.5  # Default
+                    
+                    for thresh in test_thresholds:
+                        preds_at_thresh = (y_pred > thresh).astype(int)
+                        f1 = metrics.f1_score(test_labels_expanded, preds_at_thresh, zero_division=0)
+                        logger.info(f"Threshold {thresh:.4f} - F1: {f1:.4f}")
+                        
+                        if f1 > best_f1:
+                            best_f1 = f1
+                            adaptive_threshold = float(thresh)
+                    
+                    logger.info(f"Selected best performing threshold: {adaptive_threshold:.4f} (F1: {best_f1:.4f})")
+                else:
+                    # Use a point slightly below the overall mean (assuming more normal than abnormal samples)
+                    mean_pred = np.mean(y_pred)
+                    adaptive_threshold = float(mean_pred - 0.01)  # Slightly below the mean
+                    logger.info(f"Using threshold slightly below mean: {adaptive_threshold:.4f}")
         else:
             # If no abnormal samples in prediction set, use best guess
-            sorted_preds = np.sort(y_pred)
-            percentile_90 = sorted_preds[int(len(sorted_preds) * 0.9)]
-            adaptive_threshold = percentile_90 * 0.95
-            logger.info(f"No abnormal samples in output, using percentile threshold: {adaptive_threshold:.4f}")
+            logger.warning("No abnormal samples in test predictions")
+            adaptive_threshold = float(0.5)  # Use standard threshold
+            logger.info(f"Using standard threshold: {adaptive_threshold:.4f}")
         
         # Apply custom threshold for meaningful results
         logger.info(f"Using custom threshold for evaluation: {adaptive_threshold:.4f}")

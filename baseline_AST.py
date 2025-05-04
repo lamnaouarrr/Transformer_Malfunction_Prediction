@@ -1532,11 +1532,13 @@ def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode=
     # Override the _save_model method to avoid options parameter
     original_save_model = callback._save_model
     
-    def safe_save_model(model, epoch, logs):
+    def safe_save_model(model, epoch, logs, batch=None):
+        """Custom save method that handles all parameters and avoids using options"""
+        logger.info(f"Using safe model save method (epoch: {epoch})")
         try:
-            logger.info("Using safe model save method (without options)")
             # Save model directly instead of through callback's method
             model.save(callback.filepath, overwrite=True, save_format='keras')
+            logger.info(f"Model saved successfully at epoch {epoch}")
             return True
         except Exception as e:
             logger.error(f"Error in custom save method: {e}")
@@ -1547,14 +1549,24 @@ def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode=
                     model, 
                     callback.filepath,
                     overwrite=True,
-                    include_optimizer=True,
+                    include_optimizer=False,  # Try without optimizer to avoid issues
                     save_format='keras',
                     save_traces=False  # Try without traces
                 )
+                logger.info(f"Model saved successfully using fallback method at epoch {epoch}")
                 return True
             except Exception as e2:
                 logger.error(f"Fallback save method also failed: {e2}")
-                return False
+                # Final fallback: save weights only
+                try:
+                    logger.info("Attempting to save weights only")
+                    weights_path = f"{callback.filepath}_weights"
+                    model.save_weights(weights_path)
+                    logger.info(f"Weights saved to {weights_path}")
+                    return False  # Return False as the full model wasn't saved
+                except Exception as e3:
+                    logger.error(f"All save methods failed: {e3}")
+                    return False
     
     # Replace the _save_model method with our custom version
     callback._save_model = safe_save_model

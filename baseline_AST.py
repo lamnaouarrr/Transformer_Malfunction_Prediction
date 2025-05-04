@@ -2182,7 +2182,6 @@ def main():
             save_best_only=True,
             monitor='val_loss',
             mode='min',
-            save_weights_only=False,
             verbose=1
         )
         callbacks.append(checkpoint_callback)

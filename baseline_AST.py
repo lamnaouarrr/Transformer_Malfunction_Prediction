@@ -1516,6 +1516,52 @@ def create_improved_optimizer():
     )
 
 
+def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode='min'):
+    """
+    Create a simplified ModelCheckpoint callback that avoids using options parameter.
+    """
+    # Create a plain callback with minimal parameters
+    callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath=model_file,
+        save_best_only=True,
+        monitor=monitor,
+        mode=mode,
+        verbose=1
+    )
+    
+    # Override the _save_model method to avoid options parameter
+    original_save_model = callback._save_model
+    
+    def safe_save_model(model, epoch, logs):
+        try:
+            logger.info("Using safe model save method (without options)")
+            # Save model directly instead of through callback's method
+            model.save(callback.filepath, overwrite=True, save_format='keras')
+            return True
+        except Exception as e:
+            logger.error(f"Error in custom save method: {e}")
+            # Try fallback method
+            try:
+                logger.info("Falling back to tf.keras.models.save_model")
+                tf.keras.models.save_model(
+                    model, 
+                    callback.filepath,
+                    overwrite=True,
+                    include_optimizer=True,
+                    save_format='keras',
+                    save_traces=False  # Try without traces
+                )
+                return True
+            except Exception as e2:
+                logger.error(f"Fallback save method also failed: {e2}")
+                return False
+    
+    # Replace the _save_model method with our custom version
+    callback._save_model = safe_save_model
+    
+    return callback
+
+
 def main():
     # Force a new model to be trained by deleting the old one
     model_path = "./model/AST/model_overall_ast.keras"
@@ -2176,16 +2222,14 @@ def main():
                 verbose=1
             ))
 
-        # Add ModelCheckpoint callback to save best model
-        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-            filepath=model_file,
-            save_best_only=True,
+        # Add custom ModelCheckpoint callback to save best model without options parameter
+        checkpoint_callback = create_simple_modelcheckpoint_callback(
+            model_file=model_file,
             monitor='val_loss',
-            mode='min',
-            verbose=1,
-            save_format='keras'  # Explicitly specify keras format
+            mode='min'
         )
         callbacks.append(checkpoint_callback)
+        logger.info("Added custom ModelCheckpoint callback that avoids 'options' parameter issues")
 
         callbacks.append(TerminateOnNaN(patience=3))
         logger.info("Added NaN detection callback")

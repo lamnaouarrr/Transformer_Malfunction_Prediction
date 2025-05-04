@@ -1834,10 +1834,135 @@ def main():
     )
 
     # Create model with the correct input shape
-    model = create_ast_model(
-        input_shape=(target_shape[0], target_shape[1]),
-        config=param.get("model", {}).get("architecture", {})
-    )
+    model_file = f"{param['model_directory']}/model_overall_ast.keras"
+    if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
+        try:
+            # First try: direct load with standard binary crossentropy
+            logger.info("Attempting to load model with simplified approach")
+            try:
+                model = tf.keras.models.load_model(
+                    model_file, 
+                    custom_objects=None,  # First try without custom objects
+                    compile=False  # Don't worry about compilation yet
+                )
+                # If we get here, loading succeeded
+                logger.info("Model loaded successfully without custom objects")
+                
+                # Now recompile with our desired settings
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                    loss="binary_crossentropy",
+                    metrics=['accuracy']
+                )
+                logger.info("Model recompiled with binary_crossentropy loss")
+                
+            except Exception as e1:
+                logger.warning(f"First load attempt failed: {e1}")
+                
+                # Second try: more careful approach with explicit custom objects
+                try:
+                    # Define simplified custom functions for loading
+                    def safe_focal_loss(y_true, y_pred):
+                        return tf.keras.losses.binary_crossentropy(y_true, y_pred)
+                    
+                    # Create custom objects dictionary with only string keys
+                    custom_objects = {
+                        'focal_loss': safe_focal_loss,
+                        'binary_cross_entropy_loss': tf.keras.losses.binary_crossentropy
+                    }
+                    
+                    # Load model without compilation
+                    model = tf.keras.models.load_model(
+                        model_file,
+                        custom_objects=custom_objects,
+                        compile=False
+                    )
+                    
+                    # Manually compile after loading
+                    model.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                        loss="binary_crossentropy",  # Use standard loss function
+                        metrics=['accuracy']
+                    )
+                    logger.info("Model loaded successfully with custom objects (compile=False)")
+                    
+                except Exception as e2:
+                    logger.warning(f"Second load attempt failed: {e2}")
+                    
+                    # Third try: create fresh model and load weights only
+                    try:
+                        logger.info("Trying to load weights only with fresh model...")
+                        # Create fresh model
+                        new_model = create_ast_model(
+                            input_shape=(target_shape[0], target_shape[1]),
+                            config=param.get("model", {}).get("architecture", {})
+                        )
+                        
+                        # Compile the model
+                        new_model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                            loss="binary_crossentropy",
+                            metrics=['accuracy']
+                        )
+                        
+                        # Try loading weights
+                        try:
+                            # Try h5 format first
+                            if os.path.exists(model_file):
+                                new_model.load_weights(model_file)
+                                logger.info("Model weights loaded successfully from h5 file")
+                            else:
+                                # Try SavedModel format
+                                new_model.load_weights(f"{model_file}/variables/variables")
+                                logger.info("Model weights loaded from SavedModel format")
+                            
+                            model = new_model
+                        except Exception as e3:
+                            logger.error(f"Weight loading failed: {e3}")
+                            raise Exception("All loading attempts failed")
+                    except Exception as final_e:
+                        logger.error(f"All loading attempts failed: {final_e}")
+                        # Create a new model as last resort
+                        logger.info(f"Creating new model with input shape: {target_shape}")
+                        model = create_ast_model(
+                            input_shape=(target_shape[0], target_shape[1]),
+                            config=param.get("model", {}).get("architecture", {})
+                        )
+                        # Need to set a flag to indicate training is required
+                        training_required = True
+                        logger.info("Created new model due to loading error, will need to train")
+            
+            # If we got here, we have a loaded model
+            logger.info("Model loaded from file")
+            # Check if we need to train anyway
+            if param.get("training", {}).get("force_training", False):
+                logger.info("Force training enabled, will train loaded model")
+                training_required = True
+            else:
+                logger.info("No training needed for loaded model")
+                training_required = False
+                
+        except Exception as e:
+            logger.error(f"Unhandled error during model loading: {e}")
+            # Create a new model with the target shape as last resort
+            logger.info(f"Creating new model with input shape: {target_shape}")
+            model = create_ast_model(
+                input_shape=(target_shape[0], target_shape[1]),
+                config=param.get("model", {}).get("architecture", {})
+            )
+            # Need to train
+            training_required = True
+            logger.info("Created new model due to unhandled error, will need to train")
+    else:
+        # No existing model file, create new one
+        logger.info(f"No existing model found, creating new model with input shape: {target_shape}")
+        model = create_ast_model(
+            input_shape=(target_shape[0], target_shape[1]),
+            config=param.get("model", {}).get("architecture", {})
+        )
+        # Need to train
+        training_required = True
+        logger.info("Created new model, will need to train")
 
     # Add debug prints for data verification
     print("\n============== TRAINING DATA DEBUG INFO ==============")
@@ -1936,79 +2061,6 @@ def main():
         logger.info("Converting val_labels to float32")
         val_labels_expanded = val_labels_expanded.astype(np.float32)
 
-    # Find optimal learning rate if enabled
-    if param.get("training", {}).get("find_optimal_lr", False):
-        logger.info("Running learning rate finder...")
-        
-        # Create a temporary model with the same architecture
-        temp_model = tf.keras.models.clone_model(model)
-        
-        # Create a callback to record learning rates and losses
-        class LRFinder(tf.keras.callbacks.Callback):
-            def __init__(self, min_lr=1e-7, max_lr=1e-1, steps=100):
-                super().__init__()
-                self.min_lr = min_lr
-                self.max_lr = max_lr
-                self.steps = steps
-                self.learning_rates = []
-                self.losses = []
-                self.step = 0
-                
-            def on_batch_end(self, batch, logs=None):
-                # Calculate and set learning rate
-                lr = self.min_lr * (self.max_lr / self.min_lr) ** (self.step / self.steps)
-                tf.keras.backend.set_value(self.model.optimizer.lr, lr)
-                
-                # Record learning rate and loss
-                self.learning_rates.append(lr)
-                self.losses.append(logs['loss'])
-                
-                # Update step
-                self.step += 1
-                
-                # Stop after specified number of steps
-                if self.step >= self.steps:
-                    self.model.stop_training = True
-        
-        # Create the LRFinder callback
-        lr_finder = LRFinder(min_lr=1e-7, max_lr=1e-1, steps=100)
-        
-        # Plot learning rate vs loss
-        plt.figure(figsize=(10, 6))
-        plt.plot(lr_finder.learning_rates, lr_finder.losses)
-        plt.xscale('log')
-        plt.xlabel('Learning Rate')
-        plt.ylabel('Loss')
-        plt.title('Learning Rate Finder')
-        plt.savefig(f"{param['result_directory']}/learning_rate_finder.png")
-        plt.close()
-        
-        # Find optimal learning rate (point of steepest descent)
-        losses = lr_finder.losses
-        learning_rates = lr_finder.learning_rates
-        
-        # Smooth the loss curve
-        window_size = min(5, len(losses) // 5)
-        if window_size > 0:
-            smoothed_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
-            # Find the point of steepest descent
-            gradients = np.gradient(smoothed_losses)
-            optimal_idx = np.argmin(gradients)
-            # Map back to original array
-            optimal_idx = min(optimal_idx + window_size // 2, len(learning_rates) - 1)
-            optimal_lr = learning_rates[optimal_idx]
-        else:
-            # If we don't have enough points, use a reasonable default
-            optimal_lr = 0.001
-        
-        logger.info(f"Optimal learning rate found: {optimal_lr:.6f}")
-        
-        # Update learning rate
-        learning_rate = optimal_lr
-
-
-
-
     print("============== VERIFYING GPU USAGE ==============")
     is_gpu_working = verify_gpu_usage()
     if not is_gpu_working:
@@ -2020,7 +2072,6 @@ def main():
     # Track model training time specifically
     model_start_time = time.time()
     # Define model_file and history_img variables
-    model_file = f"{param['model_directory']}/model_overall_ast.keras"
     history_img = f"{param['result_directory']}/history_overall_ast.png"
 
     # Enable mixed precision training
@@ -2032,84 +2083,7 @@ def main():
     model_config = param.get("model", {}).get("architecture", {})
     model.summary()
 
-    if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
-        try:
-            # Create explicit, non-nested versions of custom functions
-            def focal_loss_loading(y_true, y_pred):
-                # Simplified version for loading only
-                epsilon = 1e-7
-                y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-                bce = tf.keras.backend.binary_crossentropy(y_true, y_pred)
-                alpha = 0.25
-                gamma = 2.0
-                # Avoid nested operations for stability during loading
-                return tf.reduce_mean(bce)
-            
-            def binary_ce_loading(y_true, y_pred):
-                return tf.keras.losses.binary_crossentropy(y_true, y_pred)
-            
-            # Define custom objects with flat structure - ensure all keys are strings
-            custom_objects = {
-                "focal_loss": focal_loss_loading,
-                "binary_cross_entropy_loss": binary_ce_loading
-            }
-            
-            logger.info("Attempting to load model with simplified custom objects")
-            
-            # Try loading the model
-            if os.path.exists(model_file):
-                try:
-                    # Option 1: Try with custom_objects directly
-                    model = tf.keras.models.load_model(model_file, custom_objects=custom_objects)
-                    logger.info("Model loaded successfully with option 1")
-                except Exception as e1:
-                    logger.warning(f"First load attempt failed: {e1}")
-                    try:
-                        # Option 2: Try with compile=False
-                        model = tf.keras.models.load_model(model_file, compile=False)
-                        # Then manually compile
-                        model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-                            loss="binary_crossentropy",  # Use string identifier instead of function
-                            metrics=['accuracy']
-                        )
-                        logger.info("Model loaded successfully with option 2 (compile=False)")
-                    except Exception as e2:
-                        logger.warning(f"Second load attempt failed: {e2}")
-                        # Option 3: Last resort - create fresh model and load weights only
-                        logger.info("Trying to load weights only...")
-                        temp_model = create_ast_model(
-                            input_shape=(target_shape[0], target_shape[1]),
-                            config=param.get("model", {}).get("architecture", {})
-                        )
-                        # Compile the model before loading weights
-                        temp_model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-                            loss="binary_crossentropy",
-                            metrics=['accuracy']
-                        )
-                        try:
-                            temp_model.load_weights(model_file)
-                            model = temp_model
-                            logger.info("Model weights loaded successfully")
-                        except Exception as e3:
-                            raise Exception(f"All loading attempts failed: {e3}")
-            else:
-                # Try loading from SavedModel format
-                model = tf.keras.models.load_model(model_file, custom_objects=custom_objects)
-                logger.info("Model loaded from SavedModel format")
-                
-            logger.info("Model loaded from file, no training needed")
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            # Create a new model with the target shape
-            logger.info(f"Creating new model with input shape: {target_shape}")
-            model = create_ast_model(
-                input_shape=(target_shape[0], target_shape[1]),
-                config=param.get("model", {}).get("architecture", {})
-            )
-            logger.info("Created new model due to loading error")
-    else:
+    if training_required:
         # Define callbacks
         callbacks = []
         

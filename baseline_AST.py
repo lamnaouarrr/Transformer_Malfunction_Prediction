@@ -2637,7 +2637,8 @@ def main():
                 # Otherwise use a percentile-based approach
                 sorted_preds = np.sort(y_pred)
                 percentile_90 = sorted_preds[int(len(sorted_preds) * 0.9)]
-                adaptive_threshold = percentile_90 * 0.95  # Slightly below the 90th percentile
+                # Convert numpy value to float to avoid formatting issues
+                adaptive_threshold = float(percentile_90 * 0.95)  # Slightly below the 90th percentile
                 logger.info(f"Using 90th percentile based threshold: {adaptive_threshold:.4f}")
         else:
             # If no abnormal samples in prediction set, use best guess

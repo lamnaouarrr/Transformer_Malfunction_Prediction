@@ -2178,11 +2178,12 @@ def main():
 
         # Add ModelCheckpoint callback to save best model
         checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-            model_file,
+            filepath=model_file,
             save_best_only=True,
             monitor='val_loss',
             mode='min',
-            verbose=1
+            verbose=1,
+            save_format='keras'  # Explicitly specify keras format
         )
         callbacks.append(checkpoint_callback)
 

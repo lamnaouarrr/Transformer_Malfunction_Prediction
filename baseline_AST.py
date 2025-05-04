@@ -2633,8 +2633,8 @@ def main():
                 # If the distributions overlap significantly, try different approach
                 # Get the range of predictions and calculate threshold at different percentiles
                 sorted_preds = np.sort(y_pred)
-                lower_percentile = sorted_preds[int(len(sorted_preds) * 0.1)]  # 10th percentile
-                upper_percentile = sorted_preds[int(len(sorted_preds) * 0.9)]  # 90th percentile
+                lower_percentile = float(sorted_preds[int(len(sorted_preds) * 0.1)])  # 10th percentile
+                upper_percentile = float(sorted_preds[int(len(sorted_preds) * 0.9)])  # 90th percentile
                 
                 # If prediction range is too narrow, try more extreme thresholds
                 if upper_percentile - lower_percentile < 0.1:

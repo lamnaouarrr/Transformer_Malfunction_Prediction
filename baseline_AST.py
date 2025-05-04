@@ -1836,9 +1836,10 @@ def main():
     # Create model with the correct input shape
     model_file = f"{param['model_directory']}/model_overall_ast.keras"
     if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
+        training_required = True  # Default to training unless we successfully load a model
         try:
             # First try: direct load with standard binary crossentropy
-            logger.info("Attempting to load model with simplified approach")
+            logger.info("DEBUG: Attempting to load model with simplified approach")
             try:
                 model = tf.keras.models.load_model(
                     model_file, 
@@ -1846,7 +1847,8 @@ def main():
                     compile=False  # Don't worry about compilation yet
                 )
                 # If we get here, loading succeeded
-                logger.info("Model loaded successfully without custom objects")
+                logger.info("DEBUG: Model loaded successfully without custom objects")
+                training_required = False  # Successfully loaded, no training needed
                 
                 # Now recompile with our desired settings
                 model.compile(
@@ -1854,7 +1856,7 @@ def main():
                     loss="binary_crossentropy",
                     metrics=['accuracy']
                 )
-                logger.info("Model recompiled with binary_crossentropy loss")
+                logger.info("DEBUG: Model recompiled with binary_crossentropy loss")
                 
             except Exception as e1:
                 logger.warning(f"First load attempt failed: {e1}")
@@ -1884,14 +1886,15 @@ def main():
                         loss="binary_crossentropy",  # Use standard loss function
                         metrics=['accuracy']
                     )
-                    logger.info("Model loaded successfully with custom objects (compile=False)")
+                    logger.info("DEBUG: Model loaded successfully with custom objects (compile=False)")
+                    training_required = False  # Successfully loaded, no training needed
                     
                 except Exception as e2:
                     logger.warning(f"Second load attempt failed: {e2}")
                     
                     # Third try: create fresh model and load weights only
                     try:
-                        logger.info("Trying to load weights only with fresh model...")
+                        logger.info("DEBUG: Trying to load weights only with fresh model...")
                         # Create fresh model
                         new_model = create_ast_model(
                             input_shape=(target_shape[0], target_shape[1]),
@@ -1910,59 +1913,67 @@ def main():
                             # Try h5 format first
                             if os.path.exists(model_file):
                                 new_model.load_weights(model_file)
-                                logger.info("Model weights loaded successfully from h5 file")
+                                logger.info("DEBUG: Model weights loaded successfully from h5 file")
+                                training_required = False  # Successfully loaded weights, no training needed
                             else:
                                 # Try SavedModel format
                                 new_model.load_weights(f"{model_file}/variables/variables")
-                                logger.info("Model weights loaded from SavedModel format")
+                                logger.info("DEBUG: Model weights loaded from SavedModel format")
+                                training_required = False  # Successfully loaded weights, no training needed
                             
                             model = new_model
                         except Exception as e3:
                             logger.error(f"Weight loading failed: {e3}")
+                            logger.info("DEBUG: Will train a new model since weight loading failed")
+                            training_required = True  # Weight loading failed, need to train
                             raise Exception("All loading attempts failed")
                     except Exception as final_e:
                         logger.error(f"All loading attempts failed: {final_e}")
                         # Create a new model as last resort
-                        logger.info(f"Creating new model with input shape: {target_shape}")
+                        logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
                         model = create_ast_model(
                             input_shape=(target_shape[0], target_shape[1]),
                             config=param.get("model", {}).get("architecture", {})
                         )
                         # Need to set a flag to indicate training is required
                         training_required = True
-                        logger.info("Created new model due to loading error, will need to train")
+                        logger.info("DEBUG: Created new model due to loading error, will need to train")
             
-            # If we got here, we have a loaded model
-            logger.info("Model loaded from file")
+            # Debug the training_required flag value
+            logger.info(f"DEBUG: After model loading attempts, training_required = {training_required}")
+            
             # Check if we need to train anyway
             if param.get("training", {}).get("force_training", False):
                 logger.info("Force training enabled, will train loaded model")
                 training_required = True
+            
+            # Final check of training_required flag
+            if training_required:
+                logger.info("DEBUG: Will train the model")
             else:
-                logger.info("No training needed for loaded model")
-                training_required = False
+                logger.info("DEBUG: No training needed for loaded model")
                 
         except Exception as e:
             logger.error(f"Unhandled error during model loading: {e}")
             # Create a new model with the target shape as last resort
-            logger.info(f"Creating new model with input shape: {target_shape}")
+            logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
             model = create_ast_model(
                 input_shape=(target_shape[0], target_shape[1]),
                 config=param.get("model", {}).get("architecture", {})
             )
             # Need to train
             training_required = True
-            logger.info("Created new model due to unhandled error, will need to train")
+            logger.info("DEBUG: Created new model due to unhandled error, will need to train")
     else:
         # No existing model file, create new one
-        logger.info(f"No existing model found, creating new model with input shape: {target_shape}")
+        logger.info(f"DEBUG: No existing model found, creating new model with input shape: {target_shape}")
         model = create_ast_model(
             input_shape=(target_shape[0], target_shape[1]),
             config=param.get("model", {}).get("architecture", {})
         )
         # Need to train
         training_required = True
-        logger.info("Created new model, will need to train")
+        logger.info("DEBUG: Created new model, will need to train")
 
     # Add debug prints for data verification
     print("\n============== TRAINING DATA DEBUG INFO ==============")

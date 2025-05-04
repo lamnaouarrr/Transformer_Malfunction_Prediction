@@ -1517,6 +1517,15 @@ def create_improved_optimizer():
 
 
 def main():
+    # Force a new model to be trained by deleting the old one
+    model_path = "./model/AST/model_overall_ast.keras"
+    if os.path.exists(model_path):
+        logger.info(f"DEBUG: Removing existing model file for fresh training: {model_path}")
+        os.remove(model_path)
+    if os.path.exists(model_path + "_temp"):
+        logger.info(f"DEBUG: Removing existing temp model directory: {model_path}_temp")
+        shutil.rmtree(model_path + "_temp")
+    
     # Set memory growth before any other TensorFlow operations
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
@@ -1997,8 +2006,8 @@ def main():
             # Debug the training_required flag value
             logger.info(f"DEBUG: After model loading attempts, training_required = {training_required}")
             
-            # Check if we need to train anyway
-            if param.get("training", {}).get("force_training", False):
+            # Force training for debugging - this will ensure the model always gets trained
+            if param.get("training", {}).get("force_training", False) or param.get("debug", {}).get("force_training", True):
                 logger.info("Force training enabled, will train loaded model")
                 training_required = True
             
@@ -2167,6 +2176,16 @@ def main():
                 verbose=1
             ))
 
+        # Add ModelCheckpoint callback to save best model
+        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+            model_file,
+            save_best_only=True,
+            monitor='val_loss',
+            mode='min',
+            save_weights_only=False,
+            verbose=1
+        )
+        callbacks.append(checkpoint_callback)
 
         callbacks.append(TerminateOnNaN(patience=3))
         logger.info("Added NaN detection callback")

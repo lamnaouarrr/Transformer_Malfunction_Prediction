@@ -1838,61 +1838,84 @@ def main():
     if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
         training_required = True  # Default to training unless we successfully load a model
         try:
+            # Print detailed information about the model file
+            logger.info(f"DEBUG: Model file exists at: {model_file}")
+            logger.info(f"DEBUG: Model file size: {os.path.getsize(model_file) if os.path.exists(model_file) else 'N/A'} bytes")
+            logger.info(f"DEBUG: Model directory contents: {os.listdir(os.path.dirname(model_file))}")
+            
             # First try: direct load with standard binary crossentropy
             logger.info("DEBUG: Attempting to load model with simplified approach")
             try:
+                # Try loading with compile=False first to see if that works
+                logger.info("DEBUG: Trying tf.keras.models.load_model with compile=False")
+                
+                # Instead of trying to load the optimizer state which might cause issues
                 model = tf.keras.models.load_model(
                     model_file, 
-                    custom_objects=None,  # First try without custom objects
-                    compile=False  # Don't worry about compilation yet
+                    custom_objects=None,
+                    compile=False
                 )
-                # If we get here, loading succeeded
-                logger.info("DEBUG: Model loaded successfully without custom objects")
-                training_required = False  # Successfully loaded, no training needed
                 
-                # Now recompile with our desired settings
+                # If we get here, loading succeeded
+                logger.info("DEBUG: Model loaded successfully, now recompiling")
+                
+                # Now recompile with fresh optimizer instead of trying to load optimizer state
                 model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                    optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate),  # Use legacy optimizer for better compatibility
                     loss="binary_crossentropy",
                     metrics=['accuracy']
                 )
+                training_required = False  # Successfully loaded, no training needed
                 logger.info("DEBUG: Model recompiled with binary_crossentropy loss")
                 
             except Exception as e1:
                 logger.warning(f"First load attempt failed: {e1}")
+                logger.info(f"DEBUG: Error type: {type(e1)}")
+                logger.info(f"DEBUG: Error args: {e1.args}")
                 
-                # Second try: more careful approach with explicit custom objects
+                # Second try: Using save_format='tf' instead of 'keras'
                 try:
-                    # Define simplified custom functions for loading
-                    def safe_focal_loss(y_true, y_pred):
-                        return tf.keras.losses.binary_crossentropy(y_true, y_pred)
+                    logger.info("DEBUG: Trying to create a fresh model and save it in TF format first")
+                    # Create a temporary new model
+                    temp_model = create_ast_model(
+                        input_shape=(target_shape[0], target_shape[1]),
+                        config=param.get("model", {}).get("architecture", {})
+                    )
                     
-                    # Create custom objects dictionary with only string keys
-                    custom_objects = {
-                        'focal_loss': safe_focal_loss,
-                        'binary_cross_entropy_loss': tf.keras.losses.binary_crossentropy
-                    }
+                    # Save it in TF format
+                    temp_model_path = f"{model_file}_temp"
+                    logger.info(f"DEBUG: Saving temporary model to {temp_model_path}")
+                    temp_model.save(temp_model_path, save_format='tf')
                     
-                    # Load model without compilation
+                    # Now try to load the model again with TF format
+                    logger.info(f"DEBUG: Loading from temporary TF model")
                     model = tf.keras.models.load_model(
-                        model_file,
-                        custom_objects=custom_objects,
+                        temp_model_path,
                         compile=False
                     )
                     
-                    # Manually compile after loading
+                    # Compile the model
                     model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-                        loss="binary_crossentropy",  # Use standard loss function
+                        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate),
+                        loss="binary_crossentropy",
                         metrics=['accuracy']
                     )
-                    logger.info("DEBUG: Model loaded successfully with custom objects (compile=False)")
-                    training_required = False  # Successfully loaded, no training needed
+                    
+                    # Clean up temp model
+                    import shutil
+                    if os.path.exists(temp_model_path) and os.path.isdir(temp_model_path):
+                        shutil.rmtree(temp_model_path)
+                    
+                    # Successfully loaded
+                    training_required = False
+                    logger.info("DEBUG: Model loaded successfully using TF format")
                     
                 except Exception as e2:
                     logger.warning(f"Second load attempt failed: {e2}")
+                    logger.info(f"DEBUG: Error type: {type(e2)}")
+                    logger.info(f"DEBUG: Error args: {e2.args}")
                     
-                    # Third try: create fresh model and load weights only
+                    # Third try: create fresh model and try loading weights directly
                     try:
                         logger.info("DEBUG: Trying to load weights only with fresh model...")
                         # Create fresh model
@@ -1903,30 +1926,39 @@ def main():
                         
                         # Compile the model
                         new_model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                            optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate),
                             loss="binary_crossentropy",
-                            metrics=['accuracy']
+                            metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
                         )
                         
-                        # Try loading weights
+                        # Try loading weights, avoid loading optimizer state
                         try:
-                            # Try h5 format first
-                            if os.path.exists(model_file):
-                                new_model.load_weights(model_file)
-                                logger.info("DEBUG: Model weights loaded successfully from h5 file")
-                                training_required = False  # Successfully loaded weights, no training needed
-                            else:
-                                # Try SavedModel format
-                                new_model.load_weights(f"{model_file}/variables/variables")
-                                logger.info("DEBUG: Model weights loaded from SavedModel format")
-                                training_required = False  # Successfully loaded weights, no training needed
-                            
+                            if os.path.isdir(model_file):  # SavedModel format
+                                logger.info(f"DEBUG: Model file is a directory, trying to load weights from SavedModel")
+                                # For SavedModel, we need to load the whole model first to extract weights
+                                temp_model = tf.keras.models.load_model(model_file, compile=False)
+                                new_model.set_weights(temp_model.get_weights())
+                                del temp_model  # Free memory
+                                logger.info("DEBUG: Successfully transferred weights from SavedModel")
+                            else:  # H5 format
+                                logger.info(f"DEBUG: Model file is H5 format, trying to load weights directly")
+                                new_model.load_weights(model_file, by_name=True, skip_mismatch=True)
+                                logger.info("DEBUG: Successfully loaded weights from H5")
+                                
                             model = new_model
+                            training_required = False
                         except Exception as e3:
-                            logger.error(f"Weight loading failed: {e3}")
+                            error_msg = str(e3)
+                            logger.error(f"Weight loading failed: {error_msg}")
+                            logger.info(f"DEBUG: Error type: {type(e3)}")
+                            logger.info(f"DEBUG: Error args: {e3.args}")
+                            
+                            if "LossScaleOptimizerV3" in error_msg:
+                                logger.info("DEBUG: LossScaleOptimizerV3 error detected, this is likely due to mixed precision issues")
+                            
                             logger.info("DEBUG: Will train a new model since weight loading failed")
                             training_required = True  # Weight loading failed, need to train
-                            raise Exception("All loading attempts failed")
+                            raise Exception(f"Failed to load weights: {error_msg}")
                     except Exception as final_e:
                         logger.error(f"All loading attempts failed: {final_e}")
                         # Create a new model as last resort
@@ -1955,6 +1987,9 @@ def main():
                 
         except Exception as e:
             logger.error(f"Unhandled error during model loading: {e}")
+            logger.info(f"DEBUG: Error type: {type(e)}")
+            logger.info(f"DEBUG: Error args: {e.args if hasattr(e, 'args') else 'No args'}")
+            
             # Create a new model with the target shape as last resort
             logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
             model = create_ast_model(
@@ -1966,7 +2001,7 @@ def main():
             logger.info("DEBUG: Created new model due to unhandled error, will need to train")
     else:
         # No existing model file, create new one
-        logger.info(f"DEBUG: No existing model found, creating new model with input shape: {target_shape}")
+        logger.info(f"DEBUG: No existing model found at {model_file}, creating new model with input shape: {target_shape}")
         model = create_ast_model(
             input_shape=(target_shape[0], target_shape[1]),
             config=param.get("model", {}).get("architecture", {})

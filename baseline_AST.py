@@ -872,7 +872,7 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """Create an Audio Spectrogram Transformer (AST) model with improved stability"""
+    """Create an Audio Spectrogram Transformer (AST) model with improved output separation"""
     if config is None:
         config = {}
     
@@ -963,9 +963,31 @@ def create_ast_model(input_shape, config=None):
     # Global average pooling
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Final classification head with dropout
+    # Improved classification head with higher capacity and logit shifting
     x = tf.keras.layers.Dropout(0.2)(x)
-    outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    
+    # First dense layer in classification head
+    x = tf.keras.layers.Dense(
+        256,
+        activation='relu',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
+    )(x)
+    
+    # Second dense layer
+    x = tf.keras.layers.Dense(
+        64, 
+        activation='relu',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
+    )(x)
+    
+    # Output layer with bias initialization to solve the low prediction value issue
+    # Use larger positive bias to shift predictions toward 0.5 instead of 0.1-0.2 range
+    outputs = tf.keras.layers.Dense(
+        1, 
+        activation='sigmoid',
+        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
+        bias_initializer=tf.keras.initializers.Constant(1.0)  # Start with positive bias to increase output values
+    )(x)
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
@@ -1457,28 +1479,6 @@ def verify_gpu_usage():
             return True
         else:
             logger.warning("⚠ GPU is not being used for tensor operations!")
-            print("⚠ GPU is not being used for tensor operations!")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error checking GPU usage: {e}")
-        print(f"Error checking GPU usage: {e}")
-        return False
-
-
-def save_test_data(file_path, test_data, test_labels):
-    """Save test data and labels to avoid reprocessing every time"""
-    try:
-        logger.info(f"Saving processed test data to {file_path}")
-        np.savez_compressed(
-            file_path,
-            test_data=test_data,
-            test_labels=test_labels
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Error saving test data: {e}")
-        return False
 
 def load_test_data(file_path):
     """Load processed test data if available"""

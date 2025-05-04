@@ -872,7 +872,7 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 # model
 ########################################################################
 def create_ast_model(input_shape, config=None):
-    """Create an Audio Spectrogram Transformer (AST) model with improved output separation"""
+    """Create an Audio Spectrogram Transformer (AST) model with improved classification performance"""
     if config is None:
         config = {}
     
@@ -903,6 +903,7 @@ def create_ast_model(input_shape, config=None):
         strides=patch_size,
         padding='same',
         kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),  # Stable initialization
+        bias_initializer=tf.keras.initializers.Zeros(),
         name='patch_embedding'
     )(x)
     
@@ -941,7 +942,7 @@ def create_ast_model(input_shape, config=None):
         # Feed-forward network with smaller dimensions
         ffn_output = tf.keras.layers.Dense(
             min(dim_feedforward * 2, 1024),  # Limit size for stability
-            activation='relu',  # Use ReLU instead of GELU for stability
+            activation='gelu',  # Use GELU instead of ReLU for better performance
             kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
         )(ffn_input)
         
@@ -963,30 +964,19 @@ def create_ast_model(input_shape, config=None):
     # Global average pooling
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     
-    # Improved classification head with higher capacity and logit shifting
+    # Add more discriminative layers
+    x = tf.keras.layers.Dense(256, activation='gelu')(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dense(128, activation='gelu')(x)
     x = tf.keras.layers.Dropout(0.2)(x)
     
-    # First dense layer in classification head
-    x = tf.keras.layers.Dense(
-        256,
-        activation='relu',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
-    )(x)
-    
-    # Second dense layer
-    x = tf.keras.layers.Dense(
-        64, 
-        activation='relu',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
-    )(x)
-    
-    # Output layer with bias initialization to solve the low prediction value issue
-    # Use larger positive bias to shift predictions toward 0.5 instead of 0.1-0.2 range
+    # Final classification head with a bias initialization that helps separate classes
+    # Initialize with a negative bias to push predictions toward 0 (normal class)
+    # This combats the problem of predicting only values in a narrow positive range
     outputs = tf.keras.layers.Dense(
         1, 
         activation='sigmoid',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),
-        bias_initializer=tf.keras.initializers.Constant(1.0)  # Start with positive bias to increase output values
+        bias_initializer=tf.keras.initializers.Constant(-2.0)  # Start with negative bias
     )(x)
     
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
@@ -1479,6 +1469,28 @@ def verify_gpu_usage():
             return True
         else:
             logger.warning("⚠ GPU is not being used for tensor operations!")
+            print("⚠ GPU is not being used for tensor operations!")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error checking GPU usage: {e}")
+        print(f"Error checking GPU usage: {e}")
+        return False
+
+
+def save_test_data(file_path, test_data, test_labels):
+    """Save test data and labels to avoid reprocessing every time"""
+    try:
+        logger.info(f"Saving processed test data to {file_path}")
+        np.savez_compressed(
+            file_path,
+            test_data=test_data,
+            test_labels=test_labels
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error saving test data: {e}")
+        return False
 
 def load_test_data(file_path):
     """Load processed test data if available"""
@@ -1491,6 +1503,17 @@ def load_test_data(file_path):
     except Exception as e:
         logger.error(f"Error loading test data: {e}")
         return None, None
+
+
+def create_improved_optimizer():
+    """Create an optimizer optimized for binary classification with gradient clipping"""
+    return tf.keras.optimizers.Adam(
+        learning_rate=5e-5,  # Start with a lower learning rate
+        clipnorm=1.0,        # Clip gradients to prevent extreme updates
+        epsilon=1e-7,        # Numerical stability
+        beta_1=0.9,          # Momentum
+        beta_2=0.999         # RMSprop factor
+    )
 
 
 def main():
@@ -1861,7 +1884,7 @@ def main():
                 
                 # Now recompile with fresh optimizer instead of trying to load optimizer state
                 model.compile(
-                    optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate),  # Use legacy optimizer for better compatibility
+                    optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.0001),  # Use legacy optimizer with fixed learning rate
                     loss="binary_crossentropy",
                     metrics=['accuracy']
                 )
@@ -1896,7 +1919,7 @@ def main():
                     
                     # Compile the model
                     model.compile(
-                        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate),
+                        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.0001),  # Use legacy optimizer with fixed learning rate
                         loss="binary_crossentropy",
                         metrics=['accuracy']
                     )
@@ -1926,7 +1949,7 @@ def main():
                         
                         # Compile the model
                         new_model.compile(
-                            optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate),
+                            optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.0001),  # Use legacy optimizer with fixed learning rate
                             loss="binary_crossentropy",
                             metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
                         )
@@ -2205,8 +2228,8 @@ def main():
             compile_params["optimizer"] = Adam(learning_rate=learning_rate, clipnorm=clipnorm)
             logger.info(f"Using Adam optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
         else:
-            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=clipnorm)
-            logger.info(f"Using Adam optimizer with gradient clipping (clipnorm={clipnorm})")
+            compile_params["optimizer"] = create_improved_optimizer()
+            logger.info(f"Using improved optimizer with gradient clipping (clipnorm={clipnorm})")
 
 
         # Use a more stable loss function
@@ -2533,10 +2556,13 @@ def main():
             history = model.fit(
                 train_data,
                 train_labels_expanded,
-                batch_size=64,
+                batch_size=32,  # Smaller batch size for better learning
                 epochs=50,
                 validation_data=(val_data, val_labels_expanded),
-                class_weight=class_weights,
+                class_weight={
+                    0: 1.0,    # Normal class 
+                    1: 25.0    # Much higher weight for abnormal class to force model to learn
+                },
                 callbacks=callbacks,
                 verbose=1
             )

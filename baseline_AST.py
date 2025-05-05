@@ -57,26 +57,38 @@ def binary_cross_entropy_loss(y_true, y_pred):
     # Use TF's built-in binary_crossentropy for better memory efficiency
     return tf.keras.losses.binary_crossentropy(y_true, y_pred)
 
-def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
+def focal_loss(gamma=2.0, alpha=0.25):
     """
-    Focal loss for addressing class imbalance with improved numerical stability
+    Focal Loss implementation for binary classification with imbalanced datasets.
+    
+    Args:
+        gamma: Focusing parameter. Higher values increase focus on hard examples.
+        alpha: Weighting factor for the positive class.
+    
+    Returns:
+        A loss function that computes focal loss.
     """
-    # Clip predictions to prevent numerical instability
-    epsilon = K.epsilon()
-    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+    def loss_function(y_true, y_pred):
+        # Clip predictions for numerical stability
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
+        
+        # Calculate cross entropy
+        cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
+        
+        # Calculate focal weight
+        p_t = tf.where(tf.equal(y_true, 1), y_pred, 1 - y_pred)
+        focal_weight = tf.pow(1 - p_t, gamma)
+        
+        # Apply alpha weighting
+        alpha_weight = tf.where(tf.equal(y_true, 1), alpha, 1 - alpha)
+        
+        # Combine for final loss
+        focal_loss = alpha_weight * focal_weight * cross_entropy
+        
+        return tf.reduce_mean(focal_loss)
     
-    # Binary cross entropy
-    bce = K.binary_crossentropy(y_true, y_pred)
-    
-    # Focal weight
-    p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
-    alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
-    modulating_factor = K.pow(1.0 - p_t, gamma)
-    
-    # Apply weights
-    focal_loss = alpha_factor * modulating_factor * bce
-    
-    return K.mean(focal_loss)
+    return loss_function
 
 
 
@@ -871,115 +883,84 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 # model
 ########################################################################
-def create_ast_model(input_shape, config=None):
-    """Create an Audio Spectrogram Transformer (AST) model with improved classification performance"""
-    if config is None:
-        config = {}
+def create_model(input_shape, transformer_params):
+    # Extract transformer parameters
+    num_heads = transformer_params.get("num_heads", 4)
+    dim_feedforward = transformer_params.get("dim_feedforward", 512)
+    num_encoder_layers = transformer_params.get("num_encoder_layers", 2)
+    attention_dropout = transformer_params.get("attention_dropout", 0.1)
+    dropout_rate = 0.2
     
-    # Get transformer configuration
-    transformer_config = config.get("transformer", {})
-    num_heads = transformer_config.get("num_heads", 4)
-    dim_feedforward = transformer_config.get("dim_feedforward", 512)
-    num_encoder_layers = transformer_config.get("num_encoder_layers", 2)
-    patch_size = transformer_config.get("patch_size", 4)
-    attention_dropout = transformer_config.get("attention_dropout", 0.1)
+    # Create input layer
+    inputs = layers.Input(shape=input_shape)
     
-    # Calculate sequence length and embedding dimension based on input shape and patch size
-    h_patches = input_shape[0] // patch_size
-    w_patches = input_shape[1] // patch_size
-    seq_len = h_patches * w_patches
-    embed_dim = dim_feedforward
+    # Reshape to add channel dimension for Conv2D
+    x = layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
     
-    # Input layer
-    inputs = tf.keras.layers.Input(shape=input_shape)
+    # Patch embedding using Conv2D
+    x = layers.Conv2D(filters=512, kernel_size=4, strides=4, padding='same', name='patch_embedding')(x)
+    x = layers.BatchNormalization()(x)
     
-    # Reshape for patching
-    x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
+    # Reshape for transformer
+    batch_size = tf.shape(x)[0]
+    h = tf.shape(x)[1]
+    w = tf.shape(x)[2]
+    c = tf.shape(x)[3]
+    x = layers.Reshape((h * w, c))(x)
     
-    # Patch embedding using Conv2D with smaller initial values
-    x = tf.keras.layers.Conv2D(
-        filters=embed_dim,
-        kernel_size=patch_size,
-        strides=patch_size,
-        padding='same',
-        kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42),  # Stable initialization
-        bias_initializer=tf.keras.initializers.Zeros(),
-        name='patch_embedding'
-    )(x)
+    # Position encoding (optional but improves results)
+    x = layers.LayerNormalization(epsilon=1e-6)(x)
     
-    # Add batch normalization for stability
-    x = tf.keras.layers.BatchNormalization()(x)
+    # Add position embeddings
+    positions = tf.range(start=0, limit=tf.shape(x)[1], delta=1)
+    pos_encoding = positional_encoding(tf.shape(x)[1], tf.shape(x)[2])
+    pos_encoding = pos_encoding[tf.newaxis, :, :]
+    x = x + pos_encoding[:, :tf.shape(x)[1], :]
     
-    # Reshape to sequence format for transformer
-    x = tf.keras.layers.Reshape((seq_len, embed_dim))(x)
-    
-    # Layer normalization before adding positional encoding
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
-    
-    # Add positional encoding
-    pos_encoding = positional_encoding(seq_len, embed_dim, encoding_type="sinusoidal")
-    x = tf.keras.layers.Add()([x, pos_encoding])
-    
-    # Apply transformer encoder layers
+    # Transformer Encoder Layers
     for i in range(num_encoder_layers):
-        # Layer normalization before attention (pre-norm formulation)
-        attn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
-        
-        # Multi-head attention block with smaller key_dim
-        attn_output = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=max(16, embed_dim // num_heads),  # Ensure key_dim is not too small
+        # Multi-head attention block
+        residual = x
+        x = layers.LayerNormalization(epsilon=1e-6)(x)
+        mha = layers.MultiHeadAttention(
+            num_heads=num_heads, 
+            key_dim=dim_feedforward // num_heads,
             dropout=attention_dropout,
             name=f'encoder_mha_{i}'
-        )(attn_input, attn_input)
+        )(x, x)
+        x = layers.Add()([residual, mha])
         
-        # Residual connection
-        x = tf.keras.layers.Add()([x, attn_output])
-        
-        # Layer normalization before FFN
-        ffn_input = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
-        
-        # Feed-forward network with smaller dimensions
-        ffn_output = tf.keras.layers.Dense(
-            min(dim_feedforward * 2, 1024),  # Limit size for stability
-            activation='gelu',  # Use GELU instead of ReLU for better performance
-            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
-        )(ffn_input)
-        
-        # Add dropout for regularization
-        ffn_output = tf.keras.layers.Dropout(0.1)(ffn_output)
-        
-        # Second dense layer
-        ffn_output = tf.keras.layers.Dense(
-            embed_dim,
-            kernel_initializer=tf.keras.initializers.GlorotNormal(seed=42)
-        )(ffn_output)
-        
-        # Residual connection
-        x = tf.keras.layers.Add()([x, ffn_output])
+        # Feed-forward block
+        residual = x
+        x = layers.LayerNormalization(epsilon=1e-6)(x)
+        x = layers.Dense(dim_feedforward * 2)(x)
+        x = layers.Dropout(dropout_rate)(x)
+        x = layers.Dense(dim_feedforward)(x)
+        x = layers.Add()([residual, x])
     
-    # Final layer normalization
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+    # Final normalization and global pooling
+    x = layers.LayerNormalization(epsilon=1e-6)(x)
+    x = layers.GlobalAveragePooling1D()(x)
     
-    # Global average pooling
-    x = tf.keras.layers.GlobalAveragePooling1D()(x)
+    # Classification head with stronger regularization
+    x = layers.Dense(256, activation='gelu')(x)
+    x = layers.Dropout(0.3)(x)
+    x = layers.Dense(128, activation='gelu')(x)
+    x = layers.Dropout(0.3)(x)
     
-    # Add more discriminative layers
-    x = tf.keras.layers.Dense(256, activation='gelu')(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    x = tf.keras.layers.Dense(128, activation='gelu')(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    # Output layer with high-contrast activation
+    # This is the key fix for the narrow prediction range issue
+    raw_output = layers.Dense(1, activation=None)(x)
     
-    # Final classification head with a bias initialization that helps separate classes
-    # Initialize with a negative bias to push predictions toward 0 (normal class)
-    # This combats the problem of predicting only values in a narrow positive range
-    outputs = tf.keras.layers.Dense(
-        1, 
-        activation='sigmoid',
-        bias_initializer=tf.keras.initializers.Constant(-2.0)  # Start with negative bias
-    )(x)
+    # Add a lambda layer to increase prediction contrast 
+    # This will help spread predictions further from 0.5 threshold
+    outputs = layers.Lambda(
+        lambda x: tf.sigmoid(5.0 * x),  # Multiply by 5 to increase contrast/separation
+        name='contrast_sigmoid'
+    )(raw_output)
     
-    return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    return model
 
 
 
@@ -1519,6 +1500,7 @@ def create_improved_optimizer():
 def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode='min'):
     """
     Create a simplified ModelCheckpoint callback that avoids using options parameter.
+    This fixes the "Could not extract model from args or kwargs" error.
     """
     # Create a plain callback with minimal parameters
     callback = tf.keras.callbacks.ModelCheckpoint(
@@ -1529,72 +1511,32 @@ def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode=
         verbose=1
     )
     
-    # Override the _save_model method to avoid options parameter
+    # Store the original _save_model method
     original_save_model = callback._save_model
     
-    # Debugging wrapper to inspect the actual arguments being passed
-    def debug_save_wrapper(*args, **kwargs):
-        logger.info(f"ModelCheckpoint._save_model called with args: {args}")
-        logger.info(f"ModelCheckpoint._save_model called with kwargs: {kwargs}")
-        
-        # Extract model from the arguments regardless of position
-        if len(args) >= 3 and isinstance(args[2], tf.keras.Model):
-            model = args[2]
-            epoch = args[0]
-            logs = args[1]
-            logger.info(f"Extracted model from args[2], epoch from args[0], logs from args[1]")
-        elif len(args) >= 1 and isinstance(args[0], tf.keras.Model):
-            model = args[0]
-            epoch = kwargs.get('epoch', 0)
-            logs = kwargs.get('logs', {})
-            logger.info(f"Extracted model from args[0], epoch and logs from kwargs")
-        elif 'model' in kwargs:
-            model = kwargs['model']
-            epoch = kwargs.get('epoch', 0)
-            logs = kwargs.get('logs', {})
-            logger.info(f"Extracted model from kwargs")
-        else:
-            logger.error(f"Could not extract model from args or kwargs")
-            logger.error(f"Args: {args}")
-            logger.error(f"Kwargs: {kwargs}")
-            return False
-        
+    # Create a new _save_model method that handles the error
+    def safe_save_model(epoch, logs):
         try:
-            logger.info(f"Using safe model save method (epoch: {epoch})")
-            # Save model directly instead of through callback's method
-            model.save(callback.filepath, overwrite=True, save_format='keras')
-            logger.info(f"Model saved successfully at epoch {epoch}")
-            return True
-        except Exception as e:
-            logger.error(f"Error in custom save method: {e}")
-            # Try fallback method
-            try:
-                logger.info("Falling back to tf.keras.models.save_model")
-                tf.keras.models.save_model(
-                    model, 
-                    callback.filepath,
-                    overwrite=True,
-                    include_optimizer=False,  # Try without optimizer to avoid issues
-                    save_format='keras',
-                    save_traces=False  # Try without traces
-                )
-                logger.info(f"Model saved successfully using fallback method at epoch {epoch}")
-                return True
-            except Exception as e2:
-                logger.error(f"Fallback save method also failed: {e2}")
-                # Final fallback: save weights only
+            # Check if we should save based on monitor value
+            current = logs.get(callback.monitor)
+            if current is None:
+                logger.warning(f'ModelCheckpoint: {callback.monitor} not available in logs')
+                return
+                
+            if callback.monitor_op(current, callback.best):
+                logger.info(f'Saving model to {callback.filepath} with {callback.monitor}={current:.4f}')
+                callback.best = current
                 try:
-                    logger.info("Attempting to save weights only")
-                    weights_path = f"{callback.filepath}_weights"
-                    model.save_weights(weights_path)
-                    logger.info(f"Weights saved to {weights_path}")
-                    return False  # Return False as the full model wasn't saved
-                except Exception as e3:
-                    logger.error(f"All save methods failed: {e3}")
-                    return False
+                    # Simply call model.save() directly to avoid the problematic options parameter
+                    callback.model.save(callback.filepath, overwrite=True)
+                    logger.info(f"Model saved successfully at epoch {epoch+1}")
+                except Exception as e:
+                    logger.error(f"Error saving model: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error in ModelCheckpoint: {str(e)}")
     
-    # Replace the _save_model method with our debug wrapper
-    callback._save_model = debug_save_wrapper
+    # Replace the _save_model method with our safe version
+    callback._save_model = lambda epoch, logs=None: safe_save_model(epoch, logs or {})
     
     return callback
 
@@ -1992,9 +1934,9 @@ def main():
                 try:
                     logger.info("DEBUG: Trying to create a fresh model and save it in TF format first")
                     # Create a temporary new model
-                    temp_model = create_ast_model(
+                    temp_model = create_model(
                         input_shape=(target_shape[0], target_shape[1]),
-                        config=param.get("model", {}).get("architecture", {})
+                        transformer_params=param.get("model", {}).get("architecture", {})
                     )
                     
                     # Save it in TF format
@@ -2034,9 +1976,9 @@ def main():
                     try:
                         logger.info("DEBUG: Trying to load weights only with fresh model...")
                         # Create fresh model
-                        new_model = create_ast_model(
+                        new_model = create_model(
                             input_shape=(target_shape[0], target_shape[1]),
-                            config=param.get("model", {}).get("architecture", {})
+                            transformer_params=param.get("model", {}).get("architecture", {})
                         )
                         
                         # Compile the model
@@ -2078,9 +2020,9 @@ def main():
                         logger.error(f"All loading attempts failed: {final_e}")
                         # Create a new model as last resort
                         logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
-                        model = create_ast_model(
+                        model = create_model(
                             input_shape=(target_shape[0], target_shape[1]),
-                            config=param.get("model", {}).get("architecture", {})
+                            transformer_params=param.get("model", {}).get("architecture", {})
                         )
                         # Need to set a flag to indicate training is required
                         training_required = True
@@ -2107,9 +2049,9 @@ def main():
             
             # Create a new model with the target shape as last resort
             logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
-            model = create_ast_model(
+            model = create_model(
                 input_shape=(target_shape[0], target_shape[1]),
-                config=param.get("model", {}).get("architecture", {})
+                transformer_params=param.get("model", {}).get("architecture", {})
             )
             # Need to train
             training_required = True
@@ -2117,9 +2059,9 @@ def main():
     else:
         # No existing model file, create new one
         logger.info(f"DEBUG: No existing model found at {model_file}, creating new model with input shape: {target_shape}")
-        model = create_ast_model(
+        model = create_model(
             input_shape=(target_shape[0], target_shape[1]),
-            config=param.get("model", {}).get("architecture", {})
+            transformer_params=param.get("model", {}).get("architecture", {})
         )
         # Need to train
         training_required = True
@@ -2344,7 +2286,7 @@ def main():
             use_safe_focal = param.get("model", {}).get("focal_loss", {}).get("use_safe_implementation", True)
             if use_safe_focal:
                 logger.info("Using numerically stable focal loss implementation")
-                compile_params["loss"] = lambda y_true, y_pred: focal_loss(y_true, y_pred, gamma, alpha)
+                compile_params["loss"] = lambda y_true, y_pred: focal_loss(gamma, alpha)(y_true, y_pred)
             else:
                 logger.warning("Using standard focal loss - watch for NaN losses")
                 compile_params["loss"] = tf.keras.losses.BinaryFocalCrossentropy(

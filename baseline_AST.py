@@ -1532,36 +1532,36 @@ def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode=
     # Override the _save_model method to avoid options parameter
     original_save_model = callback._save_model
     
-    def safe_save_model(epoch, logs, model, batch=None):
-        """Custom save method that handles all parameters and avoids using options"""
-        logger.info(f"Using safe model save method (epoch: {epoch})")
+    # Debugging wrapper to inspect the actual arguments being passed
+    def debug_save_wrapper(*args, **kwargs):
+        logger.info(f"ModelCheckpoint._save_model called with args: {args}")
+        logger.info(f"ModelCheckpoint._save_model called with kwargs: {kwargs}")
+        
+        # Extract model from the arguments regardless of position
+        if len(args) >= 3 and isinstance(args[2], tf.keras.Model):
+            model = args[2]
+            epoch = args[0]
+            logs = args[1]
+            logger.info(f"Extracted model from args[2], epoch from args[0], logs from args[1]")
+        elif len(args) >= 1 and isinstance(args[0], tf.keras.Model):
+            model = args[0]
+            epoch = kwargs.get('epoch', 0)
+            logs = kwargs.get('logs', {})
+            logger.info(f"Extracted model from args[0], epoch and logs from kwargs")
+        elif 'model' in kwargs:
+            model = kwargs['model']
+            epoch = kwargs.get('epoch', 0)
+            logs = kwargs.get('logs', {})
+            logger.info(f"Extracted model from kwargs")
+        else:
+            logger.error(f"Could not extract model from args or kwargs")
+            logger.error(f"Args: {args}")
+            logger.error(f"Kwargs: {kwargs}")
+            return False
+        
         try:
+            logger.info(f"Using safe model save method (epoch: {epoch})")
             # Save model directly instead of through callback's method
-            model.save(callback.filepath, overwrite=True, save_format='keras')
-            logger.info(f"Model saved successfully at epoch {epoch}")
-            return True
-        except Exception as e:
-            logger.error(f"Error in custom save method: {e}")
-            # Try fallback method
-            try:
-                logger.info("Falling back to tf.keras.models.save_model")
-                tf.keras.models.save_model(
-                    model, 
-                    callback.filepath,
-                    overwrite=True,
-                    include_optimizer=False,  # Try without optimizer to avoid issues
-                    save_format='keras',
-                    save_traces=False  # Try without traces
-                )
-                logger.info(f"Model saved successfully using fallback method at epoch {epoch}")
-                return True
-            except Exception as e2:
-                logger.error(f"Fallback save method also failed: {e2}")
-                # Final fallback: save weights only
-                try:
-                    logger.info("Attempting to save weights only")
-                    weights_path = f"{callback.filepath}_weights"
-                    model.save_weights(weights_path)
                     logger.info(f"Weights saved to {weights_path}")
                     return False  # Return False as the full model wasn't saved
                 except Exception as e3:

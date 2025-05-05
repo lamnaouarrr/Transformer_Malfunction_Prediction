@@ -130,8 +130,8 @@ def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
 # setup STD I/O
 ########################################################################
 def setup_logging():
-    os.makedirs("./logs/log_AST", exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_AST/baseline_AST.log")
+    os.makedirs("./logs/log_MAST", exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="./logs/log_MAST/baseline_MAST.log")
     logger = logging.getLogger(' ')
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -965,252 +965,157 @@ def create_model(input_shape, transformer_params):
 
 def create_mast_model(input_shape, mast_params, transformer_params):
     """
-    Create a Masked Audio Spectrogram Transformer (MAST) model.
+    Creates a MAST (Masked Audio Spectrogram Transformer) model with two variants:
+    1. A pretraining model that reconstructs masked inputs
+    2. A fine-tuning model for anomaly detection
     
     Args:
-        input_shape: Shape of input spectrograms (freq_bins, time_frames)
-        mast_params: Configuration parameters for MAST
-        transformer_params: Configuration parameters for transformer architecture
-    
+        input_shape: Tuple of (height, width) for input spectrograms
+        mast_params: MAST-specific parameters from config
+        transformer_params: Transformer architecture parameters
+        
     Returns:
-        Pretrain model and fine-tuning model
+        pretrain_model: Model for masked pretraining
+        finetune_model: Model for anomaly detection fine-tuning
     """
-    # Extract transformer parameters
-    num_heads = transformer_params.get("num_heads", 8)
-    dim_feedforward = transformer_params.get("dim_feedforward", 768)
-    num_encoder_layers = transformer_params.get("num_encoder_layers", 3)
-    attention_dropout = transformer_params.get("attention_dropout", 0.2)
-    dropout_rate = 0.2
+    logger.info(f"Creating MAST model with input shape {input_shape}")
     
-    # Extract MAST-specific parameters
-    masking_probability = mast_params.get("pretraining", {}).get("masking", {}).get("probability", 0.15)
-    patch_size = transformer_params.get("patch_size", 4)
-    use_cls_token = mast_params.get("architecture", {}).get("use_cls_token", True)
+    # Extract parameters
+    patch_size = mast_params.get("patch_size", 16)
+    embed_dim = transformer_params.get("embed_dim", 768)
+    num_heads = transformer_params.get("num_heads", 12)
+    num_layers = transformer_params.get("num_layers", 12)
+    mlp_dim = transformer_params.get("mlp_dim", 3072)
+    dropout_rate = transformer_params.get("dropout_rate", 0.1)
     
-    # Create input layer
-    inputs = tf.keras.layers.Input(shape=input_shape)
+    # Add explicit masking rate for pretraining
+    mask_prob = mast_params.get("pretraining", {}).get("masking", {}).get("probability", 0.15)
     
-    # Add a channel dimension for Conv2D
-    x = tf.keras.layers.Reshape((input_shape[0], input_shape[1], 1))(inputs)
+    # Input layers
+    inputs = layers.Input(shape=(*input_shape, 1))  # Add channel dimension
     
-    # Patch embedding using Conv2D
-    x = tf.keras.layers.Conv2D(filters=768, kernel_size=patch_size, strides=patch_size, padding='same', name='patch_embedding')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
+    # Patch embedding
+    patch_height = min(patch_size, input_shape[0])
+    patch_width = min(patch_size, input_shape[1])
     
-    # Reshape for transformer: (batch_size, patches, embedding_dim)
-    batch_size = tf.shape(x)[0]
-    h = tf.shape(x)[1]
-    w = tf.shape(x)[2]
-    c = tf.shape(x)[3]
-    x = tf.keras.layers.Reshape((h * w, c))(x)
+    # Calculate number of patches
+    num_patches_height = input_shape[0] // patch_height
+    num_patches_width = input_shape[1] // patch_width
+    total_patches = num_patches_height * num_patches_width
     
-    # Add CLS token if specified
-    if use_cls_token:
-        cls_token = tf.keras.layers.Dense(c)(tf.ones((batch_size, 1, 1)))
-        x = tf.keras.layers.Concatenate(axis=1)([cls_token, x])
+    logger.info(f"MAST: Using patch size {patch_height}x{patch_width} with {total_patches} total patches")
     
-    # Add position embeddings
-    pos_encoding = positional_encoding(tf.shape(x)[1], c)
-    x = x + pos_encoding[:, :tf.shape(x)[1], :]
+    # Create patches using Conv2D
+    x = layers.Conv2D(
+        filters=embed_dim,
+        kernel_size=(patch_height, patch_width),
+        strides=(patch_height, patch_width),
+        padding="valid",
+        name="patch_embedding"
+    )(inputs)
     
-    # Apply transformer blocks
-    for i in range(num_encoder_layers):
-        # Multi-head attention block
-        residual = x
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
-        attention_output = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, 
-            key_dim=dim_feedforward // num_heads,
-            dropout=attention_dropout
-        )(x, x)
-        x = tf.keras.layers.Add()([residual, attention_output])
+    # Reshape to sequence
+    batch_size = tf.shape(inputs)[0]
+    x = layers.Reshape((total_patches, embed_dim))(x)
+    
+    # Add positional embedding
+    positions = tf.range(start=0, limit=total_patches, delta=1)
+    pos_embedding = layers.Embedding(
+        input_dim=total_patches,
+        output_dim=embed_dim,
+        name="position_embedding"
+    )(positions)
+    
+    # Add positional embedding to patches
+    x = x + tf.expand_dims(pos_embedding, axis=0)  # (1, total_patches, embed_dim)
+    
+    # Add classification token ([CLS])
+    cls_token = layers.Layer(name="cls_token")(
+        tf.Variable(initial_value=tf.random.normal([1, 1, embed_dim]), trainable=True)
+    )
+    cls_tokens = tf.repeat(cls_token, repeats=batch_size, axis=0)
+    x = tf.concat([cls_tokens, x], axis=1)  # (batch_size, total_patches + 1, embed_dim)
+    
+    # Apply dropout
+    x = layers.Dropout(dropout_rate)(x)
+    
+    # Create a separate reconstruction head for pretraining
+    reconstruction_head = layers.Dense(
+        units=embed_dim,
+        activation='gelu',
+        name="reconstruction_dense_1"
+    )
+    reconstruction_head_2 = layers.Dense(
+        units=patch_height * patch_width,
+        name="reconstruction_output"
+    )
+    
+    # Apply Transformer blocks
+    for i in range(num_layers):
+        # Normalization and Multi-Head Attention
+        attn_output = layers.LayerNormalization(epsilon=1e-6)(x)
+        attn_output = layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=embed_dim // num_heads,
+            dropout=dropout_rate,
+            name=f"transformer_block_{i}_mha"
+        )(attn_output, attn_output)
+        x = layers.Add()([x, attn_output])
         
-        # Feed-forward block
-        residual = x
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
-        x = tf.keras.layers.Dense(dim_feedforward * 4, activation='gelu')(x)
-        x = tf.keras.layers.Dropout(dropout_rate)(x)
-        x = tf.keras.layers.Dense(dim_feedforward)(x)
-        x = tf.keras.layers.Add()([residual, x])
+        # Normalization and MLP
+        mlp_output = layers.LayerNormalization(epsilon=1e-6)(x)
+        mlp_output = layers.Dense(mlp_dim, activation='gelu')(mlp_output)
+        mlp_output = layers.Dropout(dropout_rate)(mlp_output)
+        mlp_output = layers.Dense(embed_dim)(mlp_output)
+        mlp_output = layers.Dropout(dropout_rate)(mlp_output)
+        x = layers.Add()([x, mlp_output])
     
-    # Final layer normalization
-    encoder_output = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+    # Final normalization
+    x = layers.LayerNormalization(epsilon=1e-6)(x)
     
-    # For pretraining (reconstruction model)
-    if use_cls_token:
-        sequence_output = encoder_output[:, 1:, :]  # Exclude CLS token
-    else:
-        sequence_output = encoder_output
+    # Extract the [CLS] token output for classification (first token)
+    cls_output = layers.Lambda(lambda x: x[:, 0], name="extract_cls")(x)
     
-    # Create the reconstruction head for pretraining
-    # Reshape back to 2D image-like format for reconstruction
-    h_patches = input_shape[0] // patch_size
-    w_patches = input_shape[1] // patch_size
-    reconstruction_output = tf.keras.layers.Reshape((h_patches, w_patches, dim_feedforward))(sequence_output)
+    # For pretraining model: Reconstruct the original input from all tokens (excluding CLS)
+    reconstruction_tokens = layers.Lambda(lambda x: x[:, 1:], name="extract_tokens")(x)
+    reconstructed = reconstruction_head(reconstruction_tokens)
+    reconstructed = reconstruction_head_2(reconstructed)
     
-    # Upsample to original size
-    reconstruction_output = tf.keras.layers.Conv2DTranspose(
-        filters=64, kernel_size=patch_size, strides=patch_size, padding='same'
-    )(reconstruction_output)
-    reconstruction_output = tf.keras.layers.BatchNormalization()(reconstruction_output)
-    reconstruction_output = tf.keras.layers.Activation('gelu')(reconstruction_output)
+    # Reshape back to image shape for reconstruction
+    reconstructed = layers.Reshape((num_patches_height, num_patches_width, patch_height * patch_width))(reconstructed)
     
-    # Final layer to reconstruct the spectrogram
-    reconstruction_output = tf.keras.layers.Conv2D(
-        filters=1, kernel_size=3, padding='same', activation='sigmoid'
-    )(reconstruction_output)
+    # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
+    reconstructed = layers.Lambda(
+        lambda x: tf.nn.depth_to_space(
+            tf.reshape(x, [
+                tf.shape(x)[0],
+                tf.shape(x)[1] * patch_height,
+                tf.shape(x)[2] * patch_width,
+                1
+            ]),
+            block_size=1
+        ),
+        name="reconstruction_reshape"
+    )(reconstructed)
     
-    # Reshape to match input shape
-    reconstruction_output = tf.keras.layers.Reshape(input_shape)(reconstruction_output)
+    # Create classifier head for anomaly detection
+    classifier = layers.Dense(512, activation='gelu', name="classifier_dense_1")(cls_output)
+    classifier = layers.Dropout(0.1)(classifier)
+    classifier = layers.Dense(128, activation='gelu', name="classifier_dense_2")(classifier)
+    classifier = layers.Dropout(0.1)(classifier)
+    classifier = layers.Dense(1, activation='sigmoid', name="anomaly_output")(classifier)
     
-    # Create the pretraining model
-    pretrain_model = tf.keras.Model(inputs=inputs, outputs=reconstruction_output, name="mast_pretrain")
-    
-    # For fine-tuning (classification model)
-    if use_cls_token:
-        # Use the CLS token for classification
-        cls_output = encoder_output[:, 0, :]
-    else:
-        # Global average pooling
-        cls_output = tf.keras.layers.GlobalAveragePooling1D()(encoder_output)
-    
-    # Add MLP head for classification
-    x = tf.keras.layers.Dense(256, activation='gelu')(cls_output)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    x = tf.keras.layers.Dense(64, activation='gelu')(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
-    
-    # High-contrast activation with contrast factor from config
-    contrast_factor = mast_params.get("finetuning", {}).get("contrast_factor", 5.0)
-    high_contrast = mast_params.get("finetuning", {}).get("high_contrast_activation", True)
-    
-    if high_contrast:
-        # Raw logits without activation
-        logits = tf.keras.layers.Dense(1)(x)
-        
-        # Lambda layer to increase prediction contrast
-        finetune_output = tf.keras.layers.Lambda(
-            lambda x: tf.sigmoid(contrast_factor * x),
-            name='contrast_sigmoid'
-        )(logits)
-    else:
-        # Standard sigmoid
-        finetune_output = tf.keras.layers.Dense(1, activation='sigmoid')(x)
-    
-    # Create the fine-tuning model
-    finetune_model = tf.keras.Model(inputs=inputs, outputs=finetune_output, name="mast_finetune")
+    # Create two models: one for pretraining and one for fine-tuning
+    pretrain_model = tf.keras.Model(inputs=inputs, outputs=reconstructed, name="MAST_pretrain")
+    finetune_model = tf.keras.Model(inputs=inputs, outputs=classifier, name="MAST_finetune")
     
     return pretrain_model, finetune_model
 
 
-def apply_masking(spectrograms, mask_probability=0.15, mask_length=8, mask_time=True, mask_freq=True):
+class MaskingLayer(layers.Layer):
     """
-    Apply masking to spectrograms for MAST pretraining.
-    
-    Args:
-        spectrograms: Batch of spectrograms [batch, freq_bins, time_frames]
-        mask_probability: Probability of masking a given patch
-        mask_length: Length of masks
-        mask_time: Whether to apply time masking
-        mask_freq: Whether to apply frequency masking
-    
-    Returns:
-        Tuple of (masked_spectrograms, mask_indices) where mask_indices are the locations that were masked
+    Layer that applies random masking to the input spectrogram for MAST pretraining.
     """
-    # Copy input to avoid modifying the original
-    masked_specs = tf.identity(spectrograms)
-    batch_size = tf.shape(spectrograms)[0]
-    freq_bins = tf.shape(spectrograms)[1]
-    time_frames = tf.shape(spectrograms)[2]
-    
-    # Initialize mask tracking tensor
-    mask_indices = tf.zeros_like(spectrograms, dtype=tf.bool)
-    
-    if mask_time:
-        # Calculate number of time masks based on probability and mask length
-        num_time_mask_candidates = time_frames // mask_length
-        num_time_masks = tf.cast(tf.math.round(tf.cast(num_time_mask_candidates, tf.float32) * mask_probability), tf.int32)
-        
-        # Generate random starting points for time masks
-        for i in range(batch_size):
-            for _ in range(num_time_masks):
-                # Random start for time mask
-                start_time = tf.random.uniform([], 0, time_frames - mask_length, dtype=tf.int32)
-                
-                # Apply mask in time dimension
-                mask = tf.ones([freq_bins, mask_length], dtype=tf.bool)
-                start_indices = [0, start_time]
-                mask_size = [freq_bins, mask_length]
-                
-                # Update mask indices
-                mask_indices_update = tf.tensor_scatter_nd_update(
-                    mask_indices[i], 
-                    tf.reshape(tf.range(start_time, start_time + mask_length), [-1, 1]),
-                    tf.ones([mask_length, freq_bins], dtype=tf.bool)
-                )
-                mask_indices = tf.tensor_scatter_nd_update(
-                    mask_indices,
-                    [[i]],
-                    [mask_indices_update]
-                )
-                
-                # Set masked region to zeros
-                zeros = tf.zeros([freq_bins, mask_length], dtype=spectrograms.dtype)
-                masked_specs_update = tf.tensor_scatter_nd_update(
-                    masked_specs[i],
-                    tf.reshape(tf.range(start_time, start_time + mask_length), [-1, 1]),
-                    tf.zeros([mask_length, freq_bins], dtype=spectrograms.dtype)
-                )
-                masked_specs = tf.tensor_scatter_nd_update(
-                    masked_specs,
-                    [[i]],
-                    [masked_specs_update]
-                )
-    
-    if mask_freq:
-        # Calculate number of frequency masks based on probability and mask length
-        num_freq_mask_candidates = freq_bins // mask_length
-        num_freq_masks = tf.cast(tf.math.round(tf.cast(num_freq_mask_candidates, tf.float32) * mask_probability), tf.int32)
-        
-        # Generate random starting points for frequency masks
-        for i in range(batch_size):
-            for _ in range(num_freq_masks):
-                # Random start for frequency mask
-                start_freq = tf.random.uniform([], 0, freq_bins - mask_length, dtype=tf.int32)
-                
-                # Apply mask in frequency dimension
-                mask = tf.ones([mask_length, time_frames], dtype=tf.bool)
-                
-                # Update mask indices
-                mask_indices_update = tf.tensor_scatter_nd_update(
-                    mask_indices[i], 
-                    tf.reshape(tf.range(start_freq, start_freq + mask_length), [-1, 1]),
-                    tf.ones([mask_length, time_frames], dtype=tf.bool)
-                )
-                mask_indices = tf.tensor_scatter_nd_update(
-                    mask_indices,
-                    [[i]],
-                    [mask_indices_update]
-                )
-                
-                # Set masked region to zeros
-                masked_specs_update = tf.tensor_scatter_nd_update(
-                    masked_specs[i],
-                    tf.reshape(tf.range(start_freq, start_freq + mask_length), [-1, 1]),
-                    tf.zeros([mask_length, time_frames], dtype=spectrograms.dtype)
-                )
-                masked_specs = tf.tensor_scatter_nd_update(
-                    masked_specs,
-                    [[i]],
-                    [masked_specs_update]
-                )
-    
-    return masked_specs, mask_indices
-
-
-class MaskingLayer(tf.keras.layers.Layer):
-    """Layer that applies masking to input spectrograms for MAST pretraining"""
-    
     def __init__(self, mask_probability=0.15, mask_length=8, mask_time=True, mask_freq=True, **kwargs):
         super(MaskingLayer, self).__init__(**kwargs)
         self.mask_probability = mask_probability
@@ -1220,16 +1125,45 @@ class MaskingLayer(tf.keras.layers.Layer):
         
     def call(self, inputs, training=None):
         if training:
-            # Only apply masking during training
-            masked_inputs, _ = apply_masking(
-                inputs, 
-                self.mask_probability, 
-                self.mask_length,
-                self.mask_time,
-                self.mask_freq
-            )
-            return masked_inputs
+            return self._apply_mask(inputs)
         return inputs
+    
+    def _apply_mask(self, x):
+        shape = tf.shape(x)
+        batch_size, height, width, channels = shape[0], shape[1], shape[2], shape[3]
+        
+        mask = tf.ones_like(x, dtype=tf.float32)
+        
+        # Time masking (horizontal)
+        if self.mask_time:
+            time_mask = tf.random.uniform(shape=[batch_size, self.mask_length, width, channels], minval=0, maxval=1)
+            time_mask = tf.cast(time_mask < self.mask_probability, tf.float32)
+            start_indices = tf.random.uniform(shape=[batch_size], minval=0, maxval=height-self.mask_length+1, dtype=tf.int32)
+            
+            for i in range(batch_size):
+                start = start_indices[i]
+                time_mask_part = time_mask[i:i+1]
+                padding = [[0, 0], [start, height-self.mask_length-start], [0, 0], [0, 0]]
+                padded_mask = tf.pad(time_mask_part, padding)
+                mask = mask * (1.0 - padded_mask)
+        
+        # Frequency masking (vertical)
+        if self.mask_freq:
+            freq_mask = tf.random.uniform(shape=[batch_size, height, self.mask_length, channels], minval=0, maxval=1)
+            freq_mask = tf.cast(freq_mask < self.mask_probability, tf.float32)
+            start_indices = tf.random.uniform(shape=[batch_size], minval=0, maxval=width-self.mask_length+1, dtype=tf.int32)
+            
+            for i in range(batch_size):
+                start = start_indices[i]
+                freq_mask_part = freq_mask[i:i+1]
+                padding = [[0, 0], [0, 0], [start, width-self.mask_length-start], [0, 0]]
+                padded_mask = tf.pad(freq_mask_part, padding)
+                mask = mask * (1.0 - padded_mask)
+        
+        # Apply mask (set masked positions to zero)
+        masked_x = x * mask
+        
+        return masked_x
     
     def get_config(self):
         config = super(MaskingLayer, self).get_config()
@@ -1237,9 +1171,80 @@ class MaskingLayer(tf.keras.layers.Layer):
             'mask_probability': self.mask_probability,
             'mask_length': self.mask_length,
             'mask_time': self.mask_time,
-            'mask_freq': self.mask_freq
+            'mask_freq': self.mask_freq,
         })
         return config
+
+
+def apply_masking(x, mask_probability=0.15, mask_length=8, mask_time=True, mask_freq=True):
+    """
+    Applies masking to spectrograms for MAST pretraining.
+    
+    Args:
+        x: Input spectrograms of shape (batch_size, height, width)
+        mask_probability: Probability of masking
+        mask_length: Length of mask segments
+        mask_time: Whether to apply time masking
+        mask_freq: Whether to apply frequency masking
+    
+    Returns:
+        masked_x: Masked spectrograms
+        mask: Binary mask (1 for kept, 0 for masked)
+    """
+    if len(x.shape) == 3:  # Add channel dimension if needed
+        x = np.expand_dims(x, axis=-1)
+    
+    shape = x.shape
+    batch_size, height, width, channels = shape[0], shape[1], shape[2], shape[3]
+    
+    # Initialize mask with ones (all values kept)
+    mask = np.ones_like(x, dtype=np.float32)
+    
+    # Apply time masking (horizontal)
+    if mask_time:
+        for i in range(batch_size):
+            if np.random.random() < mask_probability:
+                # Choose random start point and apply mask
+                start = np.random.randint(0, height - mask_length + 1)
+                mask[i, start:start+mask_length, :, :] = 0
+    
+    # Apply frequency masking (vertical)
+    if mask_freq:
+        for i in range(batch_size):
+            if np.random.random() < mask_probability:
+                # Choose random start point and apply mask
+                start = np.random.randint(0, width - mask_length + 1)
+                mask[i, :, start:start+mask_length, :] = 0
+    
+    # Apply mask
+    masked_x = x * mask
+    
+    return masked_x, mask
+
+
+def create_lr_schedule(initial_lr, warmup_epochs, decay_epochs):
+    """
+    Creates a learning rate schedule with warmup and decay.
+    
+    Args:
+        initial_lr: Initial learning rate
+        warmup_epochs: Number of warmup epochs
+        decay_epochs: Number of epochs after which to decay to min_lr
+    
+    Returns:
+        schedule_fn: Learning rate scheduler function
+    """
+    def schedule_fn(epoch):
+        # Warmup phase
+        if epoch < warmup_epochs:
+            return initial_lr * ((epoch + 1) / warmup_epochs)
+        
+        # Decay phase
+        decay_progress = (epoch - warmup_epochs) / (decay_epochs - warmup_epochs)
+        decay_factor = 0.5 * (1 + tf.math.cos(tf.constant(math.pi) * tf.minimum(decay_progress, 1.0)))
+        return initial_lr * decay_factor
+    
+    return schedule_fn
 
 
 def preprocess_spectrograms(spectrograms, target_shape):
@@ -1757,1477 +1762,347 @@ def verify_gpu_usage_during_training():
 ########################################################################
 # main
 ########################################################################
-def verify_gpu_usage():
-    """Verify that TensorFlow is properly using the GPU"""
-    # Create a simple test tensor and operation
-    try:
-        import tensorflow as tf
-        
-        # Print available physical devices to confirm GPU detection
-        physical_devices = tf.config.list_physical_devices()
-        print(f"Available physical devices:")
-        for device in physical_devices:
-            print(f"  {device.name} - {device.device_type}")
-            
-        gpus = tf.config.list_physical_devices('GPU')
-        print(f"Available GPUs: {len(gpus)}")
-        
-        if not gpus:
-            logger.warning("No GPUs detected by TensorFlow!")
-            return False
-            
-        # Try a simple matrix operation on GPU
-        with tf.device('/GPU:0'):
-            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
-            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
-            c = tf.matmul(a, b)
-        
-        # Check if the operation was executed on GPU
-        print(f"Test tensor operation result: {c}")
-        print(f"Test tensor device: {c.device}")
-        if 'GPU' in c.device:
-            logger.info("✓ GPU is properly configured and being used")
-            print("✓ GPU is properly configured and being used")
-            return True
-        else:
-            logger.warning("⚠ GPU is not being used for tensor operations!")
-            print("⚠ GPU is not being used for tensor operations!")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error checking GPU usage: {e}")
-        print(f"Error checking GPU usage: {e}")
-        return False
-
-
-def save_test_data(file_path, test_data, test_labels):
-    """Save test data and labels to avoid reprocessing every time"""
-    try:
-        logger.info(f"Saving processed test data to {file_path}")
-        np.savez_compressed(
-            file_path,
-            test_data=test_data,
-            test_labels=test_labels
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Error saving test data: {e}")
-        return False
-
-def load_test_data(file_path):
-    """Load processed test data if available"""
-    try:
-        if os.path.exists(file_path):
-            logger.info(f"Loading processed test data from {file_path}")
-            data = np.load(file_path)
-            return data['test_data'], data['test_labels']
-        return None, None
-    except Exception as e:
-        logger.error(f"Error loading test data: {e}")
-        return None, None
-
-
-def create_improved_optimizer():
-    """Create an optimizer optimized for binary classification with gradient clipping"""
-    return tf.keras.optimizers.Adam(
-        learning_rate=5e-5,  # Start with a lower learning rate
-        clipnorm=1.0,        # Clip gradients to prevent extreme updates
-        epsilon=1e-7,        # Numerical stability
-        beta_1=0.9,          # Momentum
-        beta_2=0.999         # RMSprop factor
-    )
-
-
-def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode='min'):
-    """
-    Create a simplified ModelCheckpoint callback that avoids using options parameter.
-    This fixes the "Could not extract model from args or kwargs" error.
-    """
-    # Create a plain callback with minimal parameters
-    callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=model_file,
-        save_best_only=True,
-        monitor=monitor,
-        mode=mode,
-        verbose=1
-    )
-    
-    # Store the original _save_model method
-    original_save_model = callback._save_model
-    
-    # Create a new _save_model method that handles the error
-    def safe_save_model(epoch, logs):
-        try:
-            # Check if we should save based on monitor value
-            current = logs.get(callback.monitor)
-            if current is None:
-                logger.warning(f'ModelCheckpoint: {callback.monitor} not available in logs')
-                return
-                
-            if callback.monitor_op(current, callback.best):
-                logger.info(f'Saving model to {callback.filepath} with {callback.monitor}={current:.4f}')
-                callback.best = current
-                try:
-                    # Simply call model.save() directly to avoid the problematic options parameter
-                    callback.model.save(callback.filepath, overwrite=True)
-                    logger.info(f"Model saved successfully at epoch {epoch+1}")
-                except Exception as e:
-                    logger.error(f"Error saving model: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error in ModelCheckpoint: {str(e)}")
-    
-    # Replace the _save_model method with our safe version
-    callback._save_model = lambda epoch, logs=None: safe_save_model(epoch, logs or {})
-    
-    return callback
-
-
 def main():
-    # Force a new model to be trained by deleting the old one
-    model_path = "./model/AST/model_overall_ast.keras"
-    if os.path.exists(model_path):
-        logger.info(f"DEBUG: Removing existing model file for fresh training: {model_path}")
-        os.remove(model_path)
-    if os.path.exists(model_path + "_temp"):
-        logger.info(f"DEBUG: Removing existing temp model directory: {model_path}_temp")
-        shutil.rmtree(model_path + "_temp")
+    # Load configurations
+    with open('baseline_MAST.yaml', 'r') as config_file:
+        config = yaml.safe_load(config_file)
     
-    # Set memory growth before any other TensorFlow operations
-    physical_devices = tf.config.list_physical_devices('GPU')
-    if physical_devices:
-        for device in physical_devices:
-            try:
-                tf.config.experimental.set_memory_growth(device, True)
-                logger.info(f"Enabled memory growth for {device}")
-            except Exception as e:
-                logger.warning(f"Could not set memory growth for {device}: {e}")
-        
-        # Replace deprecated is_gpu_available with recommended approach
-        gpu_available = len(physical_devices) > 0
-        logger.info(f"TensorFlow is using GPU: {gpu_available}")
-        logger.info(f"Available GPUs: {physical_devices}")
+    # Extract configurations
+    model_params = config['model']
+    mast_params = model_params.get('mast', {})
+    transformer_params = model_params.get('transformer', {})
+    dataset_params = config['dataset']
+    training_params = config['training']
     
-    # Load parameters from YAML file first
-    with open("baseline_AST.yaml", "r") as stream:
-        param = yaml.safe_load(stream)
-        
-    print("============== CHECKING DIRECTORY STRUCTURE ==============")
-    normal_dir = Path(param["base_directory"]) / "normal"
-    abnormal_dir = Path(param["base_directory"]) / "abnormal"
-
-    print(f"Normal directory exists: {normal_dir.exists()}")
-    if normal_dir.exists():
-        normal_files = list(normal_dir.glob("*.wav"))
-        print(f"Number of normal files found: {len(normal_files)}")
-        if normal_files:
-            print(f"Sample normal filename: {normal_files[0].name}")
-
-    print(f"Abnormal directory exists: {abnormal_dir.exists()}")
-    if abnormal_dir.exists():
-        abnormal_files = list(abnormal_dir.glob("*.wav"))
-        print(f"Number of abnormal files found: {len(abnormal_files)}")
-        if abnormal_files:
-            print(f"Sample abnormal filename: {abnormal_files[0].name}")
-
+    # Set up logging
+    setup_logging()
     
-    start_time = time.time()
-
-    os.makedirs(param["pickle_directory"], exist_ok=True)
-    os.makedirs(param["model_directory"], exist_ok=True)
-    os.makedirs(param["result_directory"], exist_ok=True)
-
-    visualizer = Visualizer(param)
-
-    # Test audio file loading directly
-    normal_path = Path(param["base_directory"]) / "normal"
-    abnormal_path = Path(param["base_directory"]) / "abnormal"
+    # Log configuration info
+    logger.info(f"Starting MAST model training with config: {config}")
     
-    # Try to load a sample file directly
-    test_files = list(normal_path.glob("*.wav"))[:1] if normal_path.exists() and list(normal_path.glob("*.wav")) else list(abnormal_path.glob("*.wav"))[:1]
-    
-    if test_files:
-        print(f"DEBUG: Testing direct audio load for: {test_files[0]}")
-        sr, y = demux_wav(str(test_files[0]))
-        if y is not None:
-            print(f"DEBUG: Successfully loaded audio with sr={sr}, length={len(y)}")
-        else:
-            print(f"DEBUG: Failed to load audio file")
+    # Check if we should load existing model or create a new one
+    if training_params.get('load_model', False) and os.path.exists(model_params['model_path']):
+        logger.info(f"Loading existing model from {model_params['model_path']}")
+        model = tf.keras.models.load_model(model_params['model_path'])
     else:
-        print("DEBUG: No test files found to verify audio loading")
-
-    base_path = Path(param["base_directory"])
-
-    print("============== COUNTING DATASET SAMPLES ==============")
-    logger.info("Counting all samples in the dataset...")
-    
-    normal_path = Path(param["base_directory"]) / "normal"
-    abnormal_path = Path(param["base_directory"]) / "abnormal"
-    
-    # Count files
-    total_normal_files = len(list(normal_path.glob("*.wav"))) if normal_path.exists() else 0
-    total_abnormal_files = len(list(abnormal_path.glob("*.wav"))) if abnormal_path.exists() else 0
-    
-    # Log the total counts
-    logger.info(f"Total normal files in dataset: {total_normal_files}")
-    logger.info(f"Total abnormal files in dataset: {total_abnormal_files}")
-    logger.info(f"Total files in dataset: {total_normal_files + total_abnormal_files}")
-
-    # Define target_dir (use normal_path as default, since dataset_generator will find corresponding abnormal files)
-    target_dir = normal_path if normal_path.exists() else abnormal_path
-    if not target_dir.exists():
-        logger.error("Neither normal nor abnormal directory exists!")
-        return
-
-    # Get model file information from the first file in the directory
-    sample_files = list(Path(target_dir).glob(f"*.{param.get('dataset', {}).get('file_extension', 'wav')}"))
-    print(f"DEBUG: Found {len(sample_files)} files in {target_dir}")
-    print(f"DEBUG: First 5 files: {[f.name for f in sample_files[:5]]}")
-
-    if not sample_files:
-        logger.warning(f"No files found in {target_dir}")
-        return  # Exit main() if no files are found
-
-    # Parse a sample filename to get db, machine_type, machine_id
-    filename = sample_files[0].name
-    parts = filename.split('_')
-    print(f"DEBUG: Parsing filename '{filename}' into parts: {parts}")
-
-    if len(parts) < 4:
-        logger.warning(f"Filename format incorrect: {filename}")
-        return  # Exit main() if filename format is incorrect
-    
-    # Use a straightforward key without unintended characters
-    evaluation_result_key = "overall_model"
-    print(f"DEBUG: Using evaluation_result_key: {evaluation_result_key}")
-
-    # Initialize evaluation result dictionary
-    evaluation_result = {}
-    
-    # Initialize results dictionary if it doesn't exist
-    results = {}
-    all_y_true = []
-    all_y_pred = []
-    result_file = f"{param['result_directory']}/result_AST.yaml"
-
-    print("============== DATASET_GENERATOR ==============")
-    train_pickle = f"{param['pickle_directory']}/train_overall.pickle"
-    train_labels_pickle = f"{param['pickle_directory']}/train_labels_overall.pickle"
-    val_pickle = f"{param['pickle_directory']}/val_overall.pickle"
-    val_labels_pickle = f"{param['pickle_directory']}/val_labels_overall.pickle"
-    test_files_pickle = f"{param['pickle_directory']}/test_files_overall.pickle"
-    test_labels_pickle = f"{param['pickle_directory']}/test_labels_overall.pickle"
-
-    # Initialize variables
-    train_files, train_labels, val_files, val_labels, test_files, test_labels = [], [], [], [], [], []
-
-    if (os.path.exists(train_pickle) and os.path.exists(train_labels_pickle) and
-        os.path.exists(val_pickle) and os.path.exists(val_labels_pickle) and
-        os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
-        train_data = load_pickle(train_pickle)
-        train_labels_expanded = load_pickle(train_labels_pickle)
-        val_data = load_pickle(val_pickle)
-        val_labels_expanded = load_pickle(val_labels_pickle)
-        test_files = load_pickle(test_files_pickle)
-        test_labels = load_pickle(test_labels_pickle)
+        # Set random seeds for reproducibility
+        tf.random.set_seed(training_params.get('random_seed', 42))
+        np.random.seed(training_params.get('random_seed', 42))
         
-        # Debug info to check loaded pickle data
-        print(f"DEBUG: Loaded pickle data shapes:")
-        print(f"  - Train data: {train_data.shape if hasattr(train_data, 'shape') else 'No shape'}")
-        print(f"  - Train labels: {train_labels_expanded.shape if hasattr(train_labels_expanded, 'shape') else 'No shape'}")
-        print(f"  - Val data: {val_data.shape if hasattr(val_data, 'shape') else 'No shape'}")
-        print(f"  - Val labels: {val_labels_expanded.shape if hasattr(val_labels_expanded, 'shape') else 'No shape'}")
-        print(f"  - Test files: {len(test_files) if isinstance(test_files, list) else 'Not a list'}")
-        print(f"  - Test labels: {test_labels.shape if hasattr(test_labels, 'shape') else 'No shape'}")
+        # Load and preprocess dataset
+        logger.info("Loading dataset")
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
+            dataset_params['base_directory'], config)
         
-        # Skip debug mode entirely when using pre-existing pickle files
-        logger.info("Using pre-existing pickle files, skipping data generation and debug mode")
+        # Get input shape from data
+        target_shape = (config["feature"]["n_mels"], 96)
+        logger.info(f"Target spectrogram shape: {target_shape}")
         
-        # Verification of loaded data
-        if hasattr(train_data, 'shape') and train_data.shape[0] == 0:
-            logger.error("Loaded training data is empty! Check pickle files.")
-            return
-        
-        if hasattr(val_data, 'shape') and val_data.shape[0] == 0:
-            logger.error("Loaded validation data is empty! Check pickle files.")
-            return
-            
-        # Skip to normalization step
-        print("============== USING EXISTING PICKLED DATA ==============")
-    else:
-        # Only use debug mode when generating new data
-        debug_mode = param.get("debug", {}).get("enabled", False)
-        debug_sample_size = param.get("debug", {}).get("sample_size", 100)
-        
-        train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
+        # Preprocess to ensure consistent shapes
+        logger.info("Preprocessing training data...")
+        train_data = preprocess_spectrograms(train_files, target_shape)
+        logger.info(f"Preprocessed train data shape: {train_data.shape}")
 
-        if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
-            logger.error(f"No files found for {evaluation_result_key}, skipping...")
-            return  # Exit main() if no files are found after generation
-            
-        if debug_mode:
-            logger.info(f"DEBUG MODE: Using small dataset with {debug_sample_size} samples")
-            train_files, train_labels = create_small_dataset(train_files, train_labels, debug_sample_size)
-            val_files, val_labels = create_small_dataset(val_files, val_labels, debug_sample_size // 2)
-            test_files, test_labels = create_small_dataset(test_files, test_labels, debug_sample_size // 2)
-            
-            logger.info(f"DEBUG dataset sizes - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}")
+        logger.info("Preprocessing validation data...")
+        val_data = preprocess_spectrograms(val_files, target_shape)
+        logger.info(f"Preprocessed validation data shape: {val_data.shape}")
+        
+        # Normalize data for better training
+        logger.info("Normalizing data...")
+        # Calculate mean and std from training data
+        train_mean = np.mean(train_data)
+        train_std = np.std(train_data)
+        logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
 
-        preprocessing_batch_size = param.get("feature", {}).get("preprocessing_batch_size", 64)
-        chunking_enabled = param.get("feature", {}).get("dataset_chunking", {}).get("enabled", False)
-        chunk_size = param.get("feature", {}).get("dataset_chunking", {}).get("chunk_size", 5000)
-
-        # For training data
-        if chunking_enabled and len(train_files) > chunk_size:
-            logger.info(f"Processing training data in chunks (dataset size: {len(train_files)} files)")
-            train_data, train_labels_expanded = process_dataset_in_chunks(
-                train_files,
-                train_labels,
-                chunk_size=chunk_size,
-                param=param
-            )
+        # Apply normalization if std is not too small
+        if train_std > 1e-6:
+            train_data = (train_data - train_mean) / train_std
+            val_data = (val_data - train_mean) / train_std
+            logger.info("Z-score normalization applied")
         else:
-            train_data, train_labels_expanded = list_to_spectrograms(
-                train_files,
-                train_labels,
-                msg="generate train_dataset",
-                augment=True,
-                param=param,
-                batch_size=preprocessing_batch_size
-            )
+            # If std is too small, just center the data
+            train_data = train_data - train_mean
+            val_data = val_data - train_mean
+            logger.info("Mean centering applied (std too small for z-score)")
 
-        # For validation data
-        if chunking_enabled and len(val_files) > chunk_size:
-            logger.info(f"Processing validation data in chunks (dataset size: {len(val_files)} files)")
-            val_data, val_labels_expanded = process_dataset_in_chunks(
-                val_files,
-                val_labels,
-                chunk_size=chunk_size,
-                param=param
-            )
-        else:
-            val_data, val_labels_expanded = list_to_spectrograms(
-                val_files,
-                val_labels,
-                msg="generate validation_dataset",
-                augment=False,
-                param=param,
-                batch_size=preprocessing_batch_size
-            )
-
-        # For test data
-        if chunking_enabled and len(test_files) > chunk_size:
-            logger.info(f"Processing test data in chunks (dataset size: {len(test_files)} files)")
-            test_data, test_labels_expanded = process_dataset_in_chunks(
-                test_files,
-                test_labels,
-                chunk_size=chunk_size,
-                param=param
-            )
-        else:
-            test_data, test_labels_expanded = list_to_spectrograms(
-                test_files,
-                test_labels,
-                msg="generate test_dataset",
-                augment=False,
-                param=param,
-                batch_size=preprocessing_batch_size
-            )
-
-        if train_data.shape[0] == 0 or val_data.shape[0] == 0:
-            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-            return  # Exit main() if no valid training/validation data
-
-        save_pickle(train_pickle, train_data)
-        save_pickle(train_labels_pickle, train_labels_expanded)
-        save_pickle(val_pickle, val_data)
-        save_pickle(val_labels_pickle, val_labels_expanded)
-        save_pickle(test_files_pickle, test_files)
-        save_pickle(test_labels_pickle, test_labels)
-
-    # Print shapes
-    logger.info(f"Training data shape: {train_data.shape}")
-    logger.info(f"Training labels shape: {train_labels_expanded.shape}")
-    logger.info(f"Validation data shape: {val_data.shape}")
-    logger.info(f"Validation labels shape: {val_labels_expanded.shape}")
-    logger.info(f"Number of test files: {len(test_files)}")
-
-    # Define target shape for spectrograms
-    target_shape = (param["feature"]["n_mels"], 96)
-    logger.info(f"Target spectrogram shape: {target_shape}")
-
-    # Preprocess to ensure consistent shapes
-    logger.info("Preprocessing training data...")
-    train_data = preprocess_spectrograms(train_data, target_shape)
-    logger.info(f"Preprocessed train data shape: {train_data.shape}")
-
-    logger.info("Preprocessing validation data...")
-    val_data = preprocess_spectrograms(val_data, target_shape)
-    logger.info(f"Preprocessed validation data shape: {val_data.shape}")
-
-    # Normalize data for better training
-    logger.info("Normalizing data...")
-    # Calculate mean and std from training data
-    train_mean = np.mean(train_data)
-    train_std = np.std(train_data)
-    logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
-
-    # Apply normalization if std is not too small
-    if train_std > 1e-6:
-        train_data = (train_data - train_mean) / train_std
-        val_data = (val_data - train_mean) / train_std
-        logger.info("Z-score normalization applied")
-    else:
-        # If std is too small, just center the data
-        train_data = train_data - train_mean
-        val_data = val_data - train_mean
-        logger.info("Mean centering applied (std too small for z-score)")
-
-
-    # Balance the dataset
-    logger.info("Balancing dataset...")
-    train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
-    
-    # IMPORTANT: Skip the redundant augmentation that was causing extreme slowdown
-    # The balancing already created all the needed augmented samples
-
-    print("\n============== VERIFYING GPU CONFIGURATION BEFORE TRAINING ==============")
-    verify_gpu_usage()
-    verify_gpu_usage_during_training()
-    print("\n============== GPU MEMORY USAGE BEFORE MODEL CREATION ==============")
-    monitor_gpu_usage()
-    
-    # Configure mixed precision
-    mixed_precision_enabled = configure_mixed_precision(
-        enabled=param.get("training", {}).get("mixed_precision", False)
-    )
-
-    # Create model with the correct input shape
-    model_file = f"{param['model_directory']}/model_overall_ast.keras"
-    if os.path.exists(model_file) or os.path.exists(f"{model_file}.index"):
-        training_required = True  # Default to training unless we successfully load a model
-        try:
-            # Print detailed information about the model file
-            logger.info(f"DEBUG: Model file exists at: {model_file}")
-            logger.info(f"DEBUG: Model file size: {os.path.getsize(model_file) if os.path.exists(model_file) else 'N/A'} bytes")
-            logger.info(f"DEBUG: Model directory contents: {os.listdir(os.path.dirname(model_file))}")
+        # Balance the dataset
+        logger.info("Balancing dataset...")
+        train_data, train_labels_expanded = balance_dataset(train_data, train_labels, augment_minority=True)
+        
+        # Create pretrain and finetune models
+        pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
+        
+        # Check if we should perform pretraining
+        if mast_params.get('pretraining', {}).get('enabled', True):
+            logger.info("Starting MAST pretraining phase with masking")
             
-            # First try: direct load with standard binary crossentropy
-            logger.info("DEBUG: Attempting to load model with simplified approach")
-            try:
-                # Try loading with compile=False first to see if that works
-                logger.info("DEBUG: Trying tf.keras.models.load_model with compile=False")
-                
-                # Instead of trying to load the optimizer state which might cause issues
-                model = tf.keras.models.load_model(
-                    model_file, 
-                    custom_objects=None,
-                    compile=False
-                )
-                
-                # If we get here, loading succeeded
-                logger.info("DEBUG: Model loaded successfully, now recompiling")
-                
-                # Now recompile with fresh optimizer instead of trying to load optimizer state
-                model.compile(
-                    optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.0001),  # Use legacy optimizer with fixed learning rate
-                    loss="binary_crossentropy",
-                    metrics=['accuracy']
-                )
-                training_required = False  # Successfully loaded, no training needed
-                logger.info("DEBUG: Model recompiled with binary_crossentropy loss")
-                
-            except Exception as e1:
-                logger.warning(f"First load attempt failed: {e1}")
-                logger.info(f"DEBUG: Error type: {type(e1)}")
-                logger.info(f"DEBUG: Error args: {e1.args}")
-                
-                # Second try: Using save_format='tf' instead of 'keras'
-                try:
-                    logger.info("DEBUG: Trying to create a fresh model and save it in TF format first")
-                    # Create a temporary new model
-                    temp_model = create_model(
-                        input_shape=(target_shape[0], target_shape[1]),
-                        transformer_params=param.get("model", {}).get("architecture", {})
+            # Configure pretraining parameters
+            pretrain_epochs = mast_params.get('pretraining', {}).get('epochs', 50)
+            pretrain_batch_size = mast_params.get('pretraining', {}).get('batch_size', 32)
+            pretrain_lr = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
+            
+            # Prepare data for pretraining (no labels needed, just the spectrograms)
+            # Combine all available data for pretraining
+            X_pretrain = np.concatenate([train_data, val_data], axis=0)
+            
+            # Apply masking to create input-target pairs for reconstruction
+            mask_probability = mast_params.get('pretraining', {}).get('masking', {}).get('probability', 0.15)
+            mask_length = mast_params.get('pretraining', {}).get('masking', {}).get('length', 8)
+            
+            # Create a data generator for pretraining
+            def pretrain_generator():
+                while True:
+                    # Select random batch
+                    indices = np.random.choice(len(X_pretrain), size=pretrain_batch_size)
+                    batch_x = X_pretrain[indices]
+                    
+                    # Add channel dimension if needed
+                    if len(batch_x.shape) == 3:
+                        batch_x = np.expand_dims(batch_x, axis=-1)
+                    
+                    # Apply masking
+                    masked_x, _ = apply_masking(
+                        batch_x, 
+                        mask_probability=mask_probability,
+                        mask_length=mask_length
                     )
                     
-                    # Save it in TF format
-                    temp_model_path = f"{model_file}_temp"
-                    logger.info(f"DEBUG: Saving temporary model to {temp_model_path}")
-                    temp_model.save(temp_model_path, save_format='tf')
-                    
-                    # Now try to load the model again with TF format
-                    logger.info(f"DEBUG: Loading from temporary TF model")
-                    model = tf.keras.models.load_model(
-                        temp_model_path,
-                        compile=False
-                    )
-                    
-                    # Compile the model
-                    model.compile(
-                        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.0001),  # Use legacy optimizer with fixed learning rate
-                        loss="binary_crossentropy",
-                        metrics=['accuracy']
-                    )
-                    
-                    # Clean up temp model
-                    import shutil
-                    if os.path.exists(temp_model_path) and os.path.isdir(temp_model_path):
-                        shutil.rmtree(temp_model_path)
-                    
-                    # Successfully loaded
-                    training_required = False
-                    logger.info("DEBUG: Model loaded successfully using TF format")
-                    
-                except Exception as e2:
-                    logger.warning(f"Second load attempt failed: {e2}")
-                    logger.info(f"DEBUG: Error type: {type(e2)}")
-                    logger.info(f"DEBUG: Error args: {e2.args}")
-                    
-                    # Third try: create fresh model and try loading weights directly
-                    try:
-                        logger.info("DEBUG: Trying to load weights only with fresh model...")
-                        # Create fresh model
-                        new_model = create_model(
-                            input_shape=(target_shape[0], target_shape[1]),
-                            transformer_params=param.get("model", {}).get("architecture", {})
-                        )
-                        
-                        # Compile the model
-                        new_model.compile(
-                            optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=0.0001),  # Use legacy optimizer with fixed learning rate
-                            loss="binary_crossentropy",
-                            metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
-                        )
-                        
-                        # Try loading weights, avoid loading optimizer state
-                        try:
-                            if os.path.isdir(model_file):  # SavedModel format
-                                logger.info(f"DEBUG: Model file is a directory, trying to load weights from SavedModel")
-                                # For SavedModel, we need to load the whole model first to extract weights
-                                temp_model = tf.keras.models.load_model(model_file, compile=False)
-                                new_model.set_weights(temp_model.get_weights())
-                                del temp_model  # Free memory
-                                logger.info("DEBUG: Successfully transferred weights from SavedModel")
-                            else:  # H5 format
-                                logger.info(f"DEBUG: Model file is H5 format, trying to load weights directly")
-                                new_model.load_weights(model_file, by_name=True, skip_mismatch=True)
-                                logger.info("DEBUG: Successfully loaded weights from H5")
-                                
-                            model = new_model
-                            training_required = False
-                        except Exception as e3:
-                            error_msg = str(e3)
-                            logger.error(f"Weight loading failed: {error_msg}")
-                            logger.info(f"DEBUG: Error type: {type(e3)}")
-                            logger.info(f"DEBUG: Error args: {e3.args}")
-                            
-                            if "LossScaleOptimizerV3" in error_msg:
-                                logger.info("DEBUG: LossScaleOptimizerV3 error detected, this is likely due to mixed precision issues")
-                            
-                            logger.info("DEBUG: Will train a new model since weight loading failed")
-                            training_required = True  # Weight loading failed, need to train
-                            raise Exception(f"Failed to load weights: {error_msg}")
-                    except Exception as final_e:
-                        logger.error(f"All loading attempts failed: {final_e}")
-                        # Create a new model as last resort
-                        logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
-                        model = create_model(
-                            input_shape=(target_shape[0], target_shape[1]),
-                            transformer_params=param.get("model", {}).get("architecture", {})
-                        )
-                        # Need to set a flag to indicate training is required
-                        training_required = True
-                        logger.info("DEBUG: Created new model due to loading error, will need to train")
+                    # The model should reconstruct the original unmasked input
+                    yield masked_x, batch_x
             
-            # Debug the training_required flag value
-            logger.info(f"DEBUG: After model loading attempts, training_required = {training_required}")
-            
-            # Force training for debugging - this will ensure the model always gets trained
-            if param.get("training", {}).get("force_training", False) or param.get("debug", {}).get("force_training", True):
-                logger.info("Force training enabled, will train loaded model")
-                training_required = True
-            
-            # Final check of training_required flag
-            if training_required:
-                logger.info("DEBUG: Will train the model")
-            else:
-                logger.info("DEBUG: No training needed for loaded model")
-                
-        except Exception as e:
-            logger.error(f"Unhandled error during model loading: {e}")
-            logger.info(f"DEBUG: Error type: {type(e)}")
-            logger.info(f"DEBUG: Error args: {e.args if hasattr(e, 'args') else 'No args'}")
-            
-            # Create a new model with the target shape as last resort
-            logger.info(f"DEBUG: Creating new model with input shape: {target_shape}")
-            model = create_model(
-                input_shape=(target_shape[0], target_shape[1]),
-                transformer_params=param.get("model", {}).get("architecture", {})
-            )
-            # Need to train
-            training_required = True
-            logger.info("DEBUG: Created new model due to unhandled error, will need to train")
-    else:
-        # No existing model file, create new one
-        logger.info(f"DEBUG: No existing model found at {model_file}, creating new model with input shape: {target_shape}")
-        model = create_model(
-            input_shape=(target_shape[0], target_shape[1]),
-            transformer_params=param.get("model", {}).get("architecture", {})
-        )
-        # Need to train
-        training_required = True
-        logger.info("DEBUG: Created new model, will need to train")
-
-    # Add debug prints for data verification
-    print("\n============== TRAINING DATA DEBUG INFO ==============")
-    print(f"Training data shape: {train_data.shape}, dtype: {train_data.dtype}")
-    print(f"Training labels shape: {train_labels_expanded.shape}, dtype: {train_labels_expanded.dtype}")
-    print(f"Min/Max values - Train data: {np.min(train_data):.4f}/{np.max(train_data):.4f}")
-    print(f"Min/Max values - Train labels: {np.min(train_labels_expanded) if len(train_labels_expanded) > 0 else 'N/A'}/{np.max(train_labels_expanded) if len(train_labels_expanded) > 0 else 'N/A'}")
-    print(f"Class distribution - Normal: {np.sum(train_labels_expanded == 0)}, Abnormal: {np.sum(train_labels_expanded == 1)}")
-    
-    print("\n============== VALIDATION DATA DEBUG INFO ==============")
-    print(f"Validation data shape: {val_data.shape}, dtype: {val_data.dtype}")
-    print(f"Validation labels shape: {val_labels_expanded.shape}, dtype: {val_labels_expanded.dtype}")
-    print(f"Class distribution - Normal: {np.sum(val_labels_expanded == 0)}, Abnormal: {np.sum(val_labels_expanded == 1)}")
-    
-    # Verify that data is non-zero and properly loaded
-    if np.all(train_data == 0) or np.all(val_data == 0):
-        print("WARNING: Training or validation data contains all zeros! Check data loading.")
-    
-    if len(train_labels_expanded) == 0 or len(val_labels_expanded) == 0:
-        print("WARNING: No training or validation labels! Check label loading.")
-    
-    # After model creation, monitor GPU memory again
-    print("\n============== GPU MEMORY USAGE AFTER MODEL CREATION ==============")
-    monitor_gpu_usage()
-
-    #debug
-    normal_count = sum(1 for label in train_labels_expanded if label == 0)
-    abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
-    print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
-
-    
-    # Check for data shape mismatch and fix it
-    if train_data.shape[0] != train_labels_expanded.shape[0]:
-        logger.warning(f"Data shape mismatch! X: {train_data.shape[0]} samples, y: {train_labels_expanded.shape[0]} labels")
-        
-        if train_data.shape[0] > train_labels_expanded.shape[0]:
-            # Too many features, need to reduce
-            train_data = train_data[:train_labels_expanded.shape[0]]
-            sample_weights = sample_weights[:train_labels_expanded.shape[0]]
-            logger.info(f"Reduced X to match y: {train_data.shape}")
-        else:
-            # Too many labels, need to reduce
-            train_labels_expanded = train_labels_expanded[:train_data.shape[0]]
-            logger.info(f"Reduced y to match X: {train_labels_expanded.shape}")
-
-    # Check class distribution
-    class_distribution = np.bincount(train_labels_expanded.astype(int))
-    logger.info(f"Class distribution in training data: {class_distribution}")
-    if len(class_distribution) > 1:
-        class_ratio = class_distribution[0] / class_distribution[1] if class_distribution[1] > 0 else float('inf')
-        logger.info(f"Class ratio (normal:abnormal): {class_ratio:.2f}:1")
-        
-        if class_ratio > 10:
-            logger.warning(f"Severe class imbalance detected! Consider using class weights or data augmentation.")
-
-    batch_size = param.get("fit", {}).get("batch_size", 32)
-    epochs = param.get("fit", {}).get("epochs", 100)
-    base_learning_rate = param.get("fit", {}).get("compile", {}).get("learning_rate", 0.001)
-
-    # Scale learning rate based on batch size
-    learning_rate = get_scaled_learning_rate(base_learning_rate, batch_size)
-    logger.info(f"Scaled learning rate from {base_learning_rate} to {learning_rate} for batch size {batch_size}")
-
-
-    # Log the training parameters being used
-    logger.info(f"Training with batch_size={batch_size}, epochs={epochs}, learning_rate={learning_rate}")
-
-    # Set fixed class weights with higher weight for abnormal class
-    class_weights = {
-        0: 1.0,   # Normal class
-        1: 10.0   # Abnormal class - significantly increased weight
-    }
-    logger.info(f"Using fixed class weights: {class_weights} (abnormal class weight increased to 10.0)")
-
-
-
-
-    # Ensure consistent data types before training
-    logger.info(f"Train data type: {train_data.dtype}")
-    logger.info(f"Train labels type: {train_labels_expanded.dtype}")
-
-    # Convert to float32 if needed
-    if train_data.dtype != np.float32:
-        logger.info("Converting train_data to float32")
-        train_data = train_data.astype(np.float32)
-        
-    if train_labels_expanded.dtype != np.float32:
-        logger.info("Converting train_labels to float32")
-        train_labels_expanded = train_labels_expanded.astype(np.float32)
-        
-    if val_data.dtype != np.float32:
-        logger.info("Converting val_data to float32")
-        val_data = val_data.astype(np.float32)
-        
-    if val_labels_expanded.dtype != np.float32:
-        logger.info("Converting val_labels to float32")
-        val_labels_expanded = val_labels_expanded.astype(np.float32)
-
-    print("============== VERIFYING GPU USAGE ==============")
-    is_gpu_working = verify_gpu_usage()
-    if not is_gpu_working:
-        logger.warning("GPU is not being used! Training will be slow.")
-        return
-
-
-    print("============== MODEL TRAINING ==============")
-    # Track model training time specifically
-    model_start_time = time.time()
-    # Define model_file and history_img variables
-    history_img = f"{param['result_directory']}/history_overall_ast.png"
-
-    # Enable mixed precision training
-    if param.get("training", {}).get("mixed_precision", False):
-        logger.info("Enabling mixed precision training")
-        mixed_precision.set_global_policy('mixed_float16')
-        logger.info(f"Mixed precision policy enabled: {mixed_precision.global_policy()}")
-
-    model_config = param.get("model", {}).get("architecture", {})
-    model.summary()
-
-    if training_required:
-        # Define callbacks
-        callbacks = []
-        
-        # Early stopping
-        early_stopping_config = param.get("fit", {}).get("early_stopping", {})
-        if early_stopping_config.get("enabled", False):
-            callbacks.append(tf.keras.callbacks.EarlyStopping(
-                monitor=early_stopping_config.get("monitor", "val_loss"),
-                patience=20,
-                min_delta=early_stopping_config.get("min_delta", 0.001),
-                restore_best_weights=True,
-                verbose=1
-            ))
-
-        # Add custom ModelCheckpoint callback to save best model without options parameter
-        checkpoint_callback = create_simple_modelcheckpoint_callback(
-            model_file=model_file,
-            monitor='val_loss',
-            mode='min'
-        )
-        callbacks.append(checkpoint_callback)
-        logger.info("Added custom ModelCheckpoint callback that avoids 'options' parameter issues")
-
-        callbacks.append(TerminateOnNaN(patience=3))
-        logger.info("Added NaN detection callback")
-                
-        # Reduce learning rate on plateau
-        lr_config = param.get("fit", {}).get("lr_scheduler", {})
-        if lr_config.get("enabled", False):
-            logger.info("Adding ReduceLROnPlateau callback with settings:")
-            logger.info(f"  - Monitor: {lr_config.get('monitor', 'val_loss')}")
-            logger.info(f"  - Factor: {lr_config.get('factor', 0.1)}")
-            logger.info(f"  - Patience: {lr_config.get('patience', 5)}")
-            callbacks.append(ReduceLROnPlateau(
-                monitor=lr_config.get("monitor", "val_loss"),
-                factor=lr_config.get("factor", 0.1),
-                patience=lr_config.get("patience", 5),
-                min_delta=lr_config.get("min_delta", 0.001),
-                cooldown=lr_config.get("cooldown", 2),
-                min_lr=lr_config.get("min_lr", 0.00000001),
-                verbose=1
-            ))
-
-
-        # Add learning rate scheduler with warmup
-        callbacks.append(
-            tf.keras.callbacks.LearningRateScheduler(
-                create_lr_schedule(initial_lr=0.001, warmup_epochs=5, decay_epochs=50)
-            )
-        )
-
-        # Add callback to detect and handle NaN values
-        callbacks.append(tf.keras.callbacks.TerminateOnNaN())
-
-        
-        # Add warmup learning rate scheduler if enabled
-        warmup_config = param.get("fit", {}).get("warmup", {})
-        if warmup_config.get("enabled", False):
-            # Calculate total steps
-            steps_per_epoch = len(train_data) // param["fit"]["batch_size"]
-            total_steps = steps_per_epoch * param["fit"]["epochs"]
-            
-            # Calculate warmup steps
-            warmup_epochs = warmup_config.get("epochs", 5)
-            warmup_steps = steps_per_epoch * warmup_epochs
-
-
-        compile_params = param["fit"]["compile"].copy()
-        loss_type = param.get("model", {}).get("loss", "binary_crossentropy")
-        
-        # Handle learning_rate separately for the optimizer
-        learning_rate = compile_params.pop("learning_rate", 0.0001)
-        
-        # Adjust optimizer for mixed precision if enabled
-        clipnorm = param.get("training", {}).get("gradient_clip_norm", 1.0)
-        if mixed_precision_enabled and compile_params.get("optimizer") == "adam":
-            from tensorflow.keras.optimizers import Adam
-            
-            # In TF 2.4+, LossScaleOptimizer is automatically applied when using mixed_float16 policy
-            # So we just need to create the base optimizer with gradient clipping
-            compile_params["optimizer"] = Adam(learning_rate=learning_rate, clipnorm=clipnorm)
-            logger.info(f"Using Adam optimizer with mixed precision and gradient clipping (clipnorm={clipnorm})")
-        else:
-            compile_params["optimizer"] = create_improved_optimizer()
-            logger.info(f"Using improved optimizer with gradient clipping (clipnorm={clipnorm})")
-
-
-        # Use a more stable loss function
-        if loss_type == "binary_crossentropy":
-            compile_params["loss"] = "binary_crossentropy"  # Use TF's built-in implementation for stability
-        elif loss_type == "focal_loss":
-            # Only use focal loss if explicitly requested and with safeguards
-            gamma = param.get("model", {}).get("focal_loss", {}).get("gamma", 2.0)
-            alpha = param.get("model", {}).get("focal_loss", {}).get("alpha", 0.25)
-            
-            # Check if we should use a safer implementation
-            use_safe_focal = param.get("model", {}).get("focal_loss", {}).get("use_safe_implementation", True)
-            if use_safe_focal:
-                logger.info("Using numerically stable focal loss implementation")
-                compile_params["loss"] = lambda y_true, y_pred: focal_loss(gamma, alpha)(y_true, y_pred)
-            else:
-                logger.warning("Using standard focal loss - watch for NaN losses")
-                compile_params["loss"] = tf.keras.losses.BinaryFocalCrossentropy(
-                    gamma=gamma, alpha=alpha, from_logits=False
+            # Create tf.data.Dataset from generator
+            pretrain_dataset = tf.data.Dataset.from_generator(
+                pretrain_generator,
+                output_signature=(
+                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32),
+                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32)
                 )
-        else:
-            logger.info("Using standard binary crossentropy loss")
-            compile_params["loss"] = "binary_crossentropy"
-
-        
-        compile_params["metrics"] = ['accuracy']
-        
-        if param.get("training", {}).get("gradient_accumulation_steps", 1) > 1:
-            logger.info(f"Using gradient accumulation with {param['training']['gradient_accumulation_steps']} steps")
+            ).prefetch(tf.data.AUTOTUNE)
             
-            # Create optimizer
-            optimizer = compile_params["optimizer"]
-            loss_fn = compile_params["loss"]
+            # Create LR schedule for pretraining
+            pretrain_lr_schedule = create_lr_schedule(
+                pretrain_lr,
+                warmup_epochs=5,
+                decay_epochs=pretrain_epochs
+            )
             
-            # Get the dataset
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_data, tf.cast(train_labels_expanded, tf.float32)))
-            train_dataset = train_dataset.batch(param["fit"]["batch_size"])
+            # Compile the pretraining model
+            pretrain_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=pretrain_lr),
+                loss=tf.keras.losses.MeanSquaredError(),
+                metrics=['mse']
+            )
             
-            # Create validation dataset
-            val_dataset = tf.data.Dataset.from_tensor_slices((val_data, tf.cast(val_labels_expanded, tf.float32)))
-            val_dataset = val_dataset.batch(param["fit"]["batch_size"])
-            
-            # Define variables to store accumulated gradients
-            accum_steps = param["training"]["gradient_accumulation_steps"]
-            
-            # Create a history object to store metrics
-            history = {
-                'loss': [],
-                'accuracy': [],
-                'val_loss': [],
-                'val_accuracy': []
-            }
-            
-            # Initialize accumulated gradients
-            accumulated_gradients = [tf.Variable(tf.zeros_like(var), trainable=False) 
-                                    for var in model.trainable_variables]
-            
-            # Define training step function
-            @tf.function
-            def train_step(x_batch, y_batch, first_batch):
-                with tf.GradientTape() as tape:
-                    logits = model(x_batch, training=True)
-                    
-                    # Ensure y_batch is float32 and reshape to match logits
-                    y_batch = tf.cast(y_batch, tf.float32)
-                    y_batch_reshaped = tf.reshape(y_batch, logits.shape)
-                    
-                    if isinstance(loss_fn, str):
-                        if loss_fn == "binary_crossentropy":
-                            loss_value = tf.keras.losses.binary_crossentropy(y_batch_reshaped, logits)
-                        else:
-                            loss_value = tf.keras.losses.get(loss_fn)(y_batch_reshaped, logits)
-                    else:
-                        loss_value = loss_fn(y_batch_reshaped, logits)
-                    
-                    # Scale the loss to account for gradient accumulation
-                    scaled_loss = loss_value / tf.cast(accum_steps, dtype=loss_value.dtype)
-                
-                # Calculate gradients
-                gradients = tape.gradient(scaled_loss, model.trainable_variables)
-                
-                # If this is the first batch in an accumulation cycle, reset the accumulators
-                if first_batch:
-                    for i, grad in enumerate(gradients):
-                        if grad is not None:
-                            accumulated_gradients[i].assign(grad)
-                        else:
-                            accumulated_gradients[i].assign(tf.zeros_like(model.trainable_variables[i]))
-                else:
-                    # Otherwise add to the accumulated gradients
-                    for i, grad in enumerate(gradients):
-                        if grad is not None:
-                            accumulated_gradients[i].assign_add(grad)
-                
-                # Calculate accuracy - ensure consistent data types
-                y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
-                
-                return loss_value, accuracy
-
-            
-            # Define validation step function
-            @tf.function
-            def val_step(x_batch, y_batch):
-                logits = model(x_batch, training=False)
-                
-                # Ensure y_batch is float32 and reshape to match logits
-                y_batch = tf.cast(y_batch, tf.float32)
-                y_batch_reshaped = tf.reshape(y_batch, logits.shape)
-                
-                if isinstance(loss_fn, str):
-                    if loss_fn == "binary_crossentropy":
-                        loss_value = tf.keras.losses.binary_crossentropy(y_batch_reshaped, logits)
-                    else:
-                        loss_value = tf.keras.losses.get(loss_fn)(y_batch_reshaped, logits)
-                else:
-                    loss_value = loss_fn(y_batch_reshaped, logits)
-                
-                # Calculate accuracy - ensure consistent data types
-                y_pred = tf.cast(tf.greater_equal(logits, 0.5), tf.float32)
-                accuracy = tf.reduce_mean(tf.cast(tf.equal(y_batch_reshaped, y_pred), tf.float32))
-                
-                return loss_value, accuracy
-
-
-            # Training loop
-            epochs = param["fit"]["epochs"]
-            for epoch in range(epochs):
-                print(f"\nEpoch {epoch+1}/{epochs}")
-                
-                # Training metrics
-                train_loss = tf.keras.metrics.Mean()
-                train_accuracy = tf.keras.metrics.Mean()
-                
-                # Validation metrics
-                val_loss = tf.keras.metrics.Mean()
-                val_accuracy = tf.keras.metrics.Mean()
-                
-                # Training loop
-                step = 0
-                progress_bar = tqdm(train_dataset, desc=f"Training")
-                for x_batch, y_batch in progress_bar:
-                    # Determine if this is the first batch in an accumulation cycle
-                    first_batch = (step % accum_steps == 0)
-                    
-                    # Perform training step
-                    batch_loss, batch_accuracy = train_step(x_batch, y_batch, first_batch)
-                    train_loss.update_state(batch_loss)
-                    train_accuracy.update_state(batch_accuracy)
-                    
-                    # If we've accumulated enough gradients, apply them
-                    if (step + 1) % accum_steps == 0 or (step + 1 == len(train_dataset)):
-                        # Apply accumulated gradients
-                        optimizer.apply_gradients(zip(accumulated_gradients, model.trainable_variables))
-                        
-                        # Log progress
-                        progress_bar.set_postfix({
-                            'loss': f'{train_loss.result():.4f}',
-                            'accuracy': f'{train_accuracy.result():.4f}'
-                        })
-                    
-                    step += 1
-                    
-                    # Clear memory periodically
-                    if step % 50 == 0:
-                        gc.collect()
-                
-                # Validation loop
-                for x_batch, y_batch in tqdm(val_dataset, desc=f"Validation"):
-                    batch_loss, batch_accuracy = val_step(x_batch, y_batch)
-                    val_loss.update_state(batch_loss)
-                    val_accuracy.update_state(batch_accuracy)
-                
-                # Print epoch results
-                print(f"Training loss: {train_loss.result():.4f}, accuracy: {train_accuracy.result():.4f}")
-                print(f"Validation loss: {val_loss.result():.4f}, accuracy: {val_accuracy.result():.4f}")
-                
-                # Store metrics in history
-                history['loss'].append(float(train_loss.result()))
-                history['accuracy'].append(float(train_accuracy.result()))
-                history['val_loss'].append(float(val_loss.result()))
-                history['val_accuracy'].append(float(val_accuracy.result()))
-                
-                # Check for early stopping
-                if callbacks and any(isinstance(cb, tf.keras.callbacks.EarlyStopping) for cb in callbacks):
-                    early_stopping_callback = next(cb for cb in callbacks if isinstance(cb, tf.keras.callbacks.EarlyStopping))
-                    
-                    # Get the monitored value
-                    if early_stopping_callback.monitor == 'val_loss':
-                        current = float(val_loss.result())
-                    elif early_stopping_callback.monitor == 'val_accuracy':
-                        current = float(val_accuracy.result())
-                    
-                    # Check if we should stop
-                    if hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_loss':
-                        if early_stopping_callback.best is None or current < early_stopping_callback.best:
-                            early_stopping_callback.best = current
-                            early_stopping_callback.wait = 0
-                            try:
-                                # Save with the native Keras format
-                                tf.keras.models.save_model(
-                                    model,
-                                    model_file,
-                                    overwrite=True,
-                                    include_optimizer=True,
-                                    save_format='keras'
-                                )
-                                logger.info(f"Model saved to {model_file}")
-                            except Exception as e:
-                                logger.warning(f"Error saving model: {e}")
-
-                            logger.info(f"Saved best model at epoch {epoch+1}")
-                        else:
-                            early_stopping_callback.wait += 1
-                            if early_stopping_callback.wait >= early_stopping_callback.patience:
-                                print(f"Early stopping triggered at epoch {epoch+1}")
-                                break
-                    elif hasattr(early_stopping_callback, 'best') and early_stopping_callback.monitor == 'val_accuracy':
-                        if early_stopping_callback.best is None or current > early_stopping_callback.best:
-                            early_stopping_callback.best = current
-                            early_stopping_callback.wait = 0
-                            try:
-                                # Save with the native Keras format
-                                tf.keras.models.save_model(
-                                    model,
-                                    model_file,
-                                    overwrite=True,
-                                    include_optimizer=True,
-                                    save_format='keras'
-                                )
-                                logger.info(f"Model saved to {model_file}")
-                            except Exception as e:
-                                logger.warning(f"Error saving model: {e}")
-
-                            logger.info(f"Saved best model at epoch {epoch+1}")
-                        else:
-                            early_stopping_callback.wait += 1
-                            if early_stopping_callback.wait >= early_stopping_callback.patience:
-                                print(f"Early stopping triggered at epoch {epoch+1}")
-                                break
-                
-                # Save model periodically
-                if (epoch + 1) % 5 == 0:
-                    try:
-                        # Save with the native Keras format
-                        tf.keras.models.save_model(
-                            model,
-                            f"{param['model_directory']}/model_overall_ast_epoch_{epoch+1}.keras",
-                            overwrite=True,
-                            include_optimizer=True,
-                            save_format='keras'
-                        )
-                        logger.info(f"Saved model checkpoint at epoch {epoch+1}")
-                    except Exception as e:
-                        logger.warning(f"Failed to save model checkpoint at epoch {epoch+1}: {e}")
-                    logger.info(f"Saved model checkpoint at epoch {epoch+1}")
-                
-                # Clear memory between epochs
-                gc.collect()
-            
-            # Convert history to a format compatible with Keras history
-            history = type('History', (), {'history': history})
-
-
-        else:
-            # Disable XLA acceleration as it's causing shape issues
-            if False and param.get("training", {}).get("xla_acceleration", False):
-                logger.info("Enabling XLA acceleration")
-                tf.config.optimizer.set_jit(True)
-                os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
-            else:
-                logger.info("XLA acceleration disabled to avoid shape issues")
-
-            # Apply mixup augmentation if enabled
-            if False and param.get("training", {}).get("mixup", {}).get("enabled", False):
-                alpha = param["training"]["mixup"].get("alpha", 0.2)
-                logger.info(f"Applying mixup augmentation with alpha={alpha}")
-                
-                # Only apply mixup if we have enough samples
-                if train_data.shape[0] > 10:
-                    # Create a copy of the original data for safety
-                    orig_train_data = train_data.copy()
-                    orig_train_labels = train_labels_expanded.copy()
-                    
-                    # Apply mixup with controlled randomization
-                    np.random.seed(42)  # For reproducibility
-                    indices = np.random.permutation(train_data.shape[0])
-                    shuffled_data = train_data[indices]
-                    shuffled_labels = train_labels_expanded[indices]
-                    
-                    # Generate mixing coefficient
-                    lam = np.random.beta(alpha, alpha, size=train_data.shape[0])
-                    lam = np.maximum(lam, 1-lam)  # Ensure lambda is at least 0.5 for stability
-                    lam = np.reshape(lam, (train_data.shape[0], 1, 1))  # Reshape for broadcasting
-                    
-                    # Mix the data
-                    mixed_data = lam * train_data + (1 - lam) * shuffled_data
-                    
-                    # Mix the labels (reshape lambda for broadcasting)
-                    lam_labels = np.reshape(lam, (train_data.shape[0], 1))
-                    mixed_labels = lam_labels * train_labels_expanded + (1 - lam_labels) * shuffled_labels
-                    
-                    # Update the training data and labels
-                    train_data = mixed_data
-                    train_labels_expanded = mixed_labels
-                    
-                    logger.info(f"Applied mixup to {train_data.shape[0]} samples")
-                else:
-                    logger.warning("Not enough samples for mixup, skipping")
-
-
-            model.compile(
-                optimizer=tf.keras.optimizers.Adam(
-                    learning_rate=0.0001,
-                    clipnorm=1.0,
-                    epsilon=1e-7
+            # Create callbacks for pretraining
+            pretrain_callbacks = [
+                tf.keras.callbacks.LearningRateScheduler(pretrain_lr_schedule),
+                tf.keras.callbacks.TensorBoard(
+                    log_dir=f"logs/log_mast/pretrain_{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                    histogram_freq=1
                 ),
-                loss=focal_loss,  # Using focal loss instead of binary_crossentropy
-                metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall(), tf.keras.metrics.AUC()]
-            )
-
-            # Train with improved settings
-            logger.info("Training with improved settings")
-            history = model.fit(
-                train_data,
-                train_labels_expanded,
-                batch_size=32,  # Smaller batch size for better learning
-                epochs=50,
-                validation_data=(val_data, val_labels_expanded),
-                class_weight={
-                    0: 1.0,    # Normal class 
-                    1: 25.0    # Much higher weight for abnormal class to force model to learn
-                },
-                callbacks=callbacks,
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath="model/MAST/pretrain_model.h5",
+                    save_best_only=True,
+                    monitor='val_loss'
+                )
+            ]
+            
+            # Train the pretraining model
+            pretrain_model.fit(
+                pretrain_dataset,
+                steps_per_epoch=len(X_pretrain) // pretrain_batch_size,
+                epochs=pretrain_epochs,
+                callbacks=pretrain_callbacks,
                 verbose=1
             )
-
-
-            # Create a directory for checkpoints if it doesn't exist
-            checkpoint_dir = os.path.dirname(model_file)
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-
-        # Make sure history exists before plotting
-        if 'history' in locals():
-            # Define default values for variables that might not be defined
-            machine_type_val = machine_type if 'machine_type' in locals() else None
-            machine_id_val = machine_id if 'machine_id' in locals() else None
-            db_val = db if 'db' in locals() else None
             
-            # Plot the training history
-            visualizer.loss_plot(history, machine_type=machine_type_val, machine_id=machine_id_val, db=db_val)
-        else:
-            logger.warning("No training history available to plot")
-
-        visualizer.save_figure(history_img)
-
-    # Log training time
-    training_time = time.time() - model_start_time
-    logger.info(f"Model training completed in {training_time:.2f} seconds")
-
-    # Save model after training completes
-    try:
-        model.save(model_file)
-        logger.info(f"Model saved to {model_file}")
-    except Exception as e:
-        logger.warning(f"Error saving model: {e}")
-        # Try alternative approach
-        try:
-            model.save(model_file.replace('.keras', ''))
-            logger.info(f"Model saved with alternative format to {model_file.replace('.keras', '')}")
-        except Exception as e2:
-            logger.error(f"All attempts to save model failed: {e2}")
-
-
-    print("============== EVALUATION ==============")
-    # Evaluate on test set
+            logger.info("MAST pretraining completed")
+            
+            # Save the pretrained weights
+            pretrain_model.save_weights("model/MAST/pretrain_weights.h5")
+            
+            # Load the pretrained weights into the fine-tuning model
+            # The shared Transformer layers will have the same names
+            logger.info("Transferring pretrained weights to fine-tuning model")
+            finetune_model.load_weights("model/MAST/pretrain_weights.h5", by_name=True, skip_mismatch=True)
+        
+        # Now proceed with fine-tuning for anomaly detection
+        logger.info("Starting MAST fine-tuning phase for anomaly detection")
+        
+        # Configure fine-tuning optimizer
+        optimizer = tf.keras.optimizers.Adam(learning_rate=training_params.get('learning_rate', 0.0001))
+        
+        # Configure loss function based on configuration
+        loss_fn = tf.keras.losses.BinaryCrossentropy()
+        
+        # Compile model for fine-tuning
+        finetune_model.compile(
+            optimizer=optimizer,
+            loss=loss_fn,
+            metrics=['accuracy', 'AUC', 'Precision', 'Recall']
+        )
+        
+        # Add channel dimension if needed
+        if len(train_data.shape) == 3:
+            train_data = np.expand_dims(train_data, axis=-1)
+            val_data = np.expand_dims(val_data, axis=-1)
+        
+        # Set up callbacks for fine-tuning
+        callbacks = [
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=model_params['model_path'],
+                save_best_only=True,
+                monitor='val_loss'
+            ),
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=training_params.get('early_stopping_patience', 10),
+                restore_best_weights=True
+            ),
+            tf.keras.callbacks.TensorBoard(
+                log_dir=f"logs/log_mast/{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                histogram_freq=1
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6
+            )
+        ]
+        
+        # Train the fine-tuning model
+        history = finetune_model.fit(
+            train_data, train_labels_expanded,
+            validation_data=(val_data, val_labels),
+            epochs=training_params.get('epochs', 100),
+            batch_size=training_params.get('batch_size', 32),
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        # Save the final model
+        model = finetune_model
+        model.save(model_params['model_path'])
+        
+        # Save training history
+        with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
+            pickle.dump(history.history, f)
+    
+    # Evaluate model on test set
+    logger.info("Evaluating model on test set")
+    
+    # Process test data
     test_data, test_labels_expanded = list_to_spectrograms(
         test_files,
         test_labels,
         msg="generate test_dataset",
         augment=False,
-        param=param,
+        param=config,
         batch_size=20
     )
-
-    logger.info(f"Test data shape: {test_data.shape}")
-    logger.info(f"Test labels shape: {test_labels_expanded.shape}")
-
+    
     # Preprocess test data
     test_data = preprocess_spectrograms(test_data, target_shape)
-
-    # Apply same normalization to test data
+    
+    # Apply same normalization to test data as was applied to training data
     if train_std > 1e-6:
         test_data = (test_data - train_mean) / train_std
     else:
         test_data = test_data - train_mean
-
-
-    # Evaluate the model
-    if test_data.shape[0] > 0:
-        # Predict on test set
-        y_pred = model.predict(test_data, batch_size=batch_size, verbose=1)
+    
+    # Ensure test data has channel dimension
+    if len(test_data.shape) == 3:
+        test_data = np.expand_dims(test_data, axis=-1)
+    
+    # Model evaluation
+    test_results = model.evaluate(test_data, test_labels_expanded, verbose=1)
+    logger.info(f"Test results: {dict(zip(model.metrics_names, test_results))}")
+    
+    # Generate predictions
+    y_pred = model.predict(test_data)
+    y_pred_binary = (y_pred > 0.5).astype(int)
+    
+    # Calculate metrics
+    accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
+    precision = metrics.precision_score(test_labels_expanded, y_pred_binary)
+    recall = metrics.recall_score(test_labels_expanded, y_pred_binary)
+    f1 = metrics.f1_score(test_labels_expanded, y_pred_binary)
+    auc = metrics.roc_auc_score(test_labels_expanded, y_pred)
+    
+    # Print metrics
+    logger.info(f"Accuracy: {accuracy:.4f}")
+    logger.info(f"Precision: {precision:.4f}")
+    logger.info(f"Recall: {recall:.4f}")
+    logger.info(f"F1 Score: {f1:.4f}")
+    logger.info(f"AUC: {auc:.4f}")
+    
+    # Generate confusion matrix
+    cm = metrics.confusion_matrix(test_labels_expanded, y_pred_binary)
+    logger.info(f"Confusion Matrix:\n{cm}")
+    
+    # Plot metrics
+    plt.figure(figsize=(15, 5))
+    
+    # Plot ROC curve
+    plt.subplot(1, 3, 1)
+    fpr, tpr, _ = metrics.roc_curve(test_labels_expanded, y_pred)
+    plt.plot(fpr, tpr, label=f'AUC = {auc:.4f}')
+    plt.plot([0, 1], [0, 1], 'k--', label='Random')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    
+    # Plot training history if available
+    if os.path.exists('pickle/pickle_mast/training_history.pkl'):
+        with open('pickle/pickle_mast/training_history.pkl', 'rb') as f:
+            history = pickle.load(f)
         
-        # Now analyze the predictions (moved from above)
-        logger.info(f"Raw prediction statistics:")
-        logger.info(f"  - Min: {np.min(y_pred):.4f}, Max: {np.max(y_pred):.4f}")
-        logger.info(f"  - Mean: {np.mean(y_pred):.4f}, Median: {np.median(y_pred):.4f}")
+        plt.subplot(1, 3, 2)
+        plt.plot(history['loss'], label='Training Loss')
+        plt.plot(history['val_loss'], label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training and Validation Loss')
+        plt.legend()
         
-        # Count predictions in different ranges
-        ranges = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-        for i in range(len(ranges)-1):
-            count = np.sum((y_pred >= ranges[i]) & (y_pred < ranges[i+1]))
-            logger.info(f"  - Predictions in range [{ranges[i]:.1f}, {ranges[i+1]:.1f}): {count} ({count/len(y_pred)*100:.1f}%)")
-        
-        # Plot histogram of predictions
-        plt.figure(figsize=(10, 6))
-        plt.hist(y_pred, bins=20)
-        plt.title('Distribution of Raw Predictions')
-        plt.xlabel('Prediction Value')
-        plt.ylabel('Count')
-        plt.savefig(f"{param['result_directory']}/prediction_distribution.png")
-        plt.close()
-        
-        # Try multiple thresholds
-        thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
-        logger.info("Evaluating with multiple thresholds:")
-        for thresh in thresholds:
-            y_pred_binary_thresh = (y_pred > thresh).astype(int)
-            accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary_thresh)
-            precision = metrics.precision_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
-            recall = metrics.recall_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
-            f1 = metrics.f1_score(test_labels_expanded, y_pred_binary_thresh, zero_division=0)
-            logger.info(f"Threshold {thresh:.1f}: Acc={accuracy:.4f}, Prec={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
-        
-        # Find the best threshold to separate classes based on the prediction distribution
-        # Calculate a custom threshold based on statistics of the predictions
-        normal_samples = y_pred[test_labels_expanded == 0]
-        abnormal_samples = y_pred[test_labels_expanded == 1]
-        
-        # Check if we have enough abnormal samples
-        if len(abnormal_samples) > 0:
-            logger.info(f"Normal predictions - Mean: {np.mean(normal_samples):.4f}, Std: {np.std(normal_samples):.4f}")
-            logger.info(f"Abnormal predictions - Mean: {np.mean(abnormal_samples):.4f}, Std: {np.std(abnormal_samples):.4f}")
-            
-            # Check for separation between normal and abnormal predictions
-            mean_diff = np.abs(np.mean(abnormal_samples) - np.mean(normal_samples))
-            combined_std = (np.std(normal_samples) + np.std(abnormal_samples)) / 2
-            
-            # If there's significant separation between means
-            if mean_diff > combined_std * 0.5:
-                # If abnormal mean > normal mean, find a threshold between them
-                if np.mean(abnormal_samples) > np.mean(normal_samples):
-                    # Use weighted midpoint that's closer to the normal distribution
-                    adaptive_threshold = float(np.mean(normal_samples) * 0.7 + np.mean(abnormal_samples) * 0.3)
-                    logger.info(f"Using weighted threshold between means: {adaptive_threshold:.4f}")
-                else:
-                    # If abnormal mean < normal mean, which is unusual, reverse the weighting
-                    adaptive_threshold = float(np.mean(normal_samples) * 0.3 + np.mean(abnormal_samples) * 0.7)
-                    logger.info(f"Using reversed weighted threshold: {adaptive_threshold:.4f}")
-            else:
-                # If the distributions overlap significantly, try different approach
-                # Get the range of predictions and calculate threshold at different percentiles
-                sorted_preds = np.sort(y_pred)
-                lower_percentile = float(sorted_preds[int(len(sorted_preds) * 0.1)])  # 10th percentile
-                upper_percentile = float(sorted_preds[int(len(sorted_preds) * 0.9)])  # 90th percentile
-                
-                # If prediction range is too narrow, try more extreme thresholds
-                if upper_percentile - lower_percentile < 0.1:
-                    logger.info(f"Prediction range too narrow ({lower_percentile:.4f}-{upper_percentile:.4f})")
-                    
-                    # Try multiple thresholds and pick the one with best F1 on validation
-                    test_thresholds = [0.48, 0.49, 0.5, 0.51, 0.52, 0.53, 0.54, 0.55]
-                    best_f1 = 0
-                    adaptive_threshold = 0.5  # Default
-                    
-                    for thresh in test_thresholds:
-                        preds_at_thresh = (y_pred > thresh).astype(int)
-                        f1 = metrics.f1_score(test_labels_expanded, preds_at_thresh, zero_division=0)
-                        logger.info(f"Threshold {thresh:.4f} - F1: {f1:.4f}")
-                        
-                        if f1 > best_f1:
-                            best_f1 = f1
-                            adaptive_threshold = float(thresh)
-                    
-                    logger.info(f"Selected best performing threshold: {adaptive_threshold:.4f} (F1: {best_f1:.4f})")
-                else:
-                    # Use a point slightly below the overall mean (assuming more normal than abnormal samples)
-                    mean_pred = np.mean(y_pred)
-                    adaptive_threshold = float(mean_pred - 0.01)  # Slightly below the mean
-                    logger.info(f"Using threshold slightly below mean: {adaptive_threshold:.4f}")
-        else:
-            # If no abnormal samples in prediction set, use best guess
-            logger.warning("No abnormal samples in test predictions")
-            adaptive_threshold = float(0.5)  # Use standard threshold
-            logger.info(f"Using standard threshold: {adaptive_threshold:.4f}")
-        
-        # Apply custom threshold for meaningful results
-        logger.info(f"Using custom threshold for evaluation: {adaptive_threshold:.4f}")
-        y_pred_binary = (y_pred > adaptive_threshold).astype(int)
-        
-        # Calculate metrics with adaptive threshold
-        test_accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-        test_precision = metrics.precision_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        test_recall = metrics.recall_score(test_labels_expanded, y_pred_binary, zero_division=0)
-        test_f1 = metrics.f1_score(test_labels_expanded, y_pred_binary, zero_division=0)
-
-        # Log metrics
-        logger.info(f"Test Accuracy: {test_accuracy:.4f}")
-        logger.info(f"Test Precision: {test_precision:.4f}")
-        logger.info(f"Test Recall: {test_recall:.4f}")
-        logger.info(f"Test F1 Score: {test_f1:.4f}")
-
-        # Detailed classification report
-        report = classification_report(
-            test_labels_expanded, y_pred_binary, target_names=["Normal", "Abnormal"], zero_division=0
-        )
-        logger.info(f"Classification Report:\n{report}")
-
-        # Plot confusion matrix
-        cm_img = f"{param['result_directory']}/confusion_matrix_overall_ast.png"
-        visualizer.plot_confusion_matrix(
-            test_labels_expanded,
-            y_pred_binary,
-            title=f"Confusion Matrix (Overall) - Threshold: {adaptive_threshold:.4f}",
-        )
-        visualizer.save_figure(cm_img)
-
-        # Store results
-        evaluation_result = {
-            "accuracy": float(test_accuracy),
-            "precision": float(test_precision),
-            "recall": float(test_recall),
-            "f1": float(test_f1),
-            "threshold_used": float(adaptive_threshold)
-        }
-
-        # Append to global results
-        all_y_true.extend(test_labels_expanded)
-        all_y_pred.extend(y_pred_binary)
-
-    else:
-        logger.warning("No test data available for evaluation")
-        evaluation_result = {
-            "accuracy": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "f1": 0.0,
-        }
-
-    # Store evaluation results
-    results[evaluation_result_key] = evaluation_result
-
-    # Find optimal threshold using ROC curve
-    if len(y_pred) > 0:
-        logger.info("Finding optimal classification threshold using ROC curve...")
-        
-        # Calculate ROC curve
-        fpr, tpr, thresholds = metrics.roc_curve(test_labels_expanded, y_pred)
-        
-        # Calculate the geometric mean of sensitivity and specificity
-        gmeans = np.sqrt(tpr * (1-fpr))
-        
-        # Find the optimal threshold
-        ix = np.argmax(gmeans)
-        best_threshold = thresholds[ix]
-        logger.info(f"Optimal threshold from ROC curve: {best_threshold:.4f}")
-        logger.info(f"At this threshold - TPR: {tpr[ix]:.4f}, FPR: {fpr[ix]:.4f}, G-Mean: {gmeans[ix]:.4f}")
-        
-        # Re-evaluate with optimal threshold
-        y_pred_binary = (y_pred > best_threshold).astype(int)
-
-        # If optimal threshold is very close to 0.5, try a lower threshold
-        if 0.45 < best_threshold < 0.55 and test_f1 < 0.6:
-            logger.info("Trying a lower threshold (0.39) since optimal threshold is close to default")
-            lower_threshold = 0.39
-            y_pred_binary_lower = (y_pred > lower_threshold).astype(int)
-            
-            # Calculate metrics with lower threshold
-            test_accuracy_lower = metrics.accuracy_score(test_labels_expanded, y_pred_binary_lower)
-            test_precision_lower = metrics.precision_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
-            test_recall_lower = metrics.recall_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
-            test_f1_lower = metrics.f1_score(test_labels_expanded, y_pred_binary_lower, zero_division=0)
-            
-            logger.info(f"Metrics with lower threshold ({lower_threshold}):")
-            logger.info(f"Test Accuracy: {test_accuracy_lower:.4f}")
-            logger.info(f"Test Precision: {test_precision_lower:.4f}")
-            logger.info(f"Test Recall: {test_recall_lower:.4f}")
-            logger.info(f"Test F1 Score: {test_f1_lower:.4f}")
-            
-            # Use lower threshold if it gives better F1 score
-            if test_f1_lower > test_f1:
-                logger.info(f"Using lower threshold {lower_threshold} instead of optimal threshold {best_threshold}")
-                y_pred_binary = y_pred_binary_lower
-                test_accuracy = test_accuracy_lower
-                test_precision = test_precision_lower
-                test_recall = test_recall_lower
-                test_f1 = test_f1_lower
-
-
-
-
-    # Calculate overall metrics
-    if all_y_true and all_y_pred:
-        overall_accuracy = metrics.accuracy_score(all_y_true, all_y_pred)
-        overall_precision = metrics.precision_score(all_y_true, all_y_pred, zero_division=0)
-        overall_recall = metrics.recall_score(all_y_true, all_y_pred, zero_division=0)
-        overall_f1 = metrics.f1_score(all_y_true, all_y_pred, zero_division=0)
-
-        overall_results = {
-            "overall_accuracy": float(overall_accuracy),
-            "overall_precision": float(overall_precision),
-            "overall_recall": float(overall_recall),
-            "overall_f1": float(overall_f1),
-        }
-        results.update(overall_results)
-
-
-        logger.info(f"Overall Accuracy: {overall_accuracy:.4f}")
-        logger.info(f"Overall Precision: {overall_precision:.4f}")
-        logger.info(f"Overall Recall: {overall_recall:.4f}")
-        logger.info(f"Overall F1 Score: {overall_f1:.4f}")
-
-        # Plot overall confusion matrix
-        overall_cm_img = f"{param['result_directory']}/confusion_matrix_overall_ast.png"
-        visualizer.plot_confusion_matrix(
-            all_y_true,
-            all_y_pred,
-            title="Overall Confusion Matrix",
-        )
-        visualizer.save_figure(overall_cm_img)
-
-    total_time = time.time() - start_time
-    results["timing"] = {
-        "total_execution_time_seconds": float(total_time),
-        "model_training_time_seconds": float(training_time),
+        plt.subplot(1, 3, 3)
+        plt.plot(history['accuracy'], label='Training Accuracy')
+        plt.plot(history['val_accuracy'], label='Validation Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.title('Training and Validation Accuracy')
+        plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('result/result_mast/performance_metrics.png')
+    logger.info(f"Performance metrics saved to result/result_mast/performance_metrics.png")
+    
+    # Ensure necessary directories exist for saving artifacts
+    os.makedirs('pickle/pickle_mast', exist_ok=True)
+    os.makedirs('result/result_mast', exist_ok=True)
+    
+    # Save test results
+    results = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'auc': auc,
+        'confusion_matrix': cm.tolist(),
+        'y_true': test_labels_expanded.tolist(),
+        'y_pred': y_pred.flatten().tolist(),
+        'y_pred_binary': y_pred_binary.flatten().tolist()
     }
+    
+    with open('result/result_mast/test_results.json', 'w') as f:
+        json.dump(results, f, indent=4)
+    
+    logger.info("Test results saved to result/result_mast/test_results.json")
+    
+    return model
 
-    # Save results to YAML
-    with open(result_file, "w") as f:
-        yaml.safe_dump(results, f)
-    logger.info(f"Results saved to {result_file}")
-
-    # Log total execution time
-    logger.info(f"Total execution time: {total_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()

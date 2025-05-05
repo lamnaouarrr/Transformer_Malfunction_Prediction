@@ -1814,11 +1814,13 @@ def main():
         
         # Preprocess to ensure consistent shapes
         logger.info("Preprocessing training data...")
-        train_data = preprocess_spectrograms(train_files, target_shape)
+        # Pass the config to preprocess_spectrograms
+        train_data = preprocess_spectrograms(train_files, target_shape, config)
         logger.info(f"Preprocessed train data shape: {train_data.shape}")
 
         logger.info("Preprocessing validation data...")
-        val_data = preprocess_spectrograms(val_files, target_shape)
+        # Pass the config to preprocess_spectrograms
+        val_data = preprocess_spectrograms(val_files, target_shape, config)
         logger.info(f"Preprocessed validation data shape: {val_data.shape}")
         
         # Normalize data for better training

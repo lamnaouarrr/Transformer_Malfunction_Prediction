@@ -1255,6 +1255,11 @@ def preprocess_spectrograms(spectrograms, target_shape):
     """
     Resize all spectrograms to a consistent shape.
     """
+    # Handle case where input is a list of file paths instead of spectrograms
+    if isinstance(spectrograms, list):
+        logger.info(f"Converting {len(spectrograms)} file paths to spectrograms...")
+        spectrograms, _ = list_to_spectrograms(spectrograms, None, "Processing files", False, None)
+    
     if spectrograms.shape[0] == 0:
         return spectrograms
         

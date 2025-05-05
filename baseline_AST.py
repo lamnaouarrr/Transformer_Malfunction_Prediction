@@ -1532,7 +1532,7 @@ def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode=
     # Override the _save_model method to avoid options parameter
     original_save_model = callback._save_model
     
-    def safe_save_model(model, epoch, logs, batch=None):
+    def safe_save_model(epoch, logs, model, batch=None):
         """Custom save method that handles all parameters and avoids using options"""
         logger.info(f"Using safe model save method (epoch: {epoch})")
         try:

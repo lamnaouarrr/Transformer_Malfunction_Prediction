@@ -1772,11 +1772,11 @@ def main():
         config = yaml.safe_load(config_file)
     
     # Extract configurations
-    model_params = config['model']
+    model_params = config.get('model', {})
     mast_params = model_params.get('mast', {})
-    transformer_params = model_params.get('transformer', {})
-    dataset_params = config['dataset']
-    training_params = config['training']
+    transformer_params = model_params.get('architecture', {}).get('transformer', {})
+    dataset_params = config.get('dataset', {})
+    training_params = config.get('training', {})
     
     # Set up logging
     setup_logging()
@@ -1785,7 +1785,7 @@ def main():
     logger.info(f"Starting MAST model training with config: {config}")
     
     # Check if we should load existing model or create a new one
-    if training_params.get('load_model', False) and os.path.exists(model_params['model_path']):
+    if training_params.get('load_model', False) and os.path.exists(model_params.get('model_path', '')):
         logger.info(f"Loading existing model from {model_params['model_path']}")
         model = tf.keras.models.load_model(model_params['model_path'])
     else:
@@ -1795,8 +1795,9 @@ def main():
         
         # Load and preprocess dataset
         logger.info("Loading dataset")
+        # Fix: Use config directly to ensure base_directory is accessible
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
-            dataset_params['base_directory'], config)
+            config.get('base_directory', './dataset'), config)
         
         # Get input shape from data
         target_shape = (config["feature"]["n_mels"], 96)

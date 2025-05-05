@@ -1008,7 +1008,8 @@ def preprocess_spectrograms(spectrograms, target_shape):
 
 def balance_dataset(train_data, train_labels, augment_minority=True):
     """
-    Balance the dataset by augmenting the minority class more efficiently
+    Balance the dataset by augmenting the minority class with GPU acceleration
+    V100 optimization: Uses batch operations for all augmentations
     """
     # Count classes
     unique_labels, counts = np.unique(train_labels, return_counts=True)
@@ -1037,45 +1038,108 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
         logger.info("Dataset already balanced")
         return train_data, train_labels
     
-    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples using batch processing")
+    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples using GPU-optimized batch processing")
     
     # Get all minority samples
     minority_samples = train_data[minority_indices]
     
-    # Create augmented samples in one batch operation for better efficiency
-    # Generate random indices for sampling (with replacement)
-    batch_indices = np.random.choice(len(minority_indices), n_to_add, replace=True)
-    batch_samples = minority_samples[batch_indices].copy()
+    # Process in batches to avoid memory issues
+    # For V100 with 32GB, we can use larger batch sizes
+    batch_size = 5000  # Optimized for V100 GPU
+    n_batches = (n_to_add + batch_size - 1) // batch_size
     
-    # Add random noise (vectorized operation)
-    noise_level = 0.1
-    # Create the noise array in one operation
-    noise = np.random.normal(0, noise_level, batch_samples.shape)
-    batch_augmented = batch_samples + noise
+    all_augmented = []
     
-    # Clip values to valid range
-    batch_augmented = np.clip(batch_augmented, -3, 3)  # Assuming normalized data
+    # Try to use TensorFlow for GPU acceleration if available
+    try:
+        import tensorflow as tf
+        use_tf = True
+        logger.info("Using TensorFlow for GPU-accelerated augmentation")
+    except ImportError:
+        use_tf = False
+        logger.info("TensorFlow not available, using NumPy for augmentation")
     
-    # Create the labels array
-    augmented_labels = np.full(n_to_add, minority_class)
+    for i in range(n_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_to_add)
+        batch_size_actual = end_idx - start_idx
+        
+        # Generate random indices for sampling (with replacement)
+        batch_indices = np.random.choice(len(minority_indices), batch_size_actual, replace=True)
+        
+        if use_tf:
+            # TensorFlow operations for GPU acceleration
+            # Convert to TensorFlow tensors
+            batch_samples_tf = tf.convert_to_tensor(minority_samples[batch_indices], dtype=tf.float32)
+            
+            # Add random noise (vectorized operation)
+            noise_level = 0.1
+            noise_shape = tf.shape(batch_samples_tf)
+            noise = tf.random.normal(noise_shape, mean=0.0, stddev=noise_level, dtype=tf.float32)
+            batch_augmented = batch_samples_tf + noise
+            
+            # Apply random time/frequency shifts for more diversity
+            if np.random.rand() > 0.5:
+                # Random shift along time axis (dim 2)
+                shift = np.random.randint(-3, 4)  # Shift by -3 to 3 steps
+                if shift > 0:
+                    batch_augmented = tf.pad(batch_augmented[:, :, :-shift], [[0, 0], [0, 0], [shift, 0]])
+                elif shift < 0:
+                    batch_augmented = tf.pad(batch_augmented[:, :, -shift:], [[0, 0], [0, 0], [0, -shift]])
+            
+            # Apply small random scaling
+            scale_factor = tf.random.uniform([], 0.95, 1.05)
+            batch_augmented = batch_augmented * scale_factor
+            
+            # Clip values to valid range
+            batch_augmented = tf.clip_by_value(batch_augmented, -3.0, 3.0)  # Assuming normalized data
+            
+            # Convert back to numpy
+            batch_augmented = batch_augmented.numpy()
+        else:
+            # NumPy operations as fallback
+            batch_samples = minority_samples[batch_indices].copy()
+            
+            # Add random noise (vectorized operation)
+            noise_level = 0.1
+            noise = np.random.normal(0, noise_level, batch_samples.shape)
+            batch_augmented = batch_samples + noise
+            
+            # Clip values to valid range
+            batch_augmented = np.clip(batch_augmented, -3, 3)  # Assuming normalized data
+        
+        all_augmented.append(batch_augmented)
     
-    logger.info(f"Finished creating {n_to_add} augmented samples")
-    
-    # Combine original and augmented data
-    balanced_data = np.vstack([train_data, batch_augmented])
-    balanced_labels = np.concatenate([train_labels, augmented_labels])
-    
-    # Shuffle the data
-    indices = np.arange(len(balanced_labels))
-    np.random.shuffle(indices)
-    balanced_data = balanced_data[indices]
-    balanced_labels = balanced_labels[indices]
-    
-    logger.info(f"New dataset shape: {balanced_data.shape}")
-    new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
-    logger.info(f"New class distribution: {new_class_counts}")
-    
-    return balanced_data, balanced_labels
+    # Combine all batches
+    if all_augmented:
+        batch_augmented = np.vstack(all_augmented)
+        logger.info(f"Finished creating {batch_augmented.shape[0]} augmented samples")
+        
+        # Create the labels array
+        augmented_labels = np.full(batch_augmented.shape[0], minority_class)
+        
+        # Combine original and augmented data
+        balanced_data = np.vstack([train_data, batch_augmented])
+        balanced_labels = np.concatenate([train_labels, augmented_labels])
+        
+        # Free memory
+        del all_augmented, batch_augmented
+        gc.collect()
+        
+        # Shuffle the data
+        indices = np.arange(len(balanced_labels))
+        np.random.shuffle(indices)
+        balanced_data = balanced_data[indices]
+        balanced_labels = balanced_labels[indices]
+        
+        logger.info(f"New dataset shape: {balanced_data.shape}")
+        new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
+        logger.info(f"New class distribution: {new_class_counts}")
+        
+        return balanced_data, balanced_labels
+    else:
+        logger.warning("No augmented samples created, returning original data")
+        return train_data, train_labels
 
 
 def mixup_data(x, y, alpha=0.2):
@@ -1846,39 +1910,9 @@ def main():
     # Balance the dataset
     logger.info("Balancing dataset...")
     train_data, train_labels_expanded = balance_dataset(train_data, train_labels_expanded, augment_minority=True)
-
-    # Apply data augmentation
-    augmented_data = []
-    augmented_labels = []
-
-    # Get abnormal samples
-    abnormal_indices = np.where(train_labels_expanded == 1)[0]
-    logger.info(f"Augmenting {len(abnormal_indices)} abnormal samples")
-
-    # Augment each abnormal sample once with simple noise
-    for idx in abnormal_indices:
-        sample = train_data[idx].copy()
-        noise = np.random.normal(0, 0.1, sample.shape)
-        augmented_sample = sample + noise
-        augmented_sample = np.clip(augmented_sample, 0, 1)
-        
-        augmented_data.append(augmented_sample)
-        augmented_labels.append(1)  # Abnormal class
-
-    # Add augmented samples to training data
-    if augmented_data:
-        augmented_data = np.array(augmented_data)
-        train_data = np.vstack([train_data, augmented_data])
-        train_labels_expanded = np.concatenate([train_labels_expanded, np.array(augmented_labels)])
-        
-        # Shuffle the combined dataset
-        shuffle_indices = np.random.permutation(len(train_data))
-        train_data = train_data[shuffle_indices]
-        train_labels_expanded = train_labels_expanded[shuffle_indices]
-        
-        logger.info(f"After augmentation: {len(train_data)} samples, {np.sum(train_labels_expanded == 1)} abnormal")
-
-
+    
+    # IMPORTANT: Skip the redundant augmentation that was causing extreme slowdown
+    # The balancing already created all the needed augmented samples
 
     print("\n============== VERIFYING GPU CONFIGURATION BEFORE TRAINING ==============")
     verify_gpu_usage()

@@ -591,8 +591,8 @@ def dataset_generator(target_dir, param=None):
         if len(parts) >= 4:
             db = parts[1]
             machine_type = parts[2]
-            machine_id_with_file = parts[3]
-            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id
+            id_part = parts[3]
+            machine_id = id_part.split('-')[0] if '-' in id_part else id_part
             
             key = (db, machine_type, machine_id)
             
@@ -1795,9 +1795,12 @@ def main():
         
         # Load and preprocess dataset
         logger.info("Loading dataset")
-        # Fix: Use config directly to ensure base_directory is accessible
+        # Fix: Use the normal directory to properly process both normal and abnormal data
+        base_dir = config.get('base_directory', './dataset')
+        normal_dir = os.path.join(base_dir, 'normal')
+        
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
-            config.get('base_directory', './dataset'), config)
+            normal_dir, config)
         
         # Get input shape from data
         target_shape = (config["feature"]["n_mels"], 96)

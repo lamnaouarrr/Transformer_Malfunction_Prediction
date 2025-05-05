@@ -539,7 +539,7 @@ def dataset_generator(target_dir, param=None):
     
     # Get all files in the directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
-    print(f"Looking for files in: {target_dir}")
+    print(f"Initial scan - Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
 
     # If no files found, try listing the directory contents
@@ -753,10 +753,8 @@ def dataset_generator(target_dir, param=None):
     logger.info(f"val_file num : {len(val_files)} (normal: {len(normal_val_files)}, abnormal: {len(abnormal_val_files)})")
     logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
 
-    # Debug info
-    print(f"Looking for files in: {target_dir}")
-    print(f"Found {len(files_in_dir)} files")
-    print(f"DEBUG - Dataset summary:")
+    # Debug info - make it clear this is a summary section
+    print(f"=== DATASET SUMMARY ===")
     print(f"  Normal files found: {len(normal_files)}")
     print(f"  Abnormal files found: {len(abnormal_files)}")
     print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")

@@ -1008,7 +1008,7 @@ def preprocess_spectrograms(spectrograms, target_shape):
 
 def balance_dataset(train_data, train_labels, augment_minority=True):
     """
-    Balance the dataset by augmenting the minority class
+    Balance the dataset by augmenting the minority class more efficiently
     """
     # Count classes
     unique_labels, counts = np.unique(train_labels, return_counts=True)
@@ -1037,32 +1037,33 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
         logger.info("Dataset already balanced")
         return train_data, train_labels
     
-    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples")
+    logger.info(f"Augmenting minority class {minority_class} with {n_to_add} samples using batch processing")
     
-    # Create augmented samples
-    augmented_data = []
-    augmented_labels = []
+    # Get all minority samples
+    minority_samples = train_data[minority_indices]
     
-    # Simple augmentation: add noise and small shifts
-    for _ in range(n_to_add):
-        # Randomly select a minority sample
-        idx = np.random.choice(minority_indices)
-        sample = train_data[idx].copy()
-        
-        # Add random noise
-        noise_level = 0.1
-        noise = np.random.normal(0, noise_level, sample.shape)
-        augmented_sample = sample + noise
-        
-        # Clip values to valid range
-        augmented_sample = np.clip(augmented_sample, 0, 1)
-        
-        augmented_data.append(augmented_sample)
-        augmented_labels.append(minority_class)
+    # Create augmented samples in one batch operation for better efficiency
+    # Generate random indices for sampling (with replacement)
+    batch_indices = np.random.choice(len(minority_indices), n_to_add, replace=True)
+    batch_samples = minority_samples[batch_indices].copy()
+    
+    # Add random noise (vectorized operation)
+    noise_level = 0.1
+    # Create the noise array in one operation
+    noise = np.random.normal(0, noise_level, batch_samples.shape)
+    batch_augmented = batch_samples + noise
+    
+    # Clip values to valid range
+    batch_augmented = np.clip(batch_augmented, -3, 3)  # Assuming normalized data
+    
+    # Create the labels array
+    augmented_labels = np.full(n_to_add, minority_class)
+    
+    logger.info(f"Finished creating {n_to_add} augmented samples")
     
     # Combine original and augmented data
-    balanced_data = np.vstack([train_data, np.array(augmented_data)])
-    balanced_labels = np.concatenate([train_labels, np.array(augmented_labels)])
+    balanced_data = np.vstack([train_data, batch_augmented])
+    balanced_labels = np.concatenate([train_labels, augmented_labels])
     
     # Shuffle the data
     indices = np.arange(len(balanced_labels))

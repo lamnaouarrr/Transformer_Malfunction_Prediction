@@ -1562,14 +1562,39 @@ def create_simple_modelcheckpoint_callback(model_file, monitor='val_loss', mode=
         try:
             logger.info(f"Using safe model save method (epoch: {epoch})")
             # Save model directly instead of through callback's method
+            model.save(callback.filepath, overwrite=True, save_format='keras')
+            logger.info(f"Model saved successfully at epoch {epoch}")
+            return True
+        except Exception as e:
+            logger.error(f"Error in custom save method: {e}")
+            # Try fallback method
+            try:
+                logger.info("Falling back to tf.keras.models.save_model")
+                tf.keras.models.save_model(
+                    model, 
+                    callback.filepath,
+                    overwrite=True,
+                    include_optimizer=False,  # Try without optimizer to avoid issues
+                    save_format='keras',
+                    save_traces=False  # Try without traces
+                )
+                logger.info(f"Model saved successfully using fallback method at epoch {epoch}")
+                return True
+            except Exception as e2:
+                logger.error(f"Fallback save method also failed: {e2}")
+                # Final fallback: save weights only
+                try:
+                    logger.info("Attempting to save weights only")
+                    weights_path = f"{callback.filepath}_weights"
+                    model.save_weights(weights_path)
                     logger.info(f"Weights saved to {weights_path}")
                     return False  # Return False as the full model wasn't saved
                 except Exception as e3:
                     logger.error(f"All save methods failed: {e3}")
                     return False
     
-    # Replace the _save_model method with our custom version
-    callback._save_model = safe_save_model
+    # Replace the _save_model method with our debug wrapper
+    callback._save_model = debug_save_wrapper
     
     return callback
 

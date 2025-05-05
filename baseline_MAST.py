@@ -575,7 +575,10 @@ def dataset_generator(target_dir, param=None):
     
     # Get the other condition directory to find matching files
     other_condition = "abnormal" if is_normal else "normal"
-    other_dir = Path(param.get("base_directory", "./dataset")) / other_condition
+    
+    # Fix the base_directory access to ensure it's correctly using the default value
+    base_dir = param.get("base_directory", "./dataset")
+    other_dir = Path(base_dir) / other_condition
     
     # Get files from the other condition directory
     other_files = list(other_dir.glob(f"*.{ext}"))

@@ -134,6 +134,11 @@ def setup_logging():
     os.makedirs("./logs/log_MAST", exist_ok=True)
     logging.basicConfig(level=logging.DEBUG, filename="./logs/log_MAST/baseline_MAST.log")
     logger = logging.getLogger(' ')
+    
+    # Clear existing handlers to prevent duplicate messages
+    if logger.handlers:
+        logger.handlers.clear()
+        
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)

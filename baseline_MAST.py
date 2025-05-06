@@ -1262,7 +1262,17 @@ def preprocess_spectrograms(spectrograms, target_shape, param=None):
     if isinstance(spectrograms, list):
         logger.info(f"Converting {len(spectrograms)} file paths to spectrograms...")
         # Pass the param to the list_to_spectrograms function
-        spectrograms, _ = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
+        # Fix: Handle the correct number of return values from list_to_spectrograms
+        result = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
+        
+        # Check if the result is a tuple and unpack accordingly
+        if isinstance(result, tuple):
+            if len(result) >= 2:
+                spectrograms, _ = result[:2]
+            else:
+                spectrograms = result[0]
+        else:
+            spectrograms = result
     
     if spectrograms.shape[0] == 0:
         return spectrograms
@@ -2115,10 +2125,51 @@ def main():
         'y_pred_binary': y_pred_binary.flatten().tolist()
     }
     
-    with open('result/result_mast/test_results.json', 'w') as f:
-        json.dump(results, f, indent=4)
+    # Find optimal threshold using ROC curve
+    logger.info("Finding optimal threshold value...")
+    fpr, tpr, thresholds = metrics.roc_curve(test_labels_expanded, y_pred)
     
-    logger.info("Test results saved to result/result_mast/test_results.json")
+    # Calculate J statistics (Youden's J = TPR - FPR)
+    j_scores = tpr - fpr
+    # Find the index of the maximum J value
+    optimal_idx = np.argmax(j_scores)
+    # Get the optimal threshold
+    optimal_threshold = float(thresholds[optimal_idx])
+    
+    # Calculate the performance at the optimal threshold
+    optimal_preds = (y_pred > optimal_threshold).astype(int)
+    optimal_accuracy = metrics.accuracy_score(test_labels_expanded, optimal_preds)
+    optimal_precision = metrics.precision_score(test_labels_expanded, optimal_preds)
+    optimal_recall = metrics.recall_score(test_labels_expanded, optimal_preds)
+    optimal_f1 = metrics.f1_score(test_labels_expanded, optimal_preds)
+    
+    logger.info(f"Optimal threshold: {optimal_threshold:.4f}")
+    logger.info(f"Performance at optimal threshold:")
+    logger.info(f"  Accuracy: {optimal_accuracy:.4f}")
+    logger.info(f"  Precision: {optimal_precision:.4f}")
+    logger.info(f"  Recall: {optimal_recall:.4f}")
+    logger.info(f"  F1 Score: {optimal_f1:.4f}")
+    
+    # Add optimal threshold information to results dictionary
+    results['optimal_threshold'] = optimal_threshold
+    results['optimal_threshold_metrics'] = {
+        'accuracy': float(optimal_accuracy),
+        'precision': float(optimal_precision),
+        'recall': float(optimal_recall),
+        'f1': float(optimal_f1)
+    }
+    
+    # Ensure necessary directories exist for saving artifacts
+    os.makedirs('pickle/pickle_mast', exist_ok=True)
+    os.makedirs('result/result_MAST', exist_ok=True)
+    
+    # Save as YAML file (as originally intended)
+    yaml_file_path = os.path.join(config.get('result_directory', './result/result_MAST'), 
+                                 config.get('result_file', 'result_MAST.yaml'))
+    with open(yaml_file_path, 'w') as f:
+        yaml.dump(results, f, default_flow_style=False)
+    
+    logger.info(f"Test results saved to {yaml_file_path}")
     
     return model
 

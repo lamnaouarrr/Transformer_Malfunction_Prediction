@@ -65,11 +65,11 @@ def send_to_api(file_content, api_url, mode="file"):
             # Prepare the file for upload
             files = {'file': ('audio.wav', file_content, 'audio/wav')}
             
-            # Send the request
-            response = requests.post(api_url, files=files, timeout=10)
+            # Send the request with a longer timeout (30 seconds instead of 10)
+            response = requests.post(api_url, files=files, timeout=30)
         elif mode == "data":
-            # Send the feature data directly
-            response = requests.post(api_url, json=file_content, timeout=10)
+            # Send the feature data directly with a longer timeout
+            response = requests.post(api_url, json=file_content, timeout=30)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -77,6 +77,12 @@ def send_to_api(file_content, api_url, mode="file"):
         else:
             st.error(f"API error: {response.status_code} - {response.text}")
             return None
+    except requests.exceptions.Timeout:
+        st.error("API request timed out. The server might be processing a large file or under heavy load.")
+        return None
+    except requests.exceptions.ConnectionError:
+        st.error("Could not connect to the API server. Please check if the server is running at the correct address.")
+        return None
     except Exception as e:
         st.error(f"Error connecting to API: {e}")
         return None

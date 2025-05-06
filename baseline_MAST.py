@@ -1126,11 +1126,11 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         lambda x: tf.nn.depth_to_space(
             tf.reshape(x, [
                 tf.shape(x)[0],
-                tf.shape(x)[1] * patch_height,
-                tf.shape(x)[2] * patch_width,
-                1
+                tf.shape(x)[1] * patch_height // 2,  # Adjust dimensions to be compatible with block_size=2
+                tf.shape(x)[2] * patch_width // 2,
+                4  # Ensure this is block_size² (2²=4) for depth_to_space to work
             ]),
-            block_size=2  # Changed from 1 to 2 (minimum required value)
+            block_size=2
         ),
         name="reconstruction_reshape"
     )(reconstructed)

@@ -37,6 +37,15 @@ feature:
     chunk_size: 5000
     temp_directory: "./temp_chunks/temp_chunks_AST"
 
+# Cache configuration for spectrogram generation
+cache:
+  enabled: true
+  directory: "./cache/mast_spectrograms"
+  memory_limit_mb: 4096
+  persistent: true
+  clear_on_param_change: true
+  compression: true
+
 # Fit algorithm parameters
 fit:
   compile:

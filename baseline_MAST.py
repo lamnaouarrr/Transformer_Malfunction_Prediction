@@ -421,14 +421,16 @@ def file_to_spectrogram(file_name,
 
 
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
-
     """
-    Process a list of files into spectrograms with optional labels - memory optimized version
+    Process a list of files into spectrograms with optional labels - memory optimized version with caching
     """
     n_mels = param.get("feature", {}).get("n_mels", 64)
     n_fft = param.get("feature", {}).get("n_fft", 1024)
     hop_length = param.get("feature", {}).get("hop_length", 512)
     power = param.get("feature", {}).get("power", 2.0)
+    
+    # Check if caching is enabled in config
+    use_cache = param.get("cache", {}).get("enabled", True) if param else True
     
     # First pass: determine dimensions and count valid files
     valid_files = []
@@ -439,7 +441,12 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
         try:
-            spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+            # Use cached version for dimension check if enabled and not augmenting
+            if use_cache and not augment:
+                spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+            else:
+                spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                
             if spec is not None:
                 # Handle 3D input
                 if len(spec.shape) == 3:
@@ -464,10 +471,14 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     
     logger.info(f"Using target shape: ({max_freq}, {max_time})")
     
-    # Second pass: process files in batches
+    # Second pass: process files in batches with caching
     total_valid = len(valid_files)
     spectrograms = np.zeros((total_valid, max_freq, max_time), dtype=np.float32)
     processed_labels = np.array(valid_labels) if valid_labels else None
+    
+    # Add cache metrics tracking
+    cache_hits = 0
+    cache_misses = 0
     
     for batch_start in tqdm(range(0, total_valid, batch_size), desc=f"{msg} (processing)"):
         batch_end = min(batch_start + batch_size, total_valid)
@@ -475,7 +486,20 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         
         for i, file_path in enumerate(batch_files):
             try:
-                spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                # Use cached version if enabled and not augmenting
+                cache_start_time = time.time()
+                if use_cache and not augment:
+                    spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+                    # Check if the file was pulled from cache
+                    cache_file = os.path.join(param.get("cache", {}).get("directory", "./cache/spectrograms"), 
+                                            hashlib.md5(f"{file_path}_{n_mels}_{n_fft}_{hop_length}_{power}".encode()).hexdigest() + ".npy")
+                    if os.path.exists(cache_file) and os.path.getmtime(cache_file) < cache_start_time:
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
+                else:
+                    spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                    cache_misses += 1
                 
                 if spec is not None:
                     # Handle 3D input
@@ -507,6 +531,12 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                 spectrograms[batch_start + i] = np.zeros((max_freq, max_time))
         
         gc.collect()
+
+    # Log cache performance
+    if use_cache:
+        total_files = cache_hits + cache_misses
+        hit_rate = (cache_hits / total_files) * 100 if total_files > 0 else 0
+        logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {hit_rate:.1f}% hit rate")
 
     spectrograms = spectrograms.astype(np.float32)
     
@@ -1780,6 +1810,95 @@ def verify_gpu_usage_during_training():
     except Exception as e:
         print(f"Error during GPU verification: {e}")
         return False
+
+
+########################################################################
+# caching mechanism
+########################################################################
+def file_caching_mechanism(file_path, calculation_func, param=None, force_recalculate=False):
+    """
+    Generic caching mechanism for expensive file computations.
+    
+    Args:
+        file_path: Path to the file being processed
+        calculation_func: Function to compute the result if not cached
+        param: Parameters dictionary that affects the calculation
+        force_recalculate: Whether to ignore cache and recalculate
+        
+    Returns:
+        The calculated or cached result
+    """
+    # Generate a unique cache key based on file path and relevant parameters
+    import hashlib
+    
+    # Create a deterministic cache key from file path and parameters
+    if param is None:
+        param = {}
+    
+    # Extract only the parameters that affect the calculation
+    cache_keys = {
+        "n_mels": param.get("feature", {}).get("n_mels", 64),
+        "n_fft": param.get("feature", {}).get("n_fft", 1024),
+        "hop_length": param.get("feature", {}).get("hop_length", 512),
+        "power": param.get("feature", {}).get("power", 2.0),
+        "frames": param.get("feature", {}).get("frames", None),
+        "stride": param.get("feature", {}).get("stride", None),
+        "target_shape": param.get("feature", {}).get("target_shape", None),
+        "sr": param.get("feature", {}).get("sr", None),
+    }
+    
+    # Create hash from file path and parameters
+    hash_str = f"{file_path}_{str(cache_keys)}"
+    cache_key = hashlib.md5(hash_str.encode()).hexdigest()
+    
+    # Define cache directory and ensure it exists
+    cache_dir = param.get("cache", {}).get("directory", "./cache/spectrograms")
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Full path to the cached file
+    cache_file = os.path.join(cache_dir, f"{cache_key}.npy")
+    
+    # Check if cache file exists and whether to use it
+    use_cache = param.get("cache", {}).get("enabled", True) and not force_recalculate
+    
+    if use_cache and os.path.exists(cache_file):
+        try:
+            # Load from cache
+            result = np.load(cache_file, allow_pickle=True)
+            if result is not None and isinstance(result, np.ndarray):
+                # If result is an array with the expected dimensions, return it
+                if len(result.shape) >= 2:  # Basic validation
+                    return result
+            logger.warning(f"Invalid cached data for {file_path}, recalculating")
+        except Exception as e:
+            logger.warning(f"Error loading cache for {file_path}: {e}, recalculating")
+    
+    # Calculate the result
+    result = calculation_func()
+    
+    # Save to cache if enabled
+    if use_cache and result is not None:
+        try:
+            np.save(cache_file, result)
+        except Exception as e:
+            logger.warning(f"Failed to cache result for {file_path}: {e}")
+    
+    return result
+
+def cached_file_to_spectrogram(file_name, n_mels=64, n_fft=1024, hop_length=512, power=2.0, augment=False, param=None):
+    """
+    Cached version of file_to_spectrogram that uses the caching mechanism
+    """
+    # Don't cache augmented spectrograms as they're random
+    if augment:
+        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, augment, param)
+    
+    # Define the calculation function to be cached
+    def calculate_spectrogram():
+        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, False, param)
+    
+    # Use the caching mechanism
+    return file_caching_mechanism(file_name, calculate_spectrogram, param)
 
 
 ########################################################################

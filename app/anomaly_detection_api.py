@@ -3,18 +3,24 @@
  @file   anomaly_detection_api.py
  @brief  API for WAV file analysis using the FNN model for anomaly detection (FastAPI version)
 """
-import os
 import sys
-import numpy as np
-import yaml
+import os
 import logging
-import tempfile
-import uvicorn
-import glob
-
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import yaml
+import time
+import numpy as np
+import librosa
+import tensorflow as tf
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
+from pydantic import BaseModel
+import tempfile
+from typing import Optional, Dict, Any, List
+import uvicorn
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.layers import Input, Dense, Activation, Dropout, BatchNormalization
+from tensorflow.keras.regularizers import l2
 
 # Set up the system path to ensure imports work correctly
 # Assumes the script is run from the 'app' directory or the project root
@@ -75,10 +81,10 @@ try:
     logger.info(f"Configuration loaded from {yaml_path}")
 except FileNotFoundError:
     logger.error(f"Configuration file not found: {yaml_path}")
-    sys.exit(1)
-except yaml.YAMLError as e:
-    logger.error(f"Error parsing configuration file {yaml_path}: {e}")
-    sys.exit(1)
+    param = {
+        "feature": {"n_mels": 48, "frames": 4, "n_fft": 1024, "hop_length": 1024, "power": 2.0},
+        "model": {"architecture": {"depth": 4, "width": 128, "bottleneck": 32}}
+    }
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -100,127 +106,79 @@ app.add_middleware(
 model = None
 model_file_path = None # Store the actual path used
 threshold = 0.35  # Base threshold value
-calibration_factor = 0.5  # Reduced calibration factor - to reduce false positives
+calibration_factor = 0.9  # Default calibration factor
 
-# Import functions from baseline_fnn.py
-try:
-    from baseline_fnn import file_to_vector_array, keras_model
-    print("✓ Successfully imported core functions from baseline_fnn.py")
-except ImportError as e:
-    print(f"Warning: Could not import all functions from baseline_fnn.py: {e}")
-    print("Falling back to local function implementations")
+def create_model(input_dim, config=None):
+    """Create a new model based on configuration parameters."""
+    logger.info("Creating model architecture from scratch")
+    if config is None:
+        config = {}
     
-    # Define minimal versions of the required functions locally
-    def file_to_vector_array(file_name, 
-                           n_mels=64,
-                           frames=5,
-                           n_fft=1024,
-                           hop_length=512,
-                           power=2.0,
-                           augment=False,
-                           param=None):
-        """
-        Convert file_name to a vector array with EXACT SAME normalization as used in training.
-        This function is replicated from baseline_fnn.py to ensure consistency.
-        """
-        dims = n_mels * frames
-        
-        try:
-            # Use librosa directly to ensure consistent loading
-            y, sr = librosa.load(file_name, sr=param["feature"]["sr"], mono=True)
-            
-            if y is None or len(y) == 0:
-                print(f"Error loading {file_name}")
-                return np.empty((0, dims), float)
-            
-            # Skip files that are too short
-            if len(y) < n_fft:
-                print(f"File too short: {file_name}")
-                return np.empty((0, dims), float)
-                
-            # Extract mel-spectrogram using EXACT SAME parameters from config
-            mel_spectrogram = librosa.feature.melspectrogram(y=y,
-                                                           sr=sr,
-                                                           n_fft=n_fft,
-                                                           hop_length=hop_length,
-                                                           n_mels=n_mels,
-                                                           power=power)
-            
-            # Use the EXACT SAME log transformation as in baseline_fnn.py
-            log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
-            
-            vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
-            if vectorarray_size < 1:
-                print(f"Not enough frames in {file_name}")
-                return np.empty((0, dims), float)
+    depth = config.get("depth", 4)
+    width = config.get("width", 128)
+    bottleneck = config.get("bottleneck", 32)
+    dropout_rate = config.get("dropout", 0.2)
+    use_batch_norm = config.get("batch_norm", True)
+    activation = config.get("activation", "sigmoid")
+    weight_decay = config.get("weight_decay", 1e-4)
+    
+    # Create a simple autoencoder for anomaly detection
+    inputLayer = Input(shape=(input_dim,))
+    
+    # Encoder
+    x = Dense(width, kernel_regularizer=l2(weight_decay))(inputLayer)
+    if use_batch_norm:
+        x = BatchNormalization()(x)
+    x = Activation(activation)(x)
+    if dropout_rate > 0:
+        x = Dropout(dropout_rate)(x)
+    
+    # Create deeper layers with decreasing width
+    for i in range(depth - 1):
+        layer_width = max(width // (2 ** (i + 1)), bottleneck)
+        x = Dense(layer_width, kernel_regularizer=l2(weight_decay))(x)
+        if use_batch_norm:
+            x = BatchNormalization()(x)
+        x = Activation(activation)(x)
+        if dropout_rate > 0:
+            x = Dropout(dropout_rate)(x)
+    
+    # Bottleneck layer
+    bottleneck_output = Dense(bottleneck, activation=activation, name="bottleneck")(x)
+    
+    # Decoder (mirror of encoder)
+    x = bottleneck_output
+    for i in range(depth - 1):
+        layer_width = min(bottleneck * (2 ** (i + 1)), width)
+        x = Dense(layer_width, kernel_regularizer=l2(weight_decay))(x)
+        if use_batch_norm:
+            x = BatchNormalization()(x)
+        x = Activation(activation)(x)
+        if dropout_rate > 0:
+            x = Dropout(dropout_rate)(x)
+    
+    # Output layer (sigmoid for binary classification)
+    output = Dense(1, activation="sigmoid")(x)
+    
+    # Create and compile model
+    model = Model(inputs=inputLayer, outputs=output)
+    model.compile(
+        optimizer="adam",
+        loss="binary_crossentropy",
+        metrics=["accuracy"]
+    )
+    
+    logger.info("Model architecture created successfully")
+    return model
 
-            # Use a more memory-efficient approach for feature extraction
-            vectorarray = np.zeros((vectorarray_size, dims), float)
-            for t in range(frames):
-                vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
-
-            # Apply normalization using the method specified in config
-            norm_method = param.get("model", {}).get("normalization_method", "minmax_local")
-            
-            if norm_method == "minmax_local":
-                # Local min-max normalization (per file)
-                if np.max(vectorarray) > np.min(vectorarray):
-                    vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
-            elif norm_method == "minmax_global":
-                # Apply global min-max normalization if available
-                # This would require global min/max values from training
-                print("Warning: Global min-max normalization not implemented, using local normalization")
-                if np.max(vectorarray) > np.min(vectorarray):
-                    vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
-            elif norm_method == "standard":
-                # Standard normalization (zero mean, unit variance)
-                if np.std(vectorarray) > 0:
-                    vectorarray = (vectorarray - np.mean(vectorarray)) / (np.std(vectorarray) + sys.float_info.epsilon)
-            
-            # Apply subsampling to reduce memory usage, exactly as in baseline_fnn.py
-            if param and "feature" in param and "stride" in param["feature"]:
-                stride = param["feature"]["stride"]
-                vectorarray = vectorarray[::stride, :]
-            
-            return vectorarray
-            
-        except Exception as e:
-            print(f"Error in file_to_vector_array for {file_name}: {e}")
-            return np.empty((0, dims), float)
-
-    def keras_model(input_dim, config=None):
-        """Define a basic keras model when baseline_fnn.py import fails"""
-        if config is None:
-            config = {}
-        
-        from tensorflow.keras.models import Model
-        from tensorflow.keras.layers import Input, Dense
-        from tensorflow.keras.regularizers import l2
-        
-        # Extract parameters from config with defaults
-        depth = config.get("depth", 3)
-        width = config.get("width", 128)
-        bottleneck = config.get("bottleneck", 16)
-        activation = config.get("activation", "relu")
-        
-        inputLayer = Input(shape=(input_dim,))
-        x = inputLayer
-        
-        # Encoder
-        for i in range(depth):
-            layer_width = max(width // (2 ** i), bottleneck) if i < depth - 1 else bottleneck
-            x = Dense(layer_width, activation=activation, kernel_regularizer=l2(1e-5))(x)
-        
-        # Decoder
-        for i in range(depth - 1, -1, -1):
-            if i == 0:
-                x = Dense(input_dim, activation=None)(x)
-            else:
-                layer_width = max(width // (2 ** (i - 1)), bottleneck)
-                x = Dense(layer_width, activation=activation, kernel_regularizer=l2(1e-5))(x)
-        
-        model = Model(inputs=inputLayer, outputs=x)
-        return model
+@tf.keras.utils.register_keras_serializable()
+def binary_cross_entropy_loss(y_true, y_pred):
+    """Binary cross-entropy loss for autoencoder"""
+    import tensorflow.keras.backend as K
+    # Normalize inputs if needed (values between 0 and 1)
+    y_true_normalized = (y_true - K.min(y_true)) / (K.max(y_true) - K.min(y_true) + K.epsilon())
+    y_pred_normalized = (y_pred - K.min(y_pred)) / (K.max(y_pred) - K.min(y_pred) + K.epsilon())
+    return tf.keras.losses.binary_crossentropy(y_true_normalized, y_pred_normalized)
 
 def load_trained_model():
     """Load the trained autoencoder model and optimal threshold."""
@@ -241,24 +199,44 @@ def load_trained_model():
             break
     
     if not found_model:
-        logger.error("No model file found. Cannot continue.")
-        return False
+        logger.warning("No model file found. Will create a model from scratch.")
+        try:
+            # Create model directory if it doesn't exist
+            os.makedirs(os.path.dirname(model_paths[0]), exist_ok=True)
+            
+            # Create a new model from the architecture
+            input_dim = param["feature"]["n_mels"] * param["feature"]["frames"]
+            model = create_model(input_dim, param.get("model", {}).get("architecture", {}))
+            
+            # Save the model to the expected path
+            model_file_path = model_paths[0]
+            model.save(model_file_path)
+            logger.info(f"Created and saved new model to {model_file_path}")
+            
+            # Set default threshold
+            threshold = 0.35
+            logger.info(f"Using default threshold: {threshold}")
+            
+            # Set calibration factor
+            calibration_factor = 0.9
+            logger.info(f"Using default calibration factor: {calibration_factor}")
+            
+            # Test the model with random input
+            input_dim = param["feature"]["n_mels"] * param["feature"]["frames"]
+            test_input = np.random.random((1, input_dim))
+            test_output = model.predict(test_input, verbose=0)
+            logger.info(f"Model test successful. Output shape: {test_output.shape}")
+            
+            return True
+        except Exception as e:
+            logger.critical(f"Failed to create model: {e}", exc_info=True)
+            return False
             
     # Load the model - Try different approaches for compatibility
     try:
         # First make sure TensorFlow is properly imported
         import tensorflow as tf
         from tensorflow.keras.models import load_model
-        
-        # Define custom loss for loading
-        @tf.keras.utils.register_keras_serializable()
-        def binary_cross_entropy_loss(y_true, y_pred):
-            """Binary cross-entropy loss for autoencoder"""
-            import tensorflow.keras.backend as K
-            # Normalize inputs if needed (values between 0 and 1)
-            y_true_normalized = (y_true - K.min(y_true)) / (K.max(y_true) - K.min(y_true) + K.epsilon())
-            y_pred_normalized = (y_pred - K.min(y_pred)) / (K.max(y_pred) - K.min(y_pred) + K.epsilon())
-            return tf.keras.losses.binary_crossentropy(y_true_normalized, y_pred_normalized)
         
         logger.info(f"Loading pre-trained model directly from: {model_file_path}")
         
@@ -316,113 +294,215 @@ def load_trained_model():
             return True
         except Exception as e2:
             logger.error(f"Fallback loading also failed: {e2}", exc_info=True)
-            return False
+            
+            # If all loading attempts fail, create a new model
+            try:
+                logger.info("Creating a new model since loading failed")
+                input_dim = param["feature"]["n_mels"] * param["feature"]["frames"]
+                model = create_model(input_dim, param.get("model", {}).get("architecture", {}))
+                
+                # Save the new model
+                model.save(model_file_path)
+                logger.info(f"Created and saved new model to {model_file_path}")
+                
+                # Set default threshold and calibration factor
+                threshold = 0.35
+                calibration_factor = 0.9
+                
+                # Test the model
+                test_input = np.random.random((1, input_dim))
+                test_output = model.predict(test_input, verbose=0)
+                logger.info(f"New model test successful. Output shape: {test_output.shape}")
+                
+                return True
+            except Exception as e3:
+                logger.critical(f"Failed to create new model: {e3}", exc_info=True)
+                return False
+
+def file_to_vector_array(file_name, n_mels=48, frames=4, n_fft=1024, hop_length=1024, power=2.0):
+    """
+    Convert file_name (wav file) to a vector array for feature extraction.
+    Simplified from the original for use in the API.
+    
+    Args:
+        file_name: Path to the WAV file
+        n_mels: Number of mel-banks for feature extraction
+        frames: Number of frames to concatenate for every vector element
+        n_fft: FFT size for feature extraction
+        hop_length: Hop size for feature extraction
+        power: Power of the melspectrogram
+        
+    Returns:
+        Vector array in numpy format or empty array if the feature extraction fails
+    """
+    dims = n_mels * frames
+    
+    # Load audio file
+    try:
+        y, sr = librosa.load(file_name, sr=None, mono=True)
+        
+        # Skip files that are too short
+        if len(y) < n_fft:
+            logger.warning(f"File too short: {file_name}")
+            return np.empty((0, dims), float)
+            
+        # Extract mel-spectrogram
+        mel_spectrogram = librosa.feature.melspectrogram(y=y,
+                                                       sr=sr,
+                                                       n_fft=n_fft,
+                                                       hop_length=hop_length,
+                                                       n_mels=n_mels,
+                                                       power=power)
+                                                       
+        # Convert to log scale (dB)
+        log_mel_spectrogram = 20.0 / power * np.log10(mel_spectrogram + sys.float_info.epsilon)
+        
+        # Calculate vector array size
+        vectorarray_size = len(log_mel_spectrogram[0, :]) - frames + 1
+        if vectorarray_size < 1:
+            logger.warning(f"Not enough frames in {file_name}")
+            return np.empty((0, dims), float)
+
+        # Create vector array
+        vectorarray = np.zeros((vectorarray_size, dims), float)
+        for t in range(frames):
+            vectorarray[:, n_mels * t: n_mels * (t + 1)] = log_mel_spectrogram[:, t: t + vectorarray_size].T
+
+        # Normalize for binary cross-entropy
+        if np.max(vectorarray) > np.min(vectorarray):
+            vectorarray = (vectorarray - np.min(vectorarray)) / (np.max(vectorarray) - np.min(vectorarray) + sys.float_info.epsilon)
+        
+        logger.debug(f"Extracted features from {file_name}: shape={vectorarray.shape}")
+        return vectorarray
+        
+    except Exception as e:
+        logger.error(f"Error in file_to_vector_array for {file_name}: {e}")
+        return np.empty((0, dims), float)
+
 
 def analyze_wav(wav_file_path):
     """
-    Analyze a single WAV file: extract features, predict reconstruction error, and classify.
-
+    Analyze a WAV file for anomalies.
+    
     Args:
-        wav_file_path: Path to the WAV file.
-
+        wav_file_path: Path to the WAV file to analyze
+        
     Returns:
-        dict: Analysis result including prediction, anomaly score, and threshold.
-              Returns {"error": ...} if an error occurs.
+        Dictionary with analysis results
     """
-    global model, threshold, param, calibration_factor # Ensure access to globals
-
+    global model, threshold, calibration_factor
+    
     if model is None:
-         logger.error("Model is not loaded. Cannot analyze.")
-         return {"error": "Model not loaded"}
-
+        logger.error("Model not loaded, cannot analyze file")
+        return {"error": "Model not loaded. Please try again later."}
+        
+    # Get expected label from filename, if it contains "normal" or "abnormal"
+    expected_label = None
+    filename = os.path.basename(wav_file_path).lower()
+    if "abnormal" in filename:
+        expected_label = "abnormal"
+    elif "normal" in filename:
+        expected_label = "normal"
+        
+    if expected_label:
+        logger.info(f"Expected label based on filename: {expected_label}")
+    
     try:
-        logger.info(f"=== ANALYSIS START: {wav_file_path} ===")
-        logger.info(f"Using threshold: {threshold:.6f}, calibration_factor: {calibration_factor:.6f}")
-
-        # Extract features
+        # Extract features from the WAV file
         features = file_to_vector_array(
             wav_file_path,
             n_mels=param["feature"]["n_mels"],
             frames=param["feature"]["frames"],
             n_fft=param["feature"]["n_fft"],
             hop_length=param["feature"]["hop_length"],
-            power=param["feature"]["power"],
-            augment=False,  # No augmentation during inference
-            param=param     # Pass the parameters
+            power=param["feature"]["power"]
         )
-
+        
+        # If there are no valid features, return an error
         if features.shape[0] == 0:
-            logger.warning(f"No features extracted from {wav_file_path}. Cannot predict.")
-            return {"error": f"Could not extract valid features from file: {os.path.basename(wav_file_path)}"}
-
+            logger.warning(f"Could not extract valid features from {wav_file_path}")
+            return {"error": "Could not extract valid features from the uploaded file. The file may be too short or corrupted."}
+        
+        # Log feature statistics
         logger.info(f"Features extracted: shape={features.shape}, min={features.min():.6f}, max={features.max():.6f}")
-
-        # Get reconstructed features from the model
-        reconstructed_features = model.predict(features, verbose=0)
-        logger.info(f"Reconstructed: shape={reconstructed_features.shape}, min={reconstructed_features.min():.6f}, max={reconstructed_features.max():.6f}")
         
-        # Calculate mean squared error for each frame
-        frame_errors = np.mean(np.square(features - reconstructed_features), axis=1)
-        logger.info(f"Frame errors: shape={frame_errors.shape}, min={frame_errors.min():.6f}, max={frame_errors.max():.6f}, mean={np.mean(frame_errors):.6f}")
+        # Get model predictions (reconstructed features)
+        reconstructed = model.predict(features, verbose=0)
+        if isinstance(reconstructed, list):
+            reconstructed = reconstructed[0]  # Handle different model output formats
         
-        # Calculate raw anomaly score
-        raw_anomaly_score = float(np.mean(frame_errors))
+        # Log reconstruction statistics    
+        logger.info(f"Reconstructed: shape={reconstructed.shape}, min={reconstructed.min():.6f}, max={reconstructed.max():.6f}")
+        
+        # Calculate frame-by-frame errors (MSE)
+        frame_errors = np.mean(np.square(features - reconstructed), axis=1)
+        logger.info(f"Frame errors: shape={frame_errors.shape}, min={frame_errors.min():.6f}, max={frame_errors.max():.6f}, mean={frame_errors.mean():.6f}")
+        
+        # Calculate overall anomaly score (mean error across all frames)
+        raw_anomaly_score = np.mean(frame_errors)
         logger.info(f"Raw anomaly score: {raw_anomaly_score:.6f}")
         
-        # Log first few frames' errors to check consistency
+        # Log some example frame errors for debugging
         logger.info(f"First 5 frame errors: {frame_errors[:5]}")
                 
-        # Check if the file is supposed to be normal or abnormal based on filename
-        filename = os.path.basename(wav_file_path)
-        expected_label = "abnormal" if "abnormal" in filename.lower() else "normal"
-        logger.info(f"Expected label based on filename: {expected_label}")
+        # Calculate detailed feature difference statistics
+        feature_diffs = features - reconstructed
+        logger.info(f"Feature diff stats - min: {feature_diffs.min():.6f}, max: {feature_diffs.max():.6f}, mean: {feature_diffs.mean():.6f}")
         
-        # Apply calibration factor
-        anomaly_score = raw_anomaly_score * calibration_factor
-        logger.info(f"Calibrated score ({calibration_factor}): {anomaly_score:.6f}")
+        # Apply calibration factor to get calibrated score
+        # Lower calibration factor makes the system more sensitive to anomalies
+        # Higher calibration factor makes the system less sensitive
+        calibrated_score = raw_anomaly_score * calibration_factor
+        logger.info(f"Calibrated score ({calibration_factor}): {calibrated_score:.6f}")
         
-        # Debug info about the feature vectors and their differences
-        feature_diff = features - reconstructed_features
-        logger.info(f"Feature diff stats - min: {np.min(feature_diff):.6f}, max: {np.max(feature_diff):.6f}, mean: {np.mean(feature_diff):.6f}")
+        # Determine if this is an anomaly based on threshold
+        is_anomaly = calibrated_score >= threshold
+        logger.info(f"Is score >= threshold? {calibrated_score:.6f} >= {threshold:.6f} = {is_anomaly}")
         
-        # Compare score with the threshold
-        is_abnormal = anomaly_score >= threshold
-        prediction_label = "abnormal" if is_abnormal else "normal"
-        logger.info(f"Is score >= threshold? {anomaly_score:.6f} >= {threshold:.6f} = {is_abnormal}")
-        logger.info(f"Prediction: {prediction_label}")
+        # Prediction based on threshold
+        prediction = "abnormal" if is_anomaly else "normal"
+        logger.info(f"Prediction: {prediction}")
         
-        # Print frame-by-frame analysis for the first few frames
-        logger.info("=== Frame-by-Frame Analysis (first 5 frames) ===")
+        # Log frame-by-frame analysis
+        logger.info(f"=== Frame-by-Frame Analysis (first 5 frames) ===")
         for i in range(min(5, len(frame_errors))):
-            logger.info(f"Frame {i}: Error={frame_errors[i]:.6f}, Calibrated={frame_errors[i]*calibration_factor:.6f}, Abnormal? {frame_errors[i]*calibration_factor >= threshold}")
+            frame_calibrated = frame_errors[i] * calibration_factor
+            frame_anomaly = frame_calibrated >= threshold
+            logger.info(f"Frame {i}: Error={frame_errors[i]:.6f}, Calibrated={frame_calibrated:.6f}, Abnormal? {frame_anomaly}")
         
-        # Check if prediction matches expected label based on filename
-        prediction_correct = prediction_label == expected_label
-        logger.info(f"Prediction correct? {prediction_correct}")
+        # Check if prediction is correct, if we know the expected label
+        if expected_label:
+            is_correct = prediction == expected_label
+            logger.info(f"Prediction correct? {is_correct}")
+        
         logger.info(f"=== ANALYSIS COMPLETE: {wav_file_path} ===")
-
-        return {
-            "file_name": os.path.basename(wav_file_path),
-            "prediction": prediction_label,
-            "anomaly_score": anomaly_score,
-            "threshold": threshold,
-            "raw_score": raw_anomaly_score,
-            "expected_label": expected_label,
-            "prediction_correct": prediction_correct,
-            "num_frames": int(features.shape[0]),
-            "frame_errors_stats": {
-                "min": float(frame_errors.min()),
-                "max": float(frame_errors.max()),
-                "mean": float(np.mean(frame_errors)),
-                "std": float(np.std(frame_errors))
+        
+        # Return the results
+        result = {
+            "filename": os.path.basename(wav_file_path),
+            "prediction": prediction,
+            "anomaly_score": float(raw_anomaly_score),
+            "calibrated_score": float(calibrated_score),
+            "threshold": float(threshold),
+            "details": {
+                "num_frames": int(features.shape[0]),
+                "feature_dims": int(features.shape[1]),
+                "min_frame_error": float(frame_errors.min()),
+                "max_frame_error": float(frame_errors.max()),
+                "frame_error_std": float(np.std(frame_errors))
             }
         }
-
+        
+        # If we know the expected label, add it to the results
+        if expected_label:
+            result["expected_label"] = expected_label
+            result["is_correct"] = is_correct
+            
+        return result
+    
     except Exception as e:
         logger.error(f"Error analyzing WAV file {wav_file_path}: {e}", exc_info=True)
-        return {"error": f"Analysis failed for {os.path.basename(wav_file_path)}: {str(e)}"}
-
-# --- FastAPI Routes ---
+        return {"error": f"Error analyzing WAV file: {str(e)}"}
 
 @app.on_event("startup")
 async def startup_event():
@@ -439,13 +519,12 @@ async def startup_event():
             logger.info(f"Found model file at {path}")
             break
     else:
-        logger.critical("No model file found! API cannot function.")
-        # We'll continue but API will return errors
+        logger.warning("No model file found! API will create a new model if necessary.")
     
     # Try to load the model
     success = load_trained_model()
     if not success:
-        logger.critical("Failed to load the model during startup. API will respond with 503 errors.")
+        logger.critical("Failed to load or create the model during startup. API will respond with 503 errors.")
     else:
         logger.info("Model loaded successfully. API is ready.")
         

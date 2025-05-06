@@ -12,7 +12,7 @@ import numpy as np
 import librosa
 import tensorflow as tf
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import tempfile
@@ -21,6 +21,11 @@ import uvicorn
 from tensorflow.keras.models import load_model, Model
 from tensorflow.keras.layers import Input, Dense, Activation, Dropout, BatchNormalization
 from tensorflow.keras.regularizers import l2
+import io
+import base64
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
 
 # Set up the system path to ensure imports work correctly
 # Assumes the script is run from the 'app' directory or the project root
@@ -572,6 +577,174 @@ async def debug_info():
         "tensorflow_version": tf.__version__,
         "project_root": project_root
     }
+
+@app.post("/generate_spectrogram/")
+async def generate_spectrogram(file: UploadFile = File(...)):
+    """
+    Generate and return a spectrogram image from an uploaded WAV file.
+    
+    Args:
+        file: The uploaded WAV file
+        
+    Returns:
+        Spectrogram image as PNG
+    """
+    logger.info(f"Generating spectrogram for file: {file.filename}")
+    
+    # Create a temporary file to store the uploaded content
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+        # Save uploaded file to temp file
+        content = await file.read()
+        temp_file.write(content)
+        temp_path = temp_file.name
+    
+    try:
+        # Load the audio file
+        y, sr = librosa.load(temp_path, sr=None)
+        
+        # Create figure and axes
+        plt.figure(figsize=(10, 6))
+        
+        # Generate mel spectrogram
+        S = librosa.feature.melspectrogram(
+            y=y, 
+            sr=sr,
+            n_mels=param["feature"]["n_mels"],
+            n_fft=param["feature"]["n_fft"],
+            hop_length=param["feature"]["hop_length"],
+            power=param["feature"]["power"]
+        )
+        
+        # Convert to log scale (dB)
+        log_S = librosa.power_to_db(S, ref=np.max)
+        
+        # Plot spectrogram
+        img = librosa.display.specshow(
+            log_S, 
+            sr=sr, 
+            x_axis='time', 
+            y_axis='mel', 
+            hop_length=param["feature"]["hop_length"],
+            cmap='viridis'
+        )
+        
+        plt.colorbar(format='%+2.0f dB')
+        plt.title(f'Mel spectrogram - {file.filename}')
+        plt.tight_layout()
+        
+        # Save to BytesIO
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+        
+        # Return the image
+        return StreamingResponse(buf, media_type="image/png")
+    
+    except Exception as e:
+        logger.error(f"Error generating spectrogram: {e}")
+        logger.exception("Detailed stack trace:")
+        raise HTTPException(status_code=500, detail=f"Error generating spectrogram: {str(e)}")
+    
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+@app.post("/predict_with_spectrogram/")
+async def predict_with_spectrogram(file: UploadFile = File(...)):
+    """
+    Predict if the audio file contains an anomaly and return the spectrogram.
+    
+    Args:
+        file: The uploaded WAV file
+        
+    Returns:
+        JSON response with prediction results and base64 encoded spectrogram image
+    """
+    # Check if model is loaded
+    if model is None:
+        if not load_trained_model():
+            raise HTTPException(status_code=500, detail="Model loading failed")
+    
+    # Create a temporary file to store the uploaded content
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+        # Save uploaded file to temp file
+        content = await file.read()
+        temp_file.write(content)
+        temp_path = temp_file.name
+    
+    try:
+        # Process the file for prediction
+        prediction_result = predict_anomaly(temp_path)
+        
+        # Add the original filename to the result
+        prediction_result["original_filename"] = file.filename
+        
+        # Generate spectrogram
+        try:
+            # Load the audio file
+            y, sr = librosa.load(temp_path, sr=None)
+            
+            # Create figure and axes
+            plt.figure(figsize=(10, 6))
+            
+            # Generate mel spectrogram
+            S = librosa.feature.melspectrogram(
+                y=y, 
+                sr=sr,
+                n_mels=param["feature"]["n_mels"],
+                n_fft=param["feature"]["n_fft"],
+                hop_length=param["feature"]["hop_length"],
+                power=param["feature"]["power"]
+            )
+            
+            # Convert to log scale (dB)
+            log_S = librosa.power_to_db(S, ref=np.max)
+            
+            # Plot spectrogram
+            img = librosa.display.specshow(
+                log_S, 
+                sr=sr, 
+                x_axis='time', 
+                y_axis='mel', 
+                hop_length=param["feature"]["hop_length"],
+                cmap='viridis'
+            )
+            
+            plt.colorbar(format='%+2.0f dB')
+            title = f'Mel spectrogram - {file.filename}'
+            if prediction_result.get("is_anomaly", False):
+                title += " - ANOMALY DETECTED"
+            plt.title(title)
+            plt.tight_layout()
+            
+            # Save to BytesIO
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100)
+            buf.seek(0)
+            plt.close()
+            
+            # Encode the image as base64
+            img_str = base64.b64encode(buf.read()).decode('utf-8')
+            
+            # Add the image to the result
+            prediction_result["spectrogram_base64"] = img_str
+            
+        except Exception as e:
+            logger.error(f"Error generating spectrogram: {e}")
+            prediction_result["spectrogram_error"] = str(e)
+        
+        return prediction_result
+    
+    except Exception as e:
+        logger.error(f"Error in prediction: {e}")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+    
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 # Initialize application
 @app.on_event("startup")

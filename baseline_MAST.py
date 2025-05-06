@@ -1130,7 +1130,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
                 tf.shape(x)[2] * patch_width,
                 1
             ]),
-            block_size=1
+            block_size=2  # Changed from 1 to 2 (minimum required value)
         ),
         name="reconstruction_reshape"
     )(reconstructed)

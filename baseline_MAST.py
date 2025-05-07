@@ -27,9 +27,9 @@ import seaborn as sns
 import math
 import gc
 import hashlib
+
+
 from datetime import datetime
-
-
 from pathlib import Path
 from tqdm import tqdm
 from sklearn import metrics
@@ -1912,8 +1912,12 @@ def main():
     
     # Extract configurations
     model_params = config.get('model', {})
-    mast_params = model_params.get('mast', {})
-    transformer_params = model_params.get('architecture', {}).get('transformer', {})
+    mast_params = config.get('mast', {})
+    transformer_params = config.get('model', {}).get('architecture', {}).get('transformer', {})
+    # Determine model save path: use model_path from config or default to model_directory/mast_model.keras
+    model_dir = config.get('model_directory', './model/MAST')
+    model_path = model_params.get('model_path', os.path.join(model_dir, 'mast_model.keras'))
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
     dataset_params = config.get('dataset', {})
     training_params = config.get('training', {})
     
@@ -1924,9 +1928,9 @@ def main():
     logger.info(f"Starting MAST model training with config: {config}")
     
     # Check if we should load existing model or create a new one
-    if training_params.get('load_model', False) and os.path.exists(model_params.get('model_path', '')):
-        logger.info(f"Loading existing model from {model_params['model_path']}")
-        model = tf.keras.models.load_model(model_params['model_path'])
+    if training_params.get('load_model', False) and os.path.exists(model_path):
+        logger.info(f"Loading existing model from {model_path}")
+        model = tf.keras.models.load_model(model_path)
     else:
         # Set random seeds for reproducibility
         tf.random.set_seed(training_params.get('random_seed', 42))
@@ -2050,7 +2054,7 @@ def main():
                     histogram_freq=1
                 ),
                 tf.keras.callbacks.ModelCheckpoint(
-                    filepath="model/MAST/pretrain_model.h5",
+                    filepath="model/MAST/pretrain_model.keras",
                     save_best_only=True,
                     monitor='val_loss'
                 )
@@ -2068,12 +2072,12 @@ def main():
             logger.info("MAST pretraining completed")
             
             # Save the pretrained weights
-            pretrain_model.save_weights("model/MAST/pretrain_weights.h5")
+            pretrain_model.save_weights("model/MAST/pretrain_weights.keras")
             
             # Load the pretrained weights into the fine-tuning model
             # The shared Transformer layers will have the same names
             logger.info("Transferring pretrained weights to fine-tuning model")
-            finetune_model.load_weights("model/MAST/pretrain_weights.h5", by_name=True, skip_mismatch=True)
+            finetune_model.load_weights("model/MAST/pretrain_weights.keras", by_name=True, skip_mismatch=True)
         
         # Now proceed with fine-tuning for anomaly detection
         logger.info("Starting MAST fine-tuning phase for anomaly detection")
@@ -2099,7 +2103,7 @@ def main():
         # Set up callbacks for fine-tuning
         callbacks = [
             tf.keras.callbacks.ModelCheckpoint(
-                filepath=model_params['model_path'],
+                filepath=model_path,
                 save_best_only=True,
                 monitor='val_loss'
             ),
@@ -2132,7 +2136,7 @@ def main():
         
         # Save the final model
         model = finetune_model
-        model.save(model_params['model_path'])
+        model.save(model_path)
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

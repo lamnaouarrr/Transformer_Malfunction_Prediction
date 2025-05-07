@@ -1032,34 +1032,51 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     # Input layers
     inputs = layers.Input(shape=(*input_shape, 1))  # Add channel dimension
     
-    # Patch embedding
-    patch_height = min(patch_size, input_shape[0])
-    patch_width = min(patch_size, input_shape[1])
-    
-    # Calculate number of patches
-    num_patches_height = input_shape[0] // patch_height
-    num_patches_width = input_shape[1] // patch_width
-    total_patches = num_patches_height * num_patches_width
-    
-    logger.info(f"MAST: Using patch size {patch_height}x{patch_width} with {total_patches} total patches")
-    
-    # Create patches using Conv2D
-    x = layers.Conv2D(
-        filters=embed_dim,
-        kernel_size=(patch_height, patch_width),
-        strides=(patch_height, patch_width),
-        padding="valid",
-        name="patch_embedding"
-    )(inputs)
-    
-    # Reshape to sequence
-    batch_size = tf.shape(inputs)[0]
-    x = layers.Reshape((total_patches, embed_dim))(x)
+    # Multi-scale feature selection
+    ms_cfg = mast_params.get('multi_scale', {})
+    if ms_cfg.get('enabled', False):
+        scales = ms_cfg.get('scales', [patch_size, patch_size * 2])
+        streams = []
+        for s in scales:
+            # Compute number of patches for scale
+            h_steps = input_shape[0] // s
+            w_steps = input_shape[1] // s
+            x_s = layers.Conv2D(filters=embed_dim, kernel_size=(s, s), strides=(s, s), padding='valid')(inputs)
+            x_s = layers.Reshape((h_steps * w_steps, embed_dim))(x_s)
+            streams.append(x_s)
+        # Cross-scale attention: coarse->fine
+        coarse, fine = streams[0], streams[1]
+        cs_attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim // num_heads, dropout=dropout_rate)(coarse, fine)
+        x = layers.Add()([fine, cs_attn])  # Fused representation
+    else:
+        # Single-scale patch embedding
+        patch_height = min(patch_size, input_shape[0])
+        patch_width = min(patch_size, input_shape[1])
+        
+        # Calculate number of patches
+        num_patches_height = input_shape[0] // patch_height
+        num_patches_width = input_shape[1] // patch_width
+        total_patches = num_patches_height * num_patches_width
+        
+        logger.info(f"MAST: Using patch size {patch_height}x{patch_width} with {total_patches} total patches")
+        
+        # Create patches using Conv2D
+        x = layers.Conv2D(
+            filters=embed_dim,
+            kernel_size=(patch_height, patch_width),
+            strides=(patch_height, patch_width),
+            padding="valid",
+            name="patch_embedding"
+        )(inputs)
+        
+        # Reshape to sequence
+        batch_size = tf.shape(inputs)[0]
+        x = layers.Reshape((total_patches, embed_dim))(x)
     
     # Add positional embedding
-    positions = tf.range(start=0, limit=total_patches, delta=1)
+    positions = tf.range(start=0, limit=tf.shape(x)[1], delta=1)
     pos_embedding = layers.Embedding(
-        input_dim=total_patches,
+        input_dim=tf.shape(x)[1],
         output_dim=embed_dim,
         name="position_embedding"
     )(positions)
@@ -1927,6 +1944,13 @@ def main():
     # Log configuration info
     logger.info(f"Starting MAST model training with config: {config}")
     
+    # Enable optimized training modes
+    # Mixed precision for V100 GPU
+    configure_mixed_precision(training_params.get('mixed_precision', True))
+    # Enable XLA if configured
+    if training_params.get('xla_acceleration', False):
+        logger.info("Enabling XLA JIT compilation")
+        tf.config.optimizer.set_jit(True)
     # Check if we should load existing model or create a new one
     if training_params.get('load_model', False) and os.path.exists(model_path):
         logger.info(f"Loading existing model from {model_path}")
@@ -2102,36 +2126,17 @@ def main():
             train_data = np.expand_dims(train_data, axis=-1)
             val_data = np.expand_dims(val_data, axis=-1)
         
-        # Set up callbacks for fine-tuning
-        callbacks = [
-            tf.keras.callbacks.ModelCheckpoint(
-                filepath=model_path,
-                save_best_only=True,
-                monitor='val_loss'
-            ),
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=training_params.get('early_stopping_patience', 10),
-                restore_best_weights=True
-            ),
-            tf.keras.callbacks.TensorBoard(
-                log_dir=f"logs/log_mast/{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                histogram_freq=1
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=5,
-                min_lr=1e-6
-            )
-        ]
-        
+        # Build tf.data datasets for efficient training
+        batch_size = training_params.get('batch_size', 32)
+        train_ds = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+        train_ds = train_ds.shuffle(buffer_size=train_data.shape[0]).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
+        val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
         # Train the fine-tuning model
         history = finetune_model.fit(
-            train_data, train_labels_expanded,
-            validation_data=(val_data, val_labels),
+            train_ds,
+            validation_data=val_ds,
             epochs=training_params.get('epochs', 100),
-            batch_size=training_params.get('batch_size', 32),
             callbacks=callbacks,
             verbose=1
         )

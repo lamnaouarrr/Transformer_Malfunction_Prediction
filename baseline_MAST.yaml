@@ -135,6 +135,9 @@ model:
 
 # MAST specific configuration
 mast:
+  multi_scale:
+    enabled: true      # Enable multi-scale patch embeddings
+    scales: [16, 32]   # List of patch sizes for multi-scale processing
   pretraining:
     enabled: true
     epochs: 10

@@ -1992,7 +1992,9 @@ def main():
             # Configure pretraining parameters
             pretrain_epochs = mast_params.get('pretraining', {}).get('epochs', 50)
             pretrain_batch_size = mast_params.get('pretraining', {}).get('batch_size', 32)
-            pretrain_lr = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
+            # Cast learning rate from config to float (handles strings like '1e-4')
+            pretrain_lr_raw = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
+            pretrain_lr = float(pretrain_lr_raw)
             
             # Prepare data for pretraining (no labels needed, just the spectrograms)
             # Combine all available data for pretraining

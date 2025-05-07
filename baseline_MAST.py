@@ -1023,6 +1023,10 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     # Define base patch dimensions for reconstruction head
     patch_height = min(patch_size, input_shape[0])
     patch_width = min(patch_size, input_shape[1])
+    # Number of patches for reconstruction (applies to patch_size scale)
+    num_patches_height = input_shape[0] // patch_height
+    num_patches_width = input_shape[1] // patch_width
+
     embed_dim = transformer_params.get("embed_dim", 768)
     num_heads = transformer_params.get("num_heads", 12)
     num_layers = transformer_params.get("num_layers", 12)
@@ -1060,9 +1064,6 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     else:
         # Single-scale patch embedding
         
-        # Calculate number of patches
-        num_patches_height = input_shape[0] // patch_height
-        num_patches_width = input_shape[1] // patch_width
         total_patches = num_patches_height * num_patches_width
         # Sequence length for positional embeddings = total patches + CLS token
         seq_len = total_patches + 1

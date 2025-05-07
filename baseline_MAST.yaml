@@ -139,7 +139,7 @@ mast:
     enabled: true      # Enable multi-scale patch embeddings
     scales: [16, 32]   # List of patch sizes for multi-scale processing
   pretraining:
-    enabled: true
+    enabled: false
     epochs: 10
     batch_size: 32
     use_normal_only: true

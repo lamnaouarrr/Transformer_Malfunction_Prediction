@@ -1050,6 +1050,10 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         # Query=fine, Key=coarse to produce fine-grained fused features
         cs_attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim//num_heads, dropout=dropout_rate)(fine, coarse)
         x = layers.Add()([fine, cs_attn])  # fused fine-scale representation
+        # Sequence length for positional embeddings = number of fine-scale patches + CLS token
+        h_fine = input_shape[0] // patch_size
+        w_fine = input_shape[1] // patch_size
+        seq_len = h_fine * w_fine + 1
     else:
         # Single-scale patch embedding
         patch_height = min(patch_size, input_shape[0])
@@ -1059,6 +1063,8 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         num_patches_height = input_shape[0] // patch_height
         num_patches_width = input_shape[1] // patch_width
         total_patches = num_patches_height * num_patches_width
+        # Sequence length for positional embeddings = total patches + CLS token
+        seq_len = total_patches + 1
         
         logger.info(f"MAST: Using patch size {patch_height}x{patch_width} with {total_patches} total patches")
         
@@ -1075,17 +1081,13 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         batch_size = tf.shape(inputs)[0]
         x = layers.Reshape((total_patches, embed_dim))(x)
     
-    # Add positional embedding
-    positions = tf.range(start=0, limit=tf.shape(x)[1], delta=1)
-    pos_embedding = layers.Embedding(
-        input_dim=tf.shape(x)[1],
-        output_dim=embed_dim,
-        name="position_embedding"
-    )(positions)
-    
-    # Add positional embedding to patches
-    x = x + tf.expand_dims(pos_embedding, axis=0)  # (1, total_patches, embed_dim)
-    
+    # Static positional embeddings
+    positions = tf.range(start=0, limit=seq_len, delta=1)
+    pos_embedding_layer = layers.Embedding(input_dim=seq_len, output_dim=embed_dim, name="position_embedding")
+    pos_embedding = pos_embedding_layer(positions)
+    # Expand and add to token embeddings
+    x = x + tf.expand_dims(pos_embedding, axis=0)  # (batch_size, seq_len, embed_dim)
+
     # Add classification token ([CLS])
     cls_token = layers.Layer(name="cls_token")(
         tf.Variable(initial_value=tf.random.normal([1, 1, embed_dim]), trainable=True)

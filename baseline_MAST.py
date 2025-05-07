@@ -2208,7 +2208,8 @@ def main():
         
         # Save the final model
         model = finetune_model
-        model.save(model_path)
+        # Save only weights to avoid JSON serialization issues
+        model.save_weights(model_path)
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

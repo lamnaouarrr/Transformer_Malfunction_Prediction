@@ -1081,20 +1081,18 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         batch_size = tf.shape(inputs)[0]
         x = layers.Reshape((total_patches, embed_dim))(x)
     
-    # Static positional embeddings
-    positions = tf.range(start=0, limit=seq_len, delta=1)
-    pos_embedding_layer = layers.Embedding(input_dim=seq_len, output_dim=embed_dim, name="position_embedding")
-    pos_embedding = pos_embedding_layer(positions)
-    # Expand and add to token embeddings
-    x = x + tf.expand_dims(pos_embedding, axis=0)  # (batch_size, seq_len, embed_dim)
-
-    # Add classification token ([CLS])
-    cls_token = layers.Layer(name="cls_token")(
+    # Add classification token ([CLS]) before positional embedding
+    cls_token = layers.Layer(name="cls_token")(  
         tf.Variable(initial_value=tf.random.normal([1, 1, embed_dim]), trainable=True)
     )
     cls_tokens = tf.repeat(cls_token, repeats=batch_size, axis=0)
-    x = tf.concat([cls_tokens, x], axis=1)  # (batch_size, total_patches + 1, embed_dim)
-    
+    x = tf.concat([cls_tokens, x], axis=1)
+    # Static positional embeddings applied after CLS concatenation
+    positions = tf.range(start=0, limit=seq_len, delta=1)
+    pos_embedding_layer = layers.Embedding(input_dim=seq_len, output_dim=embed_dim, name="position_embedding")
+    pos_embedding = pos_embedding_layer(positions)
+    x = x + tf.expand_dims(pos_embedding, axis=0)
+
     # Apply dropout
     x = layers.Dropout(dropout_rate)(x)
     

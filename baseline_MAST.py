@@ -1031,7 +1031,9 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     
     # Input layers
     inputs = layers.Input(shape=(*input_shape, 1))  # Add channel dimension
-    
+    # Define batch_size for use throughout the function
+    batch_size = tf.shape(inputs)[0]
+
     # Multi-scale feature selection
     ms_cfg = mast_params.get('multi_scale', {})
     if ms_cfg.get('enabled', False):
@@ -1051,9 +1053,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         cs_attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim//num_heads, dropout=dropout_rate)(fine, coarse)
         x = layers.Add()([fine, cs_attn])  # fused fine-scale representation
         # Sequence length for positional embeddings = number of fine-scale patches + CLS token
-        h_fine = input_shape[0] // patch_size
-        w_fine = input_shape[1] // patch_size
-        seq_len = h_fine * w_fine + 1
+        seq_len = (input_shape[0] // patch_size) * (input_shape[1] // patch_size) + 1
     else:
         # Single-scale patch embedding
         patch_height = min(patch_size, input_shape[0])
@@ -1078,7 +1078,6 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         )(inputs)
         
         # Reshape to sequence
-        batch_size = tf.shape(inputs)[0]
         x = layers.Reshape((total_patches, embed_dim))(x)
     
     # Add classification token ([CLS]) before positional embedding

@@ -2174,7 +2174,8 @@ def main():
                     filepath=model_path,
                     monitor=ckpt_cfg.get('monitor', 'val_accuracy'),
                     mode=ckpt_cfg.get('mode', 'max'),
-                    save_best_only=ckpt_cfg.get('save_best_only', True)
+                    save_best_only=ckpt_cfg.get('save_best_only', True),
+                    save_weights_only=True  # avoid unsupported full model save options
                 )
             )
 

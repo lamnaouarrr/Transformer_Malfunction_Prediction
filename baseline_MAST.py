@@ -1044,10 +1044,12 @@ def create_mast_model(input_shape, mast_params, transformer_params):
             x_s = layers.Conv2D(filters=embed_dim, kernel_size=(s, s), strides=(s, s), padding='valid')(inputs)
             x_s = layers.Reshape((h_steps * w_steps, embed_dim))(x_s)
             streams.append(x_s)
-        # Cross-scale attention: coarse->fine
-        coarse, fine = streams[0], streams[1]
-        cs_attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim // num_heads, dropout=dropout_rate)(coarse, fine)
-        x = layers.Add()([fine, cs_attn])  # Fused representation
+        # Cross-scale attention: fine queries attending to coarse keys
+        # streams[0] is fine-scale patches, streams[1] is coarse-scale patches
+        fine, coarse = streams[0], streams[1]
+        # Query=fine, Key=coarse to produce fine-grained fused features
+        cs_attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim//num_heads, dropout=dropout_rate)(fine, coarse)
+        x = layers.Add()([fine, cs_attn])  # fused fine-scale representation
     else:
         # Single-scale patch embedding
         patch_height = min(patch_size, input_shape[0])

@@ -49,13 +49,13 @@ cache:
 # Fit algorithm parameters
 fit:
   compile:
-    optimizer: "adam"
-    learning_rate: 0.0003  # Modified from 0.0001 - slightly higher learning rate
-    loss: "focal_loss"  # Changed from "binary_crossentropy" for better handling of class imbalance
+    optimizer: "adamw"
+    learning_rate: 0.0003  # will be overridden by AdamW schedule
+    loss: "binary_crossentropy"
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
     weighted_metrics: ["accuracy"]
   epochs: 50  # Increased from 30
-  batch_size: 32  # Increased from 16 for better gradient estimation
+  batch_size: 64  # Increased from 16 for better gradient estimation
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -97,11 +97,15 @@ training:
   find_optimal_lr: false
   mixed_precision: true
   xla_acceleration: false
-  gradient_accumulation_steps: 2  # Increased from 1
+  gradient_accumulation_steps: 2
   gradient_clip_norm: 1.0
   mixup:
     enabled: true
     alpha: 0.3  # Increased from 0.2 for more mixing
+  audio_augmentation:
+    mixup: true
+    time_masking: true
+    freq_warping: true
   checkpointing:
     save_frequency: 1000
     keep_checkpoints: 5

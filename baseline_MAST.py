@@ -1930,6 +1930,16 @@ def cached_file_to_spectrogram(file_name, n_mels=64, n_fft=1024, hop_length=512,
 # main
 ########################################################################
 def main():
+    # Enable dynamic GPU memory growth and cap usage
+    gpus = tf.config.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    if gpus:
+        tf.config.experimental.set_virtual_device_configuration(
+            gpus[0],
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=28672)]
+        )
+
     # Load configurations
     with open('baseline_MAST.yaml', 'r') as config_file:
         config = yaml.safe_load(config_file)
@@ -2115,8 +2125,16 @@ def main():
         # Now proceed with fine-tuning for anomaly detection
         logger.info("Starting MAST fine-tuning phase for anomaly detection")
         
-        # Configure fine-tuning optimizer
-        optimizer = tf.keras.optimizers.Adam(learning_rate=training_params.get('learning_rate', 0.0001))
+        # Create cosine annealing LR schedule and AdamW optimizer with weight decay
+        initial_lr = training_params.get('learning_rate', 1e-5)
+        decay_steps = training_params.get('decay_steps', 10000)
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=initial_lr, decay_steps=decay_steps
+        )
+        weight_decay = training_params.get('weight_decay', 1e-3)
+        optimizer = tf.keras.optimizers.experimental.AdamW(
+            learning_rate=lr_schedule, weight_decay=weight_decay
+        )
         
         # Configure loss function based on configuration
         loss_fn = tf.keras.losses.BinaryCrossentropy()

@@ -50,7 +50,7 @@ cache:
 fit:
   compile:
     optimizer: "adamw"
-    learning_rate: 0.0003  # will be overridden by AdamW schedule
+    learning_rate: 0.0001  # updated to 1e-4
     loss: "binary_crossentropy"
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
     weighted_metrics: ["accuracy"]
@@ -92,6 +92,7 @@ fit:
 
 # Training optimizations
 training:
+  learning_rate: 0.0001   # AdamW initial learning rate
   find_optimal_lr: false
   mixed_precision: true
   xla_acceleration: false

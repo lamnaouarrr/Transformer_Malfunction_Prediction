@@ -66,11 +66,9 @@ fit:
     min_delta: 0.001
     restore_best_weights: true
   weight_factor: 2.0  # Increased from 1.5 for non-problematic IDs
-  weighted_machine_ids: []  # Will handle id_00 and id_04 explicitly in code
-  apply_sample_weights: true  # Enable sample weighting
-  special_case_weights: # Special case weights for problematic machine IDs
-    fan_id_00: 2.5  # Increased from 2.0
-    fan_id_04: 2.5  # Increased from 2.0
+  weighted_machine_ids: []  # clear machine-specific IDs
+  apply_sample_weights: false  # disabled uniform sample weighting
+  special_case_weights: {}  # remove per-machine weight overrides
   lr_scheduler:
     enabled: true
     monitor: "val_loss"

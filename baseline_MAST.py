@@ -2139,6 +2139,45 @@ def main():
         train_ds = train_ds.shuffle(buffer_size=train_data.shape[0]).batch(batch_size).prefetch(tf.data.AUTOTUNE)
         val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
         val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        # Setup callbacks for fine-tuning
+        callbacks = []
+        fit_cfg = config.get('fit', {})
+        # Early stopping
+        es_cfg = fit_cfg.get('early_stopping', {})
+        if es_cfg.get('enabled', False):
+            callbacks.append(
+                tf.keras.callbacks.EarlyStopping(
+                    monitor=es_cfg.get('monitor', 'val_loss'),
+                    patience=es_cfg.get('patience', 10),
+                    min_delta=es_cfg.get('min_delta', 0.0),
+                    restore_best_weights=es_cfg.get('restore_best_weights', True)
+                )
+            )
+        # LR scheduler via ReduceLROnPlateau
+        lr_cfg = fit_cfg.get('lr_scheduler', {})
+        if lr_cfg.get('enabled', False):
+            callbacks.append(
+                ReduceLROnPlateau(
+                    monitor=lr_cfg.get('monitor', 'val_loss'),
+                    factor=lr_cfg.get('factor', 0.5),
+                    patience=lr_cfg.get('patience', 5),
+                    min_delta=lr_cfg.get('min_delta', 0.0),
+                    cooldown=lr_cfg.get('cooldown', 0),
+                    min_lr=lr_cfg.get('min_lr', 0.0)
+                )
+            )
+        # Model checkpointing
+        ckpt_cfg = fit_cfg.get('checkpointing', {})
+        if ckpt_cfg.get('enabled', False):
+            callbacks.append(
+                ModelCheckpoint(
+                    filepath=model_path,
+                    monitor=ckpt_cfg.get('monitor', 'val_accuracy'),
+                    mode=ckpt_cfg.get('mode', 'max'),
+                    save_best_only=ckpt_cfg.get('save_best_only', True)
+                )
+            )
+
         # Train the fine-tuning model
         history = finetune_model.fit(
             train_ds,

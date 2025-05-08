@@ -1930,6 +1930,7 @@ def cached_file_to_spectrogram(file_name, n_mels=64, n_fft=1024, hop_length=512,
 # main
 ########################################################################
 def main():
+    exec_start = time.time()
     # Enable dynamic GPU memory growth and cap usage
     gpus = tf.config.list_physical_devices('GPU')
     for gpu in gpus:
@@ -2221,6 +2222,7 @@ def main():
             )
 
         # Train the fine-tuning model
+        train_start = time.time()
         history = finetune_model.fit(
             train_ds,
             validation_data=val_ds,
@@ -2228,6 +2230,8 @@ def main():
             callbacks=callbacks,
             verbose=1
         )
+        train_end = time.time()
+        model_training_time_seconds = train_end - train_start
         
         # Save the final model
         model = finetune_model
@@ -2271,118 +2275,20 @@ def main():
     # Generate predictions
     y_pred = model.predict(test_data)
     y_pred_binary = (y_pred > 0.5).astype(int)
-    
+    # Build classification report dict
+    class_report = classification_report(test_labels_expanded, y_pred_binary, output_dict=True)
+    # Total execution time
+    exec_end = time.time()
+    execution_time_seconds = exec_end - exec_start
     # Calculate metrics
     accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-    precision = metrics.precision_score(test_labels_expanded, y_pred_binary)
-    recall = metrics.recall_score(test_labels_expanded, y_pred_binary)
-    f1 = metrics.f1_score(test_labels_expanded, y_pred_binary)
-    auc = metrics.roc_auc_score(test_labels_expanded, y_pred)
-    
-    # Print metrics
-    logger.info(f"Accuracy: {accuracy:.4f}")
-    logger.info(f"Precision: {precision:.4f}")
-    logger.info(f"Recall: {recall:.4f}")
-    logger.info(f"F1 Score: {f1:.4f}")
-    logger.info(f"AUC: {auc:.4f}")
-    
-    # Generate confusion matrix
-    cm = metrics.confusion_matrix(test_labels_expanded, y_pred_binary)
-    logger.info(f"Confusion Matrix:\n{cm}")
-    
-    # Plot metrics
-    plt.figure(figsize=(15, 5))
-    
-    # Plot ROC curve
-    plt.subplot(1, 3, 1)
-    fpr, tpr, _ = metrics.roc_curve(test_labels_expanded, y_pred)
-    plt.plot(fpr, tpr, label=f'AUC = {auc:.4f}')
-    plt.plot([0, 1], [0, 1], 'k--', label='Random')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve')
-    plt.legend()
-    
-    # Plot training history if available
-    if os.path.exists('pickle/pickle_mast/training_history.pkl'):
-        with open('pickle/pickle_mast/training_history.pkl', 'rb') as f:
-            history = pickle.load(f)
-        
-        plt.subplot(1, 3, 2)
-        plt.plot(history['loss'], label='Training Loss')
-        plt.plot(history['val_loss'], label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
-        plt.legend()
-        
-        plt.subplot(1, 3, 3)
-        plt.plot(history['accuracy'], label='Training Accuracy')
-        plt.plot(history['val_accuracy'], label='Validation Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.title('Training and Validation Accuracy')
-        plt.legend()
-    
-    plt.tight_layout()
-    # Save performance plot under configured result_directory
-    plot_dir = result_dir
-    os.makedirs(plot_dir, exist_ok=True)
-    plt.savefig(os.path.join(plot_dir, 'performance_metrics.png'))
-    logger.info(f"Performance metrics saved to result/result_mast/performance_metrics.png")
-    
-    # Ensure necessary directories exist for saving artifacts
-    os.makedirs('pickle/pickle_mast', exist_ok=True)
-    
-    # Save test results
+    # Summary results with requested fields only
     results = {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'auc': auc,
-        'confusion_matrix': cm.tolist(),
-        'y_true': test_labels_expanded.tolist(),
-        'y_pred': y_pred.flatten().tolist(),
-        'y_pred_binary': y_pred_binary.flatten().tolist()
+        'execution_time_seconds': execution_time_seconds,
+        'model_training_time_seconds': model_training_time_seconds,
+        'classification_report': class_report,
+        'accuracy': accuracy
     }
-    
-    # Find optimal threshold using ROC curve
-    logger.info("Finding optimal threshold value...")
-    fpr, tpr, thresholds = metrics.roc_curve(test_labels_expanded, y_pred)
-    
-    # Calculate J statistics (Youden's J = TPR - FPR)
-    j_scores = tpr - fpr
-    # Find the index of the maximum J value
-    optimal_idx = np.argmax(j_scores)
-    # Get the optimal threshold
-    optimal_threshold = float(thresholds[optimal_idx])
-    
-    # Calculate the performance at the optimal threshold
-    optimal_preds = (y_pred > optimal_threshold).astype(int)
-    optimal_accuracy = metrics.accuracy_score(test_labels_expanded, optimal_preds)
-    optimal_precision = metrics.precision_score(test_labels_expanded, optimal_preds)
-    optimal_recall = metrics.recall_score(test_labels_expanded, optimal_preds)
-    optimal_f1 = metrics.f1_score(test_labels_expanded, optimal_preds)
-    
-    logger.info(f"Optimal threshold: {optimal_threshold:.4f}")
-    logger.info(f"Performance at optimal threshold:")
-    logger.info(f"  Accuracy: {optimal_accuracy:.4f}")
-    logger.info(f"  Precision: {optimal_precision:.4f}")
-    logger.info(f"  Recall: {optimal_recall:.4f}")
-    logger.info(f"  F1 Score: {optimal_f1:.4f}")
-    
-    # Add optimal threshold information to results dictionary
-    results['optimal_threshold'] = optimal_threshold
-    results['optimal_threshold_metrics'] = {
-        'accuracy': float(optimal_accuracy),
-        'precision': float(optimal_precision),
-        'recall': float(optimal_recall),
-        'f1': float(optimal_f1)
-    }
-    
-    # Ensure necessary directories exist for saving artifacts
-    os.makedirs('pickle/pickle_mast', exist_ok=True)
     
     # Save as YAML file (as originally intended)
     yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))

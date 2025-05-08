@@ -71,24 +71,24 @@ def focal_loss(gamma=2.0, alpha=0.25):
         A loss function that computes focal loss.
     """
     def loss_function(y_true, y_pred):
+        # Cast true labels and constants to prediction dtype
+        dtype = y_pred.dtype
+        y_true = tf.cast(y_true, dtype)
+        eps = tf.cast(tf.keras.backend.epsilon(), dtype)
+        gamma_c = tf.cast(gamma, dtype)
+        alpha_c = tf.cast(alpha, dtype)
         # Clip predictions for numerical stability
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
-        
+        y_pred = tf.clip_by_value(y_pred, eps, 1 - eps)
         # Calculate cross entropy
         cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
-        
         # Calculate focal weight
-        p_t = tf.where(tf.equal(y_true, 1), y_pred, 1 - y_pred)
-        focal_weight = tf.pow(1 - p_t, gamma)
-        
+        p_t = tf.where(tf.equal(y_true, dtype(1)), y_pred, 1 - y_pred)
+        focal_weight = tf.pow(1 - p_t, gamma_c)
         # Apply alpha weighting
-        alpha_weight = tf.where(tf.equal(y_true, 1), alpha, 1 - alpha)
-        
+        alpha_weight = tf.where(tf.equal(y_true, dtype(1)), alpha_c, 1 - alpha_c)
         # Combine for final loss
-        focal_loss = alpha_weight * focal_weight * cross_entropy
-        
-        return tf.reduce_mean(focal_loss)
+        loss = alpha_weight * focal_weight * cross_entropy
+        return tf.reduce_mean(loss)
     
     return loss_function
 

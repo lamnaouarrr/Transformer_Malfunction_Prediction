@@ -82,10 +82,10 @@ def focal_loss(gamma=2.0, alpha=0.25):
         # Calculate cross entropy
         cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
         # Calculate focal weight
-        p_t = tf.where(tf.equal(y_true, dtype(1)), y_pred, 1 - y_pred)
+        p_t = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), y_pred, 1 - y_pred)
         focal_weight = tf.pow(1 - p_t, gamma_c)
         # Apply alpha weighting
-        alpha_weight = tf.where(tf.equal(y_true, dtype(1)), alpha_c, 1 - alpha_c)
+        alpha_weight = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), alpha_c, 1 - alpha_c)
         # Combine for final loss
         loss = alpha_weight * focal_weight * cross_entropy
         return tf.reduce_mean(loss)

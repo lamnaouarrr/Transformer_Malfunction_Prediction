@@ -1939,7 +1939,9 @@ def main():
             gpus[0],
             [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=28672)]
         )
-
+    # Print current VRAM usage to verify GPU memory setup
+    used_mem, total_mem, usage_pct = monitor_gpu_usage()
+    logger.info(f"Initial GPU memory usage: {used_mem}MB/{total_mem}MB ({usage_pct:.1f}%)")
     # Load configurations
     with open('baseline_MAST.yaml', 'r') as config_file:
         config = yaml.safe_load(config_file)
@@ -1951,16 +1953,13 @@ def main():
     # Ensure pickle directory exists for training history
     os.makedirs('pickle/pickle_mast', exist_ok=True)
 
-    # Quick debug mode: skip full training if enabled
-    debug_cfg = config.get('debug', {})
-    if debug_cfg.get('enabled', False):
-        logger.info("Debug mode enabled: skipping training to test configuration")
-        return
-
-    # Determine model save path: use model_path from config or default to model_directory/mast_model.keras
+    # Determine model save path: use model_path from config or default
     model_dir = config.get('model_directory', './model/MAST')
     model_path = model_params.get('model_path', os.path.join(model_dir, 'mast_model.keras'))
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    # Ensure result directory exists
+    result_dir = config.get('result_directory', './result/result_MAST')
+    os.makedirs(result_dir, exist_ok=True)
     dataset_params = config.get('dataset', {})
     training_params = config.get('training', {})
     
@@ -2137,18 +2136,34 @@ def main():
         # Create cosine annealing LR schedule and AdamW optimizer with weight decay
         initial_lr = training_params.get('learning_rate', 1e-5)
         decay_steps = training_params.get('decay_steps', 10000)
-        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=initial_lr, decay_steps=decay_steps
-        )
+        fit_cfg = config.get('fit', {})
+        compile_cfg = fit_cfg.get('compile', {})
+        loss_type = compile_cfg.get('loss', 'binary_crossentropy')
+        if loss_type == 'focal_loss':
+            fl_cfg = compile_cfg.get('focal_loss', {})
+            loss_fn = focal_loss(gamma=fl_cfg.get('gamma', 2.0), alpha=fl_cfg.get('alpha', 0.25))
+        else:
+            loss_fn = tf.keras.losses.BinaryCrossentropy()
+        lr_cfg = fit_cfg.get('lr_scheduler', {})
+        if lr_cfg.get('type') == 'cosine_annealing_restarts':
+            first_decay = lr_cfg.get('first_decay_steps', decay_steps)
+            t_mul = lr_cfg.get('t_mul', 2.0)
+            alpha = lr_cfg.get('alpha', 0.0)
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+                initial_learning_rate=initial_lr,
+                first_decay_steps=first_decay,
+                t_mul=t_mul,
+                m_mul=1.0,
+                alpha=alpha
+            )
+        else:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=initial_lr, decay_steps=decay_steps
+            )
         weight_decay = training_params.get('weight_decay', 1e-3)
         optimizer = tf.keras.optimizers.experimental.AdamW(
             learning_rate=lr_schedule, weight_decay=weight_decay
         )
-        
-        # Configure loss function based on configuration
-        loss_fn = tf.keras.losses.BinaryCrossentropy()
-        
-        # Compile model for fine-tuning
         finetune_model.compile(
             optimizer=optimizer,
             loss=loss_fn,
@@ -2168,7 +2183,6 @@ def main():
         val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
         # Setup callbacks for fine-tuning
         callbacks = []
-        fit_cfg = config.get('fit', {})
         # Early stopping
         es_cfg = fit_cfg.get('early_stopping', {})
         if es_cfg.get('enabled', False):
@@ -2311,12 +2325,14 @@ def main():
         plt.legend()
     
     plt.tight_layout()
-    plt.savefig('result/result_mast/performance_metrics.png')
+    # Save performance plot under configured result_directory
+    plot_dir = result_dir
+    os.makedirs(plot_dir, exist_ok=True)
+    plt.savefig(os.path.join(plot_dir, 'performance_metrics.png'))
     logger.info(f"Performance metrics saved to result/result_mast/performance_metrics.png")
     
     # Ensure necessary directories exist for saving artifacts
     os.makedirs('pickle/pickle_mast', exist_ok=True)
-    os.makedirs('result/result_mast', exist_ok=True)
     
     # Save test results
     results = {
@@ -2367,11 +2383,9 @@ def main():
     
     # Ensure necessary directories exist for saving artifacts
     os.makedirs('pickle/pickle_mast', exist_ok=True)
-    os.makedirs('result/result_MAST', exist_ok=True)
     
     # Save as YAML file (as originally intended)
-    yaml_file_path = os.path.join(config.get('result_directory', './result/result_MAST'), 
-                                 config.get('result_file', 'result_MAST.yaml'))
+    yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))
     with open(yaml_file_path, 'w') as f:
         yaml.dump(results, f, default_flow_style=False)
     

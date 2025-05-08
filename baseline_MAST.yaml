@@ -50,8 +50,11 @@ cache:
 fit:
   compile:
     optimizer: "adamw"
-    learning_rate: 0.0001  # updated to 1e-4
-    loss: "binary_crossentropy"
+    learning_rate: 0.0003  # restored original compile LR
+    loss: "focal_loss"  # switch to focal loss for class imbalance
+    focal_loss:
+      gamma: 2.0
+      alpha: 0.25
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
     weighted_metrics: ["accuracy"]
   epochs: 50  # Increased from 30
@@ -70,6 +73,10 @@ fit:
   apply_sample_weights: false  # disabled uniform sample weighting
   special_case_weights: {}  # remove per-machine weight overrides
   lr_scheduler:
+    type: "cosine_annealing_restarts"  # use cosine restarts schedule
+    first_decay_steps: 10000            # initial decay steps
+    t_mul: 2.0                          # multiplier for restart periods
+    alpha: 0.00000001                   # minimum learning rate factor
     enabled: true
     monitor: "val_loss"
     factor: 0.5  # Changed from 0.1 to less aggressive reduction
@@ -92,7 +99,7 @@ fit:
 
 # Training optimizations
 training:
-  learning_rate: 0.0001   # AdamW initial learning rate
+  learning_rate: 0.00001    # restored default AdamW initial LR 1e-5
   find_optimal_lr: false
   mixed_precision: true
   xla_acceleration: false
@@ -129,6 +136,7 @@ model:
       activation_fn: "gelu"
       ff_dim_multiplier: 4
       enable_rotary: true  # Changed from false - better sequence modeling
+      dropout_rate: 0.15  # increase dropout in transformer blocks for regularization
   loss: "focal_loss"  # Changed from "binary_crossentropy"
   focal_loss:
     gamma: 2.5  # Increased from 2.0 - focuses more on hard examples

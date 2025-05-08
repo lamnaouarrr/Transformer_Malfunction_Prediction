@@ -1948,6 +1948,15 @@ def main():
     model_params = config.get('model', {})
     mast_params = config.get('mast', {})
     transformer_params = config.get('model', {}).get('architecture', {}).get('transformer', {})
+    # Ensure pickle directory exists for training history
+    os.makedirs('pickle/pickle_mast', exist_ok=True)
+
+    # Quick debug mode: skip full training if enabled
+    debug_cfg = config.get('debug', {})
+    if debug_cfg.get('enabled', False):
+        logger.info("Debug mode enabled: skipping training to test configuration")
+        return
+
     # Determine model save path: use model_path from config or default to model_directory/mast_model.keras
     model_dir = config.get('model_directory', './model/MAST')
     model_path = model_params.get('model_path', os.path.join(model_dir, 'mast_model.keras'))

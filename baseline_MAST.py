@@ -27,7 +27,8 @@ import seaborn as sns
 import math
 import gc
 import hashlib
-
+import optuna
+import subprocess
 
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +44,7 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from skimage.metrics import structural_similarity as ssim
 from transformers import TFViTModel, ViTConfig
-from tensorflow.keras import layers  # Add explicit import for layers module
+from tensorflow.keras import layers
 ########################################################################
 
 ########################################################################
@@ -2131,8 +2132,63 @@ def main():
             logger.info("Transferring pretrained weights to fine-tuning model")
             finetune_model.load_weights("model/MAST/pretrain_weights.keras", by_name=True, skip_mismatch=True)
         
-        # Now proceed with fine-tuning for anomaly detection
+        # Starting fine-tuning
         logger.info("Starting MAST fine-tuning phase for anomaly detection")
+        # Optuna hyperparameter optimization
+        opt_cfg = config.get('optimization', {}).get('optuna', {})
+        if opt_cfg.get('enable', False):
+            # Prepare datasets once
+            train_ds = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))\
+                .shuffle(buffer_size=train_data.shape[0]).batch(training_params.get('batch_size', 32)).prefetch(tf.data.AUTOTUNE)
+            val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))\
+                .batch(training_params.get('batch_size', 32)).prefetch(tf.data.AUTOTUNE)
+            def objective(trial):
+                # Suggest hyperparameters
+                lr = trial.suggest_loguniform('learning_rate',
+                    opt_cfg['parameters']['learning_rate']['low'],
+                    opt_cfg['parameters']['learning_rate']['high'])
+                num_layers = trial.suggest_int('num_encoder_layers',
+                    opt_cfg['parameters']['num_encoder_layers']['low'],
+                    opt_cfg['parameters']['num_encoder_layers']['high'],
+                    step=opt_cfg['parameters']['num_encoder_layers'].get('step',1))
+                drop = trial.suggest_uniform('dropout_rate',
+                    opt_cfg['parameters']['dropout_rate']['low'],
+                    opt_cfg['parameters']['dropout_rate']['high'])
+                mlp_drop = trial.suggest_uniform('mlp_dropout',
+                    opt_cfg['parameters']['mlp_dropout']['low'],
+                    opt_cfg['parameters']['mlp_dropout']['high'])
+                # Update parameters for this trial
+                transformer_params['num_encoder_layers'] = num_layers
+                transformer_params['dropout_rate'] = drop
+                transformer_params['mlp_dropout'] = mlp_drop
+                training_params['learning_rate'] = lr
+                # Build and compile model
+                finetune_model = create_mast_model(target_shape, mast_params, transformer_params)[1]
+                optimizer = tf.keras.optimizers.experimental.AdamW(
+                    learning_rate=lr, weight_decay=training_params.get('weight_decay',1e-3)
+                )
+                finetune_model.compile(
+                    optimizer=optimizer,
+                    loss=focal_loss(gamma=compile_cfg.get('focal_loss',{}).get('gamma',2.0),
+                                    alpha=compile_cfg.get('focal_loss',{}).get('alpha',0.25)),
+                    metrics=['accuracy']
+                )
+                # Quick trial training
+                history = finetune_model.fit(
+                    train_ds, validation_data=val_ds,
+                    epochs=opt_cfg.get('trial_epochs',5), verbose=0
+                )
+                return float(history.history['val_accuracy'][-1])
+            sampler = getattr(optuna.samplers, opt_cfg.get('sampler','TPESampler'))()
+            study = optuna.create_study(direction=opt_cfg.get('direction','maximize'), sampler=sampler)
+            study.optimize(objective, n_trials=opt_cfg.get('n_trials',20), timeout=opt_cfg.get('timeout',None))
+            best = study.best_params
+            logger.info(f"Optuna found best parameters: {best}")
+            # Apply best hyperparameters
+            training_params['learning_rate'] = best['learning_rate']
+            transformer_params['num_encoder_layers'] = best['num_encoder_layers']
+            transformer_params['dropout_rate'] = best['dropout_rate']
+            transformer_params['mlp_dropout'] = best['mlp_dropout']
         
         # Create cosine annealing LR schedule and AdamW optimizer with weight decay
         initial_lr = training_params.get('learning_rate', 1e-5)

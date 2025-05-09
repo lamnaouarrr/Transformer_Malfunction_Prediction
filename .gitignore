@@ -6,6 +6,4 @@ logs
 .venv
 get-pip.py
 __pycache__
-baseline_AST.py_first_half.txt
-baseline_AST.py_second_half.txt
 transformer_venv

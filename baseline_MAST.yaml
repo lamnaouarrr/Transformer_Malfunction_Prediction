@@ -37,29 +37,16 @@ feature:
     chunk_size: 5000
     temp_directory: "./temp_chunks/temp_chunks_AST"
 
-# Cache configuration for spectrogram generation
-cache:
-  enabled: true
-  directory: "./cache/mast_spectrograms"
-  memory_limit_mb: 4096
-  persistent: true
-  clear_on_param_change: true
-  compression: true
-
 # Fit algorithm parameters
 fit:
   compile:
-    optimizer: "adamw"
-    learning_rate: 0.0003  # restored original compile LR
-    loss: "binary_crossentropy"  # using binary crossentropy as requested
-    label_smoothing: 0.1        # optional smoothing on binary crossentropy
-    focal_loss:
-      gamma: 2.0
-      alpha: 0.25
+    optimizer: "adam"
+    learning_rate: 0.0003  # Modified from 0.0001 - slightly higher learning rate
+    loss: "focal_loss"  # Changed from "binary_crossentropy" for better handling of class imbalance
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
     weighted_metrics: ["accuracy"]
   epochs: 50  # Increased from 30
-  batch_size: 64  # Increased from 16 for better gradient estimation
+  batch_size: 32  # Increased from 16 for better gradient estimation
   shuffle: True
   validation_split: 0.1
   verbose: 1
@@ -70,15 +57,12 @@ fit:
     min_delta: 0.001
     restore_best_weights: true
   weight_factor: 2.0  # Increased from 1.5 for non-problematic IDs
-  weighted_machine_ids: []  # clear machine-specific IDs
-  apply_sample_weights: false  # disabled uniform sample weighting
-  special_case_weights: {}  # remove per-machine weight overrides
+  weighted_machine_ids: []  # Will handle id_00 and id_04 explicitly in code
+  apply_sample_weights: true  # Enable sample weighting
+  special_case_weights: # Special case weights for problematic machine IDs
+    fan_id_00: 2.5  # Increased from 2.0
+    fan_id_04: 2.5  # Increased from 2.0
   lr_scheduler:
-    type: "cosine_annealing_restarts"
-    initial_learning_rate: 0.00001      # one-cycle style base LR
-    first_decay_steps: 5000             # faster restart for one-cycle
-    t_mul: 2.0
-    alpha: 0.000001                     # minimum LR factor
     enabled: true
     monitor: "val_loss"
     factor: 0.5  # Changed from 0.1 to less aggressive reduction
@@ -101,19 +85,14 @@ fit:
 
 # Training optimizations
 training:
-  learning_rate: 0.00001   # base LR for fine-tuning
   find_optimal_lr: false
   mixed_precision: true
   xla_acceleration: false
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 2  # Increased from 1
   gradient_clip_norm: 1.0
   mixup:
     enabled: true
     alpha: 0.3  # Increased from 0.2 for more mixing
-  audio_augmentation:
-    mixup: true
-    time_masking: true
-    freq_warping: true
   checkpointing:
     save_frequency: 1000
     keep_checkpoints: 5
@@ -125,21 +104,19 @@ training:
 model:
   architecture:
     transformer:
-      num_heads: 8
-      dim_feedforward: 768
-      num_encoder_layers: 4         # Added extra encoder layer for capacity
+      num_heads: 8  # Increased from 4
+      dim_feedforward: 768  # Increased from 512
+      num_encoder_layers: 3  # Increased from 2
       positional_encoding: true
-      use_pretrained: false
+      use_pretrained: false  # Changed to false to avoid dependency issues
       patch_size: 4
-      attention_dropout: 0.1       # Reduced dropout for smoother learning
-      mlp_dropout: 0.1             # Added dropout in feedforward block
+      attention_dropout: 0.2  # Increased from 0.1
       attention_type: "standard"  # Changed from "efficient" 
       pos_encoding_type: "sinusoidal"
       layer_norm_epsilon: 1.0e-6
       activation_fn: "gelu"
       ff_dim_multiplier: 4
       enable_rotary: true  # Changed from false - better sequence modeling
-      dropout_rate: 0.15  # increase dropout in transformer blocks for regularization
   loss: "focal_loss"  # Changed from "binary_crossentropy"
   focal_loss:
     gamma: 2.5  # Increased from 2.0 - focuses more on hard examples
@@ -149,11 +126,8 @@ model:
 
 # MAST specific configuration
 mast:
-  multi_scale:
-    enabled: true      # Enable multi-scale patch embeddings
-    scales: [16, 32]   # List of patch sizes for multi-scale processing
   pretraining:
-    enabled: false
+    enabled: true
     epochs: 10
     batch_size: 32
     use_normal_only: true
@@ -214,3 +188,29 @@ result_file: "result_MAST.yaml"
 logging:
   level: "DEBUG"
   file: "./logs/log_MAST/baseline_MAST.log"
+
+# Hyperparameter Optimization
+optimization:
+  optuna:
+    enable: true         # Enable Optuna hyperparameter optimization
+    direction: "maximize"  # Target metric direction (maximize validation accuracy)
+    n_trials: 20         # Number of hyperparameter trials
+    timeout: null        # Timeout in seconds for the study (null = no timeout)
+    metric: "val_accuracy"  # Metric to optimize
+    sampler: "TPESampler"  # Optuna sampler to use
+    trial_epochs: 5      # Number of epochs per trial for quick evaluation
+    parameters:
+      learning_rate:
+        low: 1e-6
+        high: 1e-3
+        log: true
+      num_encoder_layers:
+        low: 2
+        high: 6
+        step: 1
+      dropout_rate:
+        low: 0.0
+        high: 0.5
+      mlp_dropout:
+        low: 0.0
+        high: 0.5

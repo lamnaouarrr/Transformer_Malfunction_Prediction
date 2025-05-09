@@ -5,11 +5,10 @@ scipy==1.10.1
 # Deep learning libraries
 tensorflow==2.13.0
 tensorflow-addons==0.20.0
-# Note: tf-keras is part of tensorflow, no need for separate install
 transformers==4.30.0
 
 # Audio processing
-librosa==0.10.0  # Compatible with numpy 1.23.5
+librosa==0.10.0
 audioread==3.0.0
 
 # Data processing and visualization
@@ -24,3 +23,6 @@ tqdm==4.65.0
 # System utilities
 psutil==5.9.5
 protobuf==4.23.4
+
+# Additional packages from imports
+optuna==3.3.0

@@ -1228,7 +1228,7 @@ class MaskingLayer(layers.Layer):
         return masked_x
     
     def get_config(self):
-        config = super(MaskingLayer, self).get_config()
+        config = super(MaskingLayer, self).__init__()
         config.update({
             'mask_probability': self.mask_probability,
             'mask_length': self.mask_length,
@@ -2232,6 +2232,13 @@ def main():
         )
         train_end = time.time()
         model_training_time_seconds = train_end - train_start
+
+        # Generate and save training loss and accuracy graphs
+        viz = Visualizer(param=config)
+        viz.loss_plot(history)
+        loss_acc_path = os.path.join(result_dir, 'loss_accuracy.png')
+        viz.save_figure(loss_acc_path)
+        logger.info(f"Saved training curves to {loss_acc_path}")
         
         # Save the final model
         model = finetune_model
@@ -2277,23 +2284,53 @@ def main():
     y_pred_binary = (y_pred > 0.5).astype(int)
     # Build classification report dict
     class_report = classification_report(test_labels_expanded, y_pred_binary, output_dict=True)
+
+    # Plot and save confusion matrix
+    viz = Visualizer(param=config)
+    viz.plot_confusion_matrix(test_labels_expanded.flatten(), y_pred_binary.flatten())
+    cm_path = os.path.join(result_dir, 'confusion_matrix.png')
+    viz.save_figure(cm_path)
+    logger.info(f"Saved confusion matrix to {cm_path}")
+
     # Total execution time
     exec_end = time.time()
     execution_time_seconds = exec_end - exec_start
     # Calculate metrics
-    accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-    # Summary results with requested fields only
+    accuracy = float(metrics.accuracy_score(test_labels_expanded, y_pred_binary))
+
+    # Extract training and validation accuracy from history
+    train_acc = float(history.history.get('accuracy', [0])[-1])
+    val_acc = float(history.history.get('val_accuracy', [0])[-1])
+
+    # Extract per-class metrics and support
+    f1_0 = float(class_report['0.0']['f1-score'])
+    f1_1 = float(class_report['1.0']['f1-score'])
+    prec_0 = float(class_report['0.0']['precision'])
+    prec_1 = float(class_report['1.0']['precision'])
+    rec_0 = float(class_report['0.0']['recall'])
+    rec_1 = float(class_report['1.0']['recall'])
+    sup_0 = int(class_report['0.0']['support'])
+    sup_1 = int(class_report['1.0']['support'])
+
+    # Summary results with requested custom fields only
     results = {
-        'execution_time_seconds': execution_time_seconds,
-        'model_training_time_seconds': model_training_time_seconds,
-        'classification_report': class_report,
-        'accuracy': accuracy
+        'execution_time_seconds': float(execution_time_seconds),
+        'model_training_time_seconds': float(model_training_time_seconds),
+        'overall_model': {
+            'F1Score': {'class_0': f1_0, 'class_1': f1_1},
+            'Precision': {'class_0': prec_0, 'class_1': prec_1},
+            'Recall': {'class_0': rec_0, 'class_1': rec_1},
+            'Support': {'class_0': sup_0, 'class_1': sup_1},
+            'TestAccuracy': accuracy,
+            'TrainAccuracy': train_acc,
+            'ValidationAccuracy': val_acc
+        }
     }
-    
-    # Save as YAML file (as originally intended)
+
+    # Save as YAML file
     yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))
     with open(yaml_file_path, 'w') as f:
-        yaml.dump(results, f, default_flow_style=False)
+        yaml.safe_dump(results, f, default_flow_style=False)
     
     logger.info(f"Test results saved to {yaml_file_path}")
     

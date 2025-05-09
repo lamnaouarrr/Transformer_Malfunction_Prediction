@@ -8,7 +8,24 @@ import os
 import sys
 import tempfile
 import io
-import librosa.display  # For spectrogram display
+import librosa.display
+
+ABOUT_TEXT = """
+**About This App**: This predictive maintenance app analyzes machine audio to detect anomalies and reduce downtime.
+
+**Developer:** [Ayoub Lamnaouar](https://www.linkedin.com/in/ayoublamnaouar/)\n
+**Repository:** [GitHub](https://github.com/lamnaouarrr/Transformer_Malfunction_Prediction)\n
+**Advisor:** Prof. Jun Zhang (张俊)\n
+**Models:** FNN & MAST (~87.6% & ~83% accuracy)\n
+**Dataset:** [MIMII](https://arxiv.org/abs/1909.09347)\n
+**Built with:** TensorFlow 2.x, FastAPI, Streamlit
+"""
+st.set_page_config(
+    page_title="Abnormal Sound Detector",
+    page_icon="🔊",
+    layout="wide",
+    menu_items={"About": ABOUT_TEXT}
+)
 
 def file_to_vector_array(file_name, n_mels=64, frames=5, n_fft=1024, hop_length=512, power=2.0):
     """
@@ -88,13 +105,6 @@ def send_to_api(file_content, api_url, mode="file"):
         return None
 
 def main():
-    # Page configuration
-    st.set_page_config(
-        page_title="Abnormal Sound Detector",
-        page_icon="🔊",
-        layout="wide"
-    )
-    
     # Title and Introduction
     st.title("🔊 Abnormal Sound Detector")
     st.markdown("Upload machine audio to detect anomalies using an API-based detector.")
@@ -110,20 +120,29 @@ def main():
             help="Base URL of the FastAPI server"
         )
         
-        api_endpoint = st.selectbox(
-            "API Endpoint",
-            options=["predict", "predict_data"],
+        # Select model type
+        model_type = st.selectbox(
+            "Model Type",
+            options=["FNN", "MAST"],
             index=0,
-            help="Endpoint to use: 'predict' for file upload, 'predict_data' for feature vectors"
+            help="Choose which trained model to use"
         )
+        # Build prediction URL
+        api_url = f"{api_base_url}/predict/{model_type}/"
         
-        api_url = f"{api_base_url}/{api_endpoint}"
-        
-        # Advanced settings expandable section
-        with st.expander("Advanced Settings"):
+        # Spectrogram settings expandable section
+        with st.expander("Spectrogram Settings"):
             n_mels = st.slider("Mel Frequency Bins", 16, 128, 64)
-            frames = st.slider("Time Frames", 1, 10, 5)
-            
+            frames = st.slider("Sliding Window Frames", 1, 10, 5)
+            hop_length = st.slider("Hop Length", 64, 2048, 512, step=64)
+        # Get model accuracy
+        if st.button("Get Model Accuracy"):
+            try:
+                acc = requests.get(f"{api_base_url}/accuracy/{model_type}/").json()
+                st.success(f"Test: {acc['TestAccuracy']:.4f}, Train: {acc['TrainAccuracy']:.4f}, Val: {acc['ValidationAccuracy']:.4f}")
+            except Exception as e:
+                st.error(f"Failed to get accuracy: {e}")
+        
         # Health check for API
         if st.button("Check API Connection"):
             try:
@@ -156,57 +175,39 @@ def main():
             # Audio Playback
             st.audio(uploaded_file, format="audio/wav")
             
-            # Process button
+            # Process button (uses selected model)
             process_btn = st.button("📊 Detect Anomaly", use_container_width=True)
             
             if process_btn:
                 # Reset file position to beginning
                 uploaded_file.seek(0)
+                with st.spinner(f"Processing audio via API ({model_type})..."):
+                    # Send file to API
+                    result = send_to_api(uploaded_file.getvalue(), api_url, mode="file")
                 
-                with st.spinner("Processing audio via API..."):
-                    # Get feature vectors if needed
-                    if api_endpoint == "predict_data":
-                        vector_array, _, _ = file_to_vector_array(
-                            uploaded_file, n_mels=n_mels, frames=frames
-                        )
-                        if vector_array.size > 0:
-                            # Send feature vectors to API
-                            result = send_to_api(
-                                {"data": vector_array.tolist()}, 
-                                api_url, 
-                                mode="data"
-                            )
-                        else:
-                            result = None
+                if result and "error" not in result:
+                    # Get the anomaly score and prediction label from the API result
+                    anomaly_score = result.get("anomaly_score", 0.0) # Use get with a default float value
+                    prediction_label = result.get("prediction", "unknown") # Get the string label
+                    threshold = result.get("threshold", 0.5) # Get the threshold from the API
+
+                    # Show result with appropriate styling
+                    if prediction_label == "normal":
+                        st.success(f"✅ Normal Sound (Anomaly Score: {anomaly_score:.4f})")
                     else:
-                        # Reset file position
-                        uploaded_file.seek(0)
-                        # Send file to API
-                        result = send_to_api(uploaded_file.getvalue(), api_url, mode="file")
-                    
-                    if result and "error" not in result:
-                        # Get the anomaly score and prediction label from the API result
-                        anomaly_score = result.get("anomaly_score", 0.0) # Use get with a default float value
-                        prediction_label = result.get("prediction", "unknown") # Get the string label
-                        threshold = result.get("threshold", 0.5) # Get the threshold from the API
+                        st.error(f"⚠️ Abnormal Sound Detected (Anomaly Score: {anomaly_score:.4f})")
 
-                        # Show result with appropriate styling
-                        if prediction_label == "normal":
-                            st.success(f"✅ Normal Sound (Anomaly Score: {anomaly_score:.4f})")
-                        else:
-                            st.error(f"⚠️ Abnormal Sound Detected (Anomaly Score: {anomaly_score:.4f})")
+                    st.info(f"API Threshold: {threshold:.4f}")
 
-                        st.info(f"API Threshold: {threshold:.4f}")
-
-                        # Update Results History
-                        st.session_state.results.append({
-                            "Filename": uploaded_file.name,
-                            "Result": prediction_label.capitalize(),
-                            "Score": anomaly_score, # Use the numerical score for history
-                            "Threshold": threshold,
-                            "Source": f"API ({api_endpoint})",
-                            "Timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-                        })
+                    # Update Results History
+                    st.session_state.results.append({
+                        "Filename": uploaded_file.name,
+                        "Result": prediction_label.capitalize(),
+                        "Score": anomaly_score, # Use the numerical score for history
+                        "Threshold": threshold,
+                        "Source": f"API ({model_type})",
+                        "Timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
     
     with col2:
         # Visualizations and results
@@ -217,7 +218,7 @@ def main():
             # Display spectrogram if available
             with st.spinner("Generating spectrogram..."):
                 vector_array, log_mel_spectrogram, sr = file_to_vector_array(
-                    uploaded_file, n_mels=n_mels, frames=frames
+                    uploaded_file, n_mels=n_mels, frames=frames, hop_length=hop_length
                 )
                 
                 if log_mel_spectrogram is not None:
@@ -225,11 +226,9 @@ def main():
                     fig, ax = plt.subplots(figsize=(10, 4))
                     if 'librosa.display' in sys.modules:
                         img = librosa.display.specshow(
-                            log_mel_spectrogram, 
-                            x_axis='time', 
-                            y_axis='mel', 
-                            sr=sr,
-                            fmax=sr/2,
+                            log_mel_spectrogram,
+                            x_axis='time', y_axis='mel', sr=sr,
+                            hop_length=hop_length, fmax=sr/2,
                             ax=ax
                         )
                     else:
@@ -269,16 +268,6 @@ def main():
             "text/csv",
             key='download-csv'
         )
-    
-    # About Section
-    st.markdown("---")
-    st.markdown("""
-    **About**: This application uses a sound anomaly detection model via API integration to detect abnormal machine sounds.
-    """)
-    st.markdown("""
-    **API Integration**: The application connects to a FastAPI backend (`anomaly_detection_api.py`) 
-    which can process either raw audio files or pre-extracted feature vectors.
-    """)
 
 if __name__ == "__main__":
     main()

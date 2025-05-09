@@ -1,5 +1,5 @@
 # Core numeric and scientific libraries
-numpy==1.23.5
+numpy>=1.23.5
 scipy==1.10.1
 
 # Deep learning libraries

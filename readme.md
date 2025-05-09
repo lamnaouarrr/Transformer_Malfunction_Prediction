@@ -93,3 +93,53 @@ In addition, we checked performing on **Ubuntu 16.04 LTS**, **18.04 LTS**, **Cen
 - audioread                     == 2.1.5 (more)
 - setuptools                    == 41.0.0
 - tensorflow                    == 1.15.0
+
+## FastAPI Backend
+
+1. Install dependencies for the API:
+
+```bash
+cd app
+pip install -r app_requirements.txt
+```
+
+2. Ensure the project root is on PYTHONPATH (if needed):
+
+```bash
+export PYTHONPATH=$(pwd)
+```
+
+3. Start the API server:
+
+```bash
+uvicorn app.anomaly_detection_api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Endpoints:
+- POST /predict/{model_type}/ : Upload WAV file to predict anomaly (model_type = FNN or MAST)
+- GET /accuracy/{model_type}/ : Retrieve stored model accuracies
+- GET /health/ : Health check for the API
+
+## Streamlit Frontend
+
+1. Install dependencies for the Streamlit app (in project root):
+
+```bash
+pip install -r app/app_requirements.txt
+```
+
+2. Run the Streamlit application:
+
+```bash
+streamlit run app/app.py
+```
+
+3. The app will open in your browser. Use the sidebar to configure the API base URL, select the model type, and upload WAV files for anomaly detection.
+
+## Cleaning Up
+
+Remove any unused scripts if not needed:
+
+```bash
+rm app/tf_compatibility.py
+```

@@ -2144,9 +2144,10 @@ def main():
                 .batch(training_params.get('batch_size', 32)).prefetch(tf.data.AUTOTUNE)
             def objective(trial):
                 # Suggest hyperparameters
-                lr = trial.suggest_loguniform('learning_rate',
-                    opt_cfg['parameters']['learning_rate']['low'],
-                    opt_cfg['parameters']['learning_rate']['high'])
+                # Ensure LR bounds are floats, then sample on log scale
+                lr_low = float(opt_cfg['parameters']['learning_rate']['low'])
+                lr_high = float(opt_cfg['parameters']['learning_rate']['high'])
+                lr = trial.suggest_float('learning_rate', lr_low, lr_high, log=True)
                 num_layers = trial.suggest_int('num_encoder_layers',
                     opt_cfg['parameters']['num_encoder_layers']['low'],
                     opt_cfg['parameters']['num_encoder_layers']['high'],
@@ -2298,8 +2299,7 @@ def main():
         
         # Save the final model
         model = finetune_model
-        # Save only weights to avoid JSON serialization issues
-        model.save_weights(model_path)
+        model.save(model_path)  # Export full MAST model in .keras format
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

@@ -1061,6 +1061,13 @@ def main():
         optimal_threshold = 0.5  # Default threshold
         logger.info(f"Using default threshold: {optimal_threshold}")
 
+    # Save the optimal threshold to the evaluation result
+    evaluation_result["OptimalThreshold"] = float(optimal_threshold)
+
+    # Save results to YAML file
+    with open(result_file, "w") as f:
+        yaml.dump(results, f, default_flow_style=False)
+
     # Convert predictions to binary using optimal threshold
     y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
 

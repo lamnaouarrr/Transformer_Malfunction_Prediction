@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
 import seaborn as sns
+import optuna
 
 from tqdm import tqdm
 from sklearn import metrics
@@ -722,6 +723,46 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 
 
 ########################################################################
+# Optuna integration
+########################################################################
+def objective(trial):
+    """
+    Define the objective function for Optuna optimization.
+    """
+    # Define the hyperparameter search space
+    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-1)
+    dropout_rate = trial.suggest_uniform('dropout_rate', 0.1, 0.5)
+    depth = trial.suggest_int('depth', 2, 6)
+    width = trial.suggest_int('width', 64, 256)
+
+    # Build the model
+    inputs = Input(shape=(param['model']['architecture']['width'],))
+    x = inputs
+    for _ in range(depth):
+        x = Dense(width, activation='relu')(x)
+        x = Dropout(dropout_rate)(x)
+    outputs = Dense(1, activation='sigmoid')(x)
+    model = Model(inputs, outputs)
+
+    # Compile the model
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+                  loss='binary_crossentropy',
+                  metrics=['accuracy'])
+
+    # Train the model
+    history = model.fit(
+        x_train, y_train,
+        validation_data=(x_val, y_val),
+        epochs=param['fit']['epochs'],
+        batch_size=param['fit']['batch_size'],
+        verbose=0
+    )
+
+    # Return the validation loss as the objective value
+    val_loss = min(history.history['val_loss'])
+    return val_loss
+
+########################################################################
 # main
 ########################################################################
 def main():
@@ -1171,6 +1212,17 @@ def main():
     with open(result_file, "w") as f:
         yaml.dump(results, f, default_flow_style=False)
     print("===========================")
+
+    # Create an Optuna study and optimize the objective function
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=50)
+
+    # Log the best hyperparameters
+    logger.info(f"Best hyperparameters: {study.best_params}")
+
+    # Save the best hyperparameters to a YAML file
+    with open(param['result_directory'] + '/best_hyperparameters.yaml', 'w') as f:
+        yaml.dump(study.best_params, f)
 
 if __name__ == "__main__":
     main()

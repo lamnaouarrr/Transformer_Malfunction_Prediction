@@ -725,13 +725,13 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 # Optuna integration
 ########################################################################
-def objective(trial):
+def objective(trial, param):
     """
     Define the objective function for Optuna optimization.
     """
     # Define the hyperparameter search space
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-1)
-    dropout_rate = trial.suggest_uniform('dropout_rate', 0.1, 0.5)
+    learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-1, log=True)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
     depth = trial.suggest_int('depth', 2, 6)
     width = trial.suggest_int('width', 64, 256)
 
@@ -1031,7 +1031,7 @@ def main():
     print("============== OPTUNA OPTIMIZATION ==============")
     if param.get("optuna", {}).get("enabled", False):
         study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=param["optuna"].get("trials", 50))
+        study.optimize(lambda trial: objective(trial, param), n_trials=param["optuna"].get("trials", 50))
 
         # Log the best hyperparameters
         logger.info(f"Best hyperparameters: {study.best_params}")

@@ -895,6 +895,7 @@ def main():
         train_labels_expanded = train_labels  # Ensure train_labels_expanded is assigned
         val_data = load_pickle(val_pickle)
         val_labels = load_pickle(val_labels_pickle)
+        val_labels_expanded = val_labels  # Ensure val_labels_expanded is assigned
         test_files = load_pickle(test_files_pickle)
         test_labels = load_pickle(test_labels_pickle)
         print('DEBUG: Loaded preprocessed data from pickle files.')

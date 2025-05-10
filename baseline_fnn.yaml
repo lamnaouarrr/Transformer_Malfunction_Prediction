@@ -79,3 +79,25 @@ result_file: "result_fnn.yaml"
 logging:
   level: "DEBUG"
   file: "./logs/log_fnn/baseline_fnn.log"
+
+# Optuna hyperparameter optimization parameters
+optuna:
+  enabled: true
+  trials: 50
+  search_space:
+    learning_rate:
+      type: "loguniform"
+      low: 1e-5
+      high: 1e-1
+    dropout_rate:
+      type: "uniform"
+      low: 0.1
+      high: 0.5
+    depth:
+      type: "int"
+      low: 2
+      high: 6
+    width:
+      type: "int"
+      low: 64
+      high: 256

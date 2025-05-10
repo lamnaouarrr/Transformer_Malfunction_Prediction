@@ -2152,10 +2152,12 @@ def main():
                     opt_cfg['parameters']['num_encoder_layers']['low'],
                     opt_cfg['parameters']['num_encoder_layers']['high'],
                     step=opt_cfg['parameters']['num_encoder_layers'].get('step',1))
-                drop = trial.suggest_uniform('dropout_rate',
+                # Use suggest_float (uniform) for dropout_rate
+                drop = trial.suggest_float('dropout_rate',
                     opt_cfg['parameters']['dropout_rate']['low'],
                     opt_cfg['parameters']['dropout_rate']['high'])
-                mlp_drop = trial.suggest_uniform('mlp_dropout',
+                # Use suggest_float (uniform) for mlp_dropout
+                mlp_drop = trial.suggest_float('mlp_dropout',
                     opt_cfg['parameters']['mlp_dropout']['low'],
                     opt_cfg['parameters']['mlp_dropout']['high'])
                 # Retrieve compile configuration for focal loss parameters

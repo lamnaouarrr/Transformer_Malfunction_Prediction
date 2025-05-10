@@ -897,49 +897,49 @@ def main():
         test_files = load_pickle(test_files_pickle)
         test_labels = load_pickle(test_labels_pickle)
         print('DEBUG: Loaded preprocessed data from pickle files.')
-        return train_data, train_labels, val_data, val_labels, test_files, test_labels
 
-    train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
+    else:
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
 
-    if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
-        logger.error(f"No files found for {evaluation_result_key}, skipping...")
-        return  # Exit main() if no files are found after generation
+        if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
+            logger.error(f"No files found for {evaluation_result_key}, skipping...")
+            return  # Exit main() if no files are found after generation
 
-    train_data, train_labels_expanded = list_to_vector_array_with_labels(
-        train_files,
-        train_labels,
-        msg="generate train_dataset",
-        n_mels=param["feature"]["n_mels"],
-        frames=param["feature"]["frames"],
-        n_fft=param["feature"]["n_fft"],
-        hop_length=param["feature"]["hop_length"],
-        power=param["feature"]["power"],
-        augment=True
-    )
-    print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
+        train_data, train_labels_expanded = list_to_vector_array_with_labels(
+            train_files,
+            train_labels,
+            msg="generate train_dataset",
+            n_mels=param["feature"]["n_mels"],
+            frames=param["feature"]["frames"],
+            n_fft=param["feature"]["n_fft"],
+            hop_length=param["feature"]["hop_length"],
+            power=param["feature"]["power"],
+            augment=True
+        )
+        print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
 
-    val_data, val_labels_expanded = list_to_vector_array_with_labels(
-        val_files,
-        val_labels,
-        msg="generate validation_dataset",
-        n_mels=param["feature"]["n_mels"],
-        frames=param["feature"]["frames"],
-        n_fft=param["feature"]["n_fft"],
-        hop_length=param["feature"]["hop_length"],
-        power=param["feature"]["power"],
-        augment=False
-    )
+        val_data, val_labels_expanded = list_to_vector_array_with_labels(
+            val_files,
+            val_labels,
+            msg="generate validation_dataset",
+            n_mels=param["feature"]["n_mels"],
+            frames=param["feature"]["frames"],
+            n_fft=param["feature"]["n_fft"],
+            hop_length=param["feature"]["hop_length"],
+            power=param["feature"]["power"],
+            augment=False
+        )
 
-    if train_data.shape[0] == 0 or val_data.shape[0] == 0:
-        logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-        return  # Exit main() if no valid training/validation data
+        if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
+            return  # Exit main() if no valid training/validation data
 
-    save_pickle(train_pickle, train_data)
-    save_pickle(train_labels_pickle, train_labels_expanded)
-    save_pickle(val_pickle, val_data)
-    save_pickle(val_labels_pickle, val_labels_expanded)
-    save_pickle(test_files_pickle, test_files)
-    save_pickle(test_labels_pickle, test_labels)
+        save_pickle(train_pickle, train_data)
+        save_pickle(train_labels_pickle, train_labels_expanded)
+        save_pickle(val_pickle, val_data)
+        save_pickle(val_labels_pickle, val_labels_expanded)
+        save_pickle(test_files_pickle, test_files)
+        save_pickle(test_labels_pickle, test_labels)
 
     # Print shapes
     logger.info(f"Training data shape: {train_data.shape}")

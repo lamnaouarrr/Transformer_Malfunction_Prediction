@@ -135,11 +135,3 @@ streamlit run app/app.py
 ```
 
 3. The app will open in your browser. Use the sidebar to configure the API base URL, select the model type, and upload WAV files for anomaly detection.
-
-## Cleaning Up
-
-Remove any unused scripts if not needed:
-
-```bash
-rm app/tf_compatibility.py
-```

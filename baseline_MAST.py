@@ -1032,7 +1032,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     num_heads = transformer_params.get("num_heads", 12)
     num_layers = transformer_params.get("num_layers", 12)
     mlp_dim = transformer_params.get("mlp_dim", 3072)
-    dropout_rate = transformer_params.get("dropout_rate", 0.1)
+    dropout_rate = 0.1
     
     # Add explicit masking rate for pretraining
     mask_prob = mast_params.get("pretraining", {}).get("masking", {}).get("probability", 0.15)
@@ -2158,6 +2158,8 @@ def main():
                 mlp_drop = trial.suggest_uniform('mlp_dropout',
                     opt_cfg['parameters']['mlp_dropout']['low'],
                     opt_cfg['parameters']['mlp_dropout']['high'])
+                # Retrieve compile configuration for focal loss parameters
+                compile_cfg = config.get('fit', {}).get('compile', {})
                 # Update parameters for this trial
                 transformer_params['num_encoder_layers'] = num_layers
                 transformer_params['dropout_rate'] = drop

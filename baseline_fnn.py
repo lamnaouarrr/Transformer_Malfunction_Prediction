@@ -896,12 +896,14 @@ def main():
         val_labels = load_pickle(val_labels_pickle)
         test_files = load_pickle(test_files_pickle)
         test_labels = load_pickle(test_labels_pickle)
-    else:
-        train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
+        print('DEBUG: Loaded preprocessed data from pickle files.')
+        return train_data, train_labels, val_data, val_labels, test_files, test_labels
 
-        if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
-            logger.error(f"No files found for {evaluation_result_key}, skipping...")
-            return  # Exit main() if no files are found after generation
+    train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
+
+    if len(train_files) == 0 or len(val_files) == 0 or len(test_files) == 0:
+        logger.error(f"No files found for {evaluation_result_key}, skipping...")
+        return  # Exit main() if no files are found after generation
 
     train_data, train_labels_expanded = list_to_vector_array_with_labels(
         train_files,

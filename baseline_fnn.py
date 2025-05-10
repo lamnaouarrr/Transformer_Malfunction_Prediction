@@ -1028,7 +1028,22 @@ def main():
     visualizer.loss_plot(history)
     visualizer.save_figure(history_img)
 
-    # Proceed with evaluation...
+    print("============== OPTUNA OPTIMIZATION ==============")
+    if param.get("optuna", {}).get("enabled", False):
+        study = optuna.create_study(direction='minimize')
+        study.optimize(objective, n_trials=param["optuna"].get("trials", 50))
+
+        # Log the best hyperparameters
+        logger.info(f"Best hyperparameters: {study.best_params}")
+
+        # Save the best hyperparameters to a YAML file
+        best_hyperparameters_file = f"{param['result_directory']}/best_hyperparameters.yaml"
+        with open(best_hyperparameters_file, 'w') as f:
+            yaml.dump(study.best_params, f)
+
+        print(f"Optuna optimization completed. Best hyperparameters saved to {best_hyperparameters_file}")
+    else:
+        print("Optuna optimization is disabled in the configuration.")
 
     print("============== EVALUATION ==============")
     y_pred = []
@@ -1179,17 +1194,6 @@ def main():
     with open(result_file, "w") as f:
         yaml.dump(results, f, default_flow_style=False)
     print("===========================")
-
-    # Create an Optuna study and optimize the objective function
-    study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=50)
-
-    # Log the best hyperparameters
-    logger.info(f"Best hyperparameters: {study.best_params}")
-
-    # Save the best hyperparameters to a YAML file
-    with open(param['result_directory'] + '/best_hyperparameters.yaml', 'w') as f:
-        yaml.dump(study.best_params, f)
 
 if __name__ == "__main__":
     main()

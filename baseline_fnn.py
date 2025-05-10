@@ -892,6 +892,7 @@ def main():
         os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
         train_data = load_pickle(train_pickle)
         train_labels = load_pickle(train_labels_pickle)
+        train_labels_expanded = train_labels  # Ensure train_labels_expanded is assigned
         val_data = load_pickle(val_pickle)
         val_labels = load_pickle(val_labels_pickle)
         test_files = load_pickle(test_files_pickle)

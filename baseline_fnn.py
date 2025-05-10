@@ -25,6 +25,7 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 import seaborn as sns
 import optuna
+from functools import partial
 
 from tqdm import tqdm
 from sklearn import metrics
@@ -446,7 +447,7 @@ def dataset_generator(target_dir, param=None):
             db = parts[1]
             machine_type = parts[2]
             machine_id_with_file = parts[3]
-            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
+            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id
             
             key = (db, machine_type, machine_id)
             
@@ -1034,7 +1035,8 @@ def main():
             return objective(trial, param, train_data, train_labels_expanded, val_data, val_labels_expanded)
 
         study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=param["optuna"].get("trials", 50))
+        study.optimize(partial(objective, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded),
+                       n_trials=param["optuna"].get("trials", 50))
 
         # Log the best hyperparameters
         logger.info(f"Best hyperparameters: {study.best_params}")

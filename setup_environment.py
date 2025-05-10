@@ -1,146 +1,156 @@
-#!/usr/bin/env python3
-import subprocess
-import sys
-import os
-import platform
-import time
-import argparse
+#!/bin/bash
 
-def check_python_version():
-    """Check if Python version is sufficient (3.7+)"""
-    major, minor = sys.version_info[:2]
-    if major < 3 or (major == 3 and minor < 7):
-        print(f"❌ Python {major}.{minor} detected. Python 3.7 or higher is required.")
-        return False
-    print(f"✓ Python {major}.{minor} detected")
-    return True
+# Colors for better readability
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
 
-def ensure_pip():
-    """Ensure pip is installed"""
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "--version"], 
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print("✓ pip is already installed")
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠ pip not found. Attempting to install pip...")
-        
-        try:
-            # For Python 3.7+
-            subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"], 
-                                  stdout=subprocess.PIPE)
-            print("✓ pip has been installed successfully")
-            return True
-        except subprocess.CalledProcessError:
-            print("❌ Failed to install pip using ensurepip")
-            
-            try:
-                # Alternative method: get-pip.py
-                print("⚠ Trying alternative pip installation method...")
-                import urllib.request
-                
-                print("Downloading get-pip.py...")
-                urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", "get-pip.py")
-                
-                print("Installing pip...")
-                subprocess.check_call([sys.executable, "get-pip.py"], 
-                                     stdout=subprocess.PIPE)
-                
-                # Clean up
-                if os.path.exists("get-pip.py"):
-                    os.remove("get-pip.py")
-                    
-                print("✓ pip has been installed successfully")
-                return True
-            except Exception as e:
-                print(f"❌ Failed to install pip: {e}")
-                print("\nPlease install pip manually:")
-                print("1. Download get-pip.py from https://bootstrap.pypa.io/get-pip.py")
-                print("2. Run: python get-pip.py")
-                return False
+echo "=================================================="
+echo "      Python Environment Setup Script"
+echo "=================================================="
 
-def check_requirements_file(requirements_file):
-    """Check if specified requirements file exists"""
-    if not os.path.exists(requirements_file):
-        print(f"❌ Requirements file '{requirements_file}' not found.")
-        print(f"Please make sure '{requirements_file}' exists in the current directory.")
-        return False
-    else:
-        print(f"✓ Found requirements file: {requirements_file}")
-    return True
+# Check if a requirements file was provided
+if [ $# -eq 0 ]; then
+    echo -e "${YELLOW}No requirements file specified. Using default 'requirements.txt'${NC}"
+    REQUIREMENTS_FILE="requirements.txt"
+else
+    REQUIREMENTS_FILE="$1"
+fi
 
-def install_requirements(requirements_file):
-    """Install packages from specified requirements file"""
-    print(f"\nInstalling packages from {requirements_file}...")
-    start_time = time.time()
-    
-    try:
-        # Install all requirements with pip
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", requirements_file])
-        
-        # Try to check for GPU if TensorFlow was installed
-        try:
-            print("\nChecking for GPU support...")
-            subprocess.check_call([
-                sys.executable, 
-                "-c", 
-                "import tensorflow as tf; print('Available GPUs:', tf.config.list_physical_devices('GPU'))"
-            ], stderr=subprocess.PIPE)
-        except (subprocess.CalledProcessError, subprocess.SubprocessError):
-            print("⚠ Could not verify TensorFlow GPU support (TensorFlow may not be installed)")
-        
-        elapsed_time = time.time() - start_time
-        print(f"\n✓ Installation completed in {elapsed_time:.2f} seconds")
-        print("\nYou can now run your project!")
-        return True
-        
-    except subprocess.CalledProcessError as e:
-        print(f"\n❌ Installation failed: {e}")
-        print("\nTroubleshooting tips:")
-        print("1. Make sure you have sufficient permissions")
-        print("2. Check your internet connection")
-        print("3. Try installing problematic packages individually")
-        print("4. For TensorFlow GPU issues, verify CUDA and cuDNN are properly installed")
-        return False
+echo "Requirements file: $REQUIREMENTS_FILE"
 
-def main():
-    """Main setup process"""
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Install Python dependencies from a requirements file')
-    parser.add_argument('-r', '--requirements', 
-                        default='requirements.txt', 
-                        help='Path to requirements file (default: requirements.txt)')
-    args = parser.parse_args()
-    
-    requirements_file = args.requirements
-    
-    print("=" * 60)
-    print("Python Environment Setup")
-    print(f"System: {platform.system()} {platform.release()}")
-    print(f"Requirements file: {requirements_file}")
-    print("=" * 60)
-    
-    # Step 1: Check Python version
-    if not check_python_version():
-        print("\nPlease install Python 3.7 or higher and try again.")
-        print("Download from: https://www.python.org/downloads/")
-        return False
-    
-    # Step 2: Make sure pip is available
-    if not ensure_pip():
-        return False
-    
-    # Step 3: Check requirements file exists
-    if not check_requirements_file(requirements_file):
-        return False
-    
-    # Step 4: Install requirements
-    if not install_requirements(requirements_file):
-        return False
-    
-    print("\n✓ Setup completed successfully!")
-    return True
+# Check if the requirements file exists
+if [ ! -f "$REQUIREMENTS_FILE" ]; then
+    echo -e "${RED}Error: Requirements file '$REQUIREMENTS_FILE' not found!${NC}"
+    echo "Please make sure the file exists in the current directory."
+    exit 1
+fi
 
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+# Check if Python is installed
+if command -v python3 &>/dev/null; then
+    PYTHON_CMD="python3"
+    echo -e "${GREEN}✓ Python 3 found${NC}"
+elif command -v python &>/dev/null; then
+    PYTHON_CMD="python"
+    echo -e "${GREEN}✓ Python found${NC}"
+else
+    echo -e "${RED}❌ Python not found!${NC}"
+    echo -e "${YELLOW}Installing Python...${NC}"
+    
+    # Detect the operating system
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$NAME
+    elif type lsb_release >/dev/null 2>&1; then
+        OS=$(lsb_release -si)
+    elif [ -f /etc/lsb-release ]; then
+        . /etc/lsb-release
+        OS=$DISTRIB_ID
+    else
+        OS=$(uname -s)
+    fi
+    
+    # Install Python based on the operating system
+    case "$OS" in
+        *Ubuntu*|*Debian*)
+            echo "Detected Ubuntu/Debian-based system"
+            sudo apt-get update
+            sudo apt-get install -y python3 python3-pip
+            PYTHON_CMD="python3"
+            ;;
+        *CentOS*|*RHEL*|*Fedora*)
+            echo "Detected CentOS/RHEL/Fedora-based system"
+            sudo yum install -y python3 python3-pip
+            PYTHON_CMD="python3"
+            ;;
+        *Alpine*)
+            echo "Detected Alpine Linux"
+            apk add --update python3 py3-pip
+            PYTHON_CMD="python3"
+            ;;
+        *)
+            echo -e "${RED}Unsupported operating system: $OS${NC}"
+            echo "Please install Python manually and run this script again."
+            echo "Installation instructions: https://www.python.org/downloads/"
+            exit 1
+            ;;
+    esac
+    
+    # Verify Python installation
+    if command -v $PYTHON_CMD &>/dev/null; then
+        echo -e "${GREEN}✓ Python successfully installed${NC}"
+    else
+        echo -e "${RED}❌ Failed to install Python automatically${NC}"
+        echo "Please install Python manually and run this script again."
+        echo "Installation instructions: https://www.python.org/downloads/"
+        exit 1
+    fi
+fi
+
+# Check Python version
+PYTHON_VERSION=$($PYTHON_CMD -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+PYTHON_MAJOR_VERSION=$($PYTHON_CMD -c "import sys; print(sys.version_info.major)")
+PYTHON_MINOR_VERSION=$($PYTHON_CMD -c "import sys; print(sys.version_info.minor)")
+
+echo "Python version: $PYTHON_VERSION"
+
+if [ "$PYTHON_MAJOR_VERSION" -lt 3 ] || ( [ "$PYTHON_MAJOR_VERSION" -eq 3 ] && [ "$PYTHON_MINOR_VERSION" -lt 7 ] ); then
+    echo -e "${YELLOW}⚠ Warning: Python $PYTHON_VERSION detected. Python 3.7+ is recommended.${NC}"
+else
+    echo -e "${GREEN}✓ Python version is sufficient${NC}"
+fi
+
+# Check if pip is installed
+if $PYTHON_CMD -m pip --version &>/dev/null; then
+    echo -e "${GREEN}✓ pip is installed${NC}"
+else
+    echo -e "${YELLOW}Installing pip...${NC}"
+    
+    # Try to install pip
+    $PYTHON_CMD -m ensurepip --upgrade || {
+        # If ensurepip fails, download get-pip.py
+        echo "Downloading get-pip.py..."
+        curl -s https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+        $PYTHON_CMD get-pip.py
+        rm -f get-pip.py
+    }
+    
+    # Verify pip installation
+    if $PYTHON_CMD -m pip --version &>/dev/null; then
+        echo -e "${GREEN}✓ pip successfully installed${NC}"
+    else
+        echo -e "${RED}❌ Failed to install pip${NC}"
+        echo "Please install pip manually and run this script again."
+        exit 1
+    fi
+fi
+
+# Upgrade pip
+echo "Upgrading pip..."
+$PYTHON_CMD -m pip install --upgrade pip
+
+# Install requirements
+echo -e "\nInstalling packages from $REQUIREMENTS_FILE..."
+if $PYTHON_CMD -m pip install -r "$REQUIREMENTS_FILE"; then
+    echo -e "${GREEN}✓ Successfully installed all required packages!${NC}"
+else
+    echo -e "${RED}❌ Failed to install some packages${NC}"
+    echo "Try installing problematic packages individually."
+fi
+
+# Check if TensorFlow was installed and has GPU support
+if $PYTHON_CMD -c "import tensorflow" &>/dev/null; then
+    echo -e "\nChecking for GPU support in TensorFlow..."
+    GPU_INFO=$($PYTHON_CMD -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))" 2>/dev/null)
+    
+    if [[ $GPU_INFO == *"PhysicalDevice"* ]]; then
+        echo -e "${GREEN}✓ TensorFlow GPU support is available!${NC}"
+    else
+        echo -e "${YELLOW}⚠ TensorFlow is installed but GPU support is not available${NC}"
+        echo "For deep learning with large datasets, GPU acceleration is recommended."
+    fi
+fi
+
+echo -e "\n${GREEN}Setup completed!${NC}"
+echo "You can now run your project."

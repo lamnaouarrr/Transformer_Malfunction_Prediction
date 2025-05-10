@@ -970,102 +970,65 @@ def main():
     )
     model.summary()
 
-    if os.path.exists(model_file):
-        model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
-        logger.info("Model loaded from file, no training performed")
+    # Always train the model, ignoring any pre-existing model file
+    compile_params = param["fit"]["compile"].copy()
+    loss_type = param.get("model", {}).get("loss", "mse")
+
+    # Handle learning_rate separately for the optimizer
+    learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
+
+    if loss_type == "binary_crossentropy":
+        compile_params["loss"] = binary_cross_entropy_loss
     else:
-        compile_params = param["fit"]["compile"].copy()
-        loss_type = param.get("model", {}).get("loss", "mse")
+        # Default to standard binary_crossentropy from Keras
+        compile_params["loss"] = "binary_crossentropy"
 
-        # Handle learning_rate separately for the optimizer
-        learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
+    if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
+        compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-        if loss_type == "binary_crossentropy":
-            compile_params["loss"] = binary_cross_entropy_loss
-        else:
-            # Default to standard binary_crossentropy from Keras
-            compile_params["loss"] = "binary_crossentropy"
+    # Add weighted_metrics to fix the warning
+    if "weighted_metrics" not in compile_params:
+        compile_params["weighted_metrics"] = []
 
-        if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    compile_params["metrics"] = ['accuracy']
+    model.compile(**compile_params)
 
-        # Add weighted_metrics to fix the warning
-        if "weighted_metrics" not in compile_params:
-            compile_params["weighted_metrics"] = []
+    callbacks = []
+    early_stopping_config = param.get("fit", {}).get("early_stopping", {})
+    if early_stopping_config.get("enabled", False):
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            monitor=early_stopping_config.get("monitor", "val_loss"),
+            patience=early_stopping_config.get("patience", 10),
+            min_delta=early_stopping_config.get("min_delta", 0.001),
+            restore_best_weights=early_stopping_config.get("restore_best_weights", True)
+        ))
 
-        compile_params["metrics"] = ['accuracy']
-        model.compile(**compile_params)
-        
-        callbacks = []
-        early_stopping_config = param.get("fit", {}).get("early_stopping", {})
-        if early_stopping_config.get("enabled", False):
-            callbacks.append(tf.keras.callbacks.EarlyStopping(
-                monitor=early_stopping_config.get("monitor", "val_loss"),
-                patience=early_stopping_config.get("patience", 10),
-                min_delta=early_stopping_config.get("min_delta", 0.001),
-                restore_best_weights=early_stopping_config.get("restore_best_weights", True)
-            ))
-        
-        sample_weights = np.ones(len(train_data))
+    sample_weights = np.ones(len(train_data))
 
-        # Apply uniform sample weights - no machine-specific weighting
-        if param.get("fit", {}).get("apply_sample_weights", False):
-            # Apply a uniform weight factor if needed
-            weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
-            sample_weights *= weight_factor
+    # Apply uniform sample weights - no machine-specific weighting
+    if param.get("fit", {}).get("apply_sample_weights", False):
+        # Apply a uniform weight factor if needed
+        weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
+        sample_weights *= weight_factor
 
-        
-        print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
-        history = model.fit(
-            train_data,
-            train_labels_expanded,
-            epochs=param["fit"]["epochs"],
-            batch_size=param["fit"]["batch_size"],
-            shuffle=param["fit"]["shuffle"],
-            validation_data=(val_data, val_labels_expanded),
-            verbose=param["fit"]["verbose"],
-            callbacks=callbacks,
-            sample_weight=sample_weights
-        )
+    print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
+    history = model.fit(
+        train_data,
+        train_labels_expanded,
+        epochs=param["fit"]["epochs"],
+        batch_size=param["fit"]["batch_size"],
+        shuffle=param["fit"]["shuffle"],
+        validation_data=(val_data, val_labels_expanded),
+        verbose=param["fit"]["verbose"],
+        callbacks=callbacks,
+        sample_weight=sample_weights
+    )
 
-        model.save(model_file)
-        visualizer.loss_plot(history)
-        visualizer.save_figure(history_img)
-    
+    model.save(model_file)
+    visualizer.loss_plot(history)
+    visualizer.save_figure(history_img)
 
-    if not os.path.exists(model_file):
-        # Capture the final training and validation accuracies
-        train_accuracy = history.history['accuracy'][-1]
-        val_accuracy = history.history['val_accuracy'][-1]
-        
-        # Store these in the results dictionary
-        evaluation_result["TrainAccuracy"] = float(train_accuracy)
-        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
-        
-        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
-        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
-    else:
-        # If model was loaded from file and not trained, we need to evaluate on train and validation data
-        train_pred = model.predict(train_data, verbose=0)
-        train_pred_binary = (train_pred.flatten() >= 0.5).astype(int)
-        train_accuracy = metrics.accuracy_score(train_labels_expanded, train_pred_binary)
-        
-        val_pred = model.predict(val_data, verbose=0)
-        val_pred_binary = (val_pred.flatten() >= 0.5).astype(int)
-        val_accuracy = metrics.accuracy_score(val_labels_expanded, val_pred_binary)
-
-        # Calculate model training time
-        model_end_time = time.time()
-        model_training_time = model_end_time - model_start_time
-        logger.info(f"Model training time: {model_training_time:.2f} seconds")
-        
-        # Store these in the results dictionary
-        evaluation_result["TrainAccuracy"] = float(train_accuracy)
-        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
-        
-        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
-        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
-
+    # Proceed with evaluation...
 
     print("============== EVALUATION ==============")
     y_pred = []

@@ -725,7 +725,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 # Optuna integration
 ########################################################################
-def objective(trial, param):
+def objective(trial, param, x_train, y_train, x_val, y_val):
     """
     Define the objective function for Optuna optimization.
     """
@@ -736,7 +736,7 @@ def objective(trial, param):
     width = trial.suggest_int('width', 64, 256)
 
     # Build the model
-    inputs = Input(shape=(param['model']['architecture']['width'],))
+    inputs = Input(shape=(x_train.shape[1],))
     x = inputs
     for _ in range(depth):
         x = Dense(width, activation='relu')(x)
@@ -1030,8 +1030,11 @@ def main():
 
     print("============== OPTUNA OPTIMIZATION ==============")
     if param.get("optuna", {}).get("enabled", False):
+        def objective(trial):
+            return objective(trial, param, train_data, train_labels_expanded, val_data, val_labels_expanded)
+
         study = optuna.create_study(direction='minimize')
-        study.optimize(lambda trial: objective(trial, param), n_trials=param["optuna"].get("trials", 50))
+        study.optimize(objective, n_trials=param["optuna"].get("trials", 50))
 
         # Log the best hyperparameters
         logger.info(f"Best hyperparameters: {study.best_params}")

@@ -422,7 +422,7 @@ def file_to_spectrogram(file_name,
 
 
 
-def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=32):
+def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=16):
     """
     Process a list of files into spectrograms with optional labels - memory optimized version with caching
     """
@@ -519,14 +519,9 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                     if spec.shape[0] != max_freq or spec.shape[1] != max_time:
                         try:
                             from skimage.transform import resize
-                            spec = resize(spec, (max_freq, max_time), anti_aliasing=True, mode='reflect')
-                        except Exception as e:
-                            # Fall back to simple padding/cropping
-                            temp_spec = np.zeros((max_freq, max_time))
-                            freq_dim = min(spec.shape[0], max_freq)
-                            time_dim = min(spec.shape[1], max_time)
-                            temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
-                            spec = temp_spec
+                            spec = resize(spec, (max_freq, max_time), mode='reflect', anti_aliasing=True)
+                        except ImportError:
+                            logger.error("scikit-image is required for resizing spectrograms")
                     
                     # Store in output array
                     spectrograms[batch_start + i] = spec
@@ -534,6 +529,13 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                     # Clear memory
                     del spec
                     
+            except tf.errors.ResourceExhaustedError:
+                logger.warning("CUDA OOM detected. Reducing batch size dynamically.")
+                batch_size = max(1, batch_size // 2)
+                gc.collect()
+                tf.keras.backend.clear_session()
+                return list_to_spectrograms(file_list, labels, msg, augment, param, batch_size)
+
             except Exception as e:
                 logger.error(f"Error processing file {file_path}: {e}")
                 # Fill with zeros for failed files
@@ -2200,6 +2202,11 @@ def main():
             study.optimize(objective, n_trials=opt_cfg.get('n_trials',20), timeout=opt_cfg.get('timeout',None))
             best = study.best_params
             logger.info(f"Optuna found best parameters: {best}")
+            # Save best parameters to YAML file
+            result_file = config.get('result_file', 'result_MAST.yaml')
+            with open(result_file, 'w') as yaml_file:
+                yaml.dump(best, yaml_file, default_flow_style=False)
+            logger.info(f"Best hyperparameters saved to {result_file}")
             # Apply best hyperparameters
             training_params['learning_rate'] = best['learning_rate']
             transformer_params['num_encoder_layers'] = best['num_encoder_layers']

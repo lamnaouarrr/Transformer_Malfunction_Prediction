@@ -45,7 +45,7 @@ fit:
     loss: "focal_loss"  # Changed from "binary_crossentropy" for better handling of class imbalance
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
     weighted_metrics: ["accuracy"]
-  epochs: 50  # Increased from 30
+  epochs: 1  # Increased from 30 debug 50
   batch_size: 16  # Reduced from 32 to fit within GPU memory
   shuffle: True
   validation_split: 0.1

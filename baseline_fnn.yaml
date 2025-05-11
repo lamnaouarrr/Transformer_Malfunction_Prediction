@@ -83,9 +83,9 @@ logging:
 # Optuna hyperparameter optimization parameters
 optuna:
   enabled: true
-  trials: 1
+  trials: 50
   metric: "val_accuracy"  # Specify the metric to optimize
-  trial_epochs: 1  # Number of epochs per trial for quick evaluation
+  trial_epochs: 5  # Number of epochs per trial for quick evaluation
   search_space:
     learning_rate:
       type: "loguniform"

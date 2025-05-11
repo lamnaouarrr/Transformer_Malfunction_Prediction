@@ -2186,7 +2186,7 @@ def main():
                 )
 
                 # Train the model with early stopping
-                finetune_model.fit(
+                history = finetune_model.fit(
                     train_ds,
                     validation_data=val_ds,
                     epochs=opt_cfg['trial_epochs'],  # Use trial_epochs for quick evaluation

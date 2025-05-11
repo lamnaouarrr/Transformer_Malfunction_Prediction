@@ -53,7 +53,7 @@ fit:
   early_stopping:
     enabled: true
     monitor: "val_loss"
-    patience: 10  # Changed from 15
+    patience: 10
     min_delta: 0.001
     restore_best_weights: true
   weight_factor: 2.0  # Increased from 1.5 for non-problematic IDs
@@ -194,19 +194,19 @@ optimization:
   optuna:
     enable: true         # Enable Optuna hyperparameter optimization
     direction: "maximize"  # Target metric direction (maximize validation accuracy)
-    n_trials: 1         # Number of hyperparameter trials debug 50
+    n_trials: 50         # Number of hyperparameter trials debug 50
     timeout: null        # Timeout in seconds for the study (null = no timeout)
     metric: "val_accuracy"  # Metric to optimize
     sampler: "TPESampler"  # Optuna sampler to use
-    trial_epochs: 1      # Number of epochs per trial for quick evaluation debug 5
+    trial_epochs: 15      # Number of epochs per trial for quick evaluation debug 5
     parameters:
       learning_rate:
-        low: 1e-6
-        high: 1e-3
+        low: 1e-8
+        high: 1e-2
         log: true
       num_encoder_layers:
         low: 2
-        high: 6
+        high: 8
         step: 1
       dropout_rate:
         low: 0.0
@@ -214,3 +214,7 @@ optimization:
       mlp_dropout:
         low: 0.0
         high: 0.5
+    early_stopping:
+      enabled: true
+      patience: 5
+      threshold: 0.001

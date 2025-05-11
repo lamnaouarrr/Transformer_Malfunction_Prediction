@@ -54,94 +54,55 @@ from tensorflow.keras import layers
 __versions__ = "3.0.0"
 ########################################################################
 
-def clear_gpu_memory():
-    """Clear GPU memory to prevent OOM errors."""
-    tf.keras.backend.clear_session()
-    gc.collect()
-    try:
-        cuda.select_device(0)
-        cuda.close()
-    except Exception as e:
-        logger.warning(f"Failed to clear GPU memory: {e}")
+# Load configuration from YAML
+with open("baseline_MAST.yaml", "r") as yaml_file:
+    config = yaml.safe_load(yaml_file)
 
-# Clear GPU memory at the start of the script
-clear_gpu_memory()
+# Clear GPU memory if enabled in config
+if config.get("clear_gpu_memory", False):
+    def clear_gpu_memory():
+        """Clear GPU memory to prevent OOM errors."""
+        tf.keras.backend.clear_session()
+        gc.collect()
+        try:
+            cuda.select_device(0)
+            cuda.close()
+        except Exception as e:
+            logger.warning(f"Failed to clear GPU memory: {e}")
 
-def binary_cross_entropy_loss(y_true, y_pred):
-    """
-    Binary cross-entropy loss for autoencoder with improved memory efficiency
-    """
-    # Use TF's built-in binary_crossentropy for better memory efficiency
-    return tf.keras.losses.binary_crossentropy(y_true, y_pred)
+    clear_gpu_memory()
 
-def focal_loss(gamma=2.0, alpha=0.25):
-    """
-    Focal Loss implementation for binary classification with imbalanced datasets.
-    
-    Args:
-        gamma: Focusing parameter. Higher values increase focus on hard examples.
-        alpha: Weighting factor for the positive class.
-    
-    Returns:
-        A loss function that computes focal loss.
-    """
+# Focal loss function
+def focal_loss():
+    gamma = config["focal_loss"]["gamma"]
+    alpha = config["focal_loss"]["alpha"]
+
     def loss_function(y_true, y_pred):
-        # Cast true labels and constants to prediction dtype
         dtype = y_pred.dtype
         y_true = tf.cast(y_true, dtype)
         eps = tf.cast(tf.keras.backend.epsilon(), dtype)
         gamma_c = tf.cast(gamma, dtype)
         alpha_c = tf.cast(alpha, dtype)
-        # Clip predictions for numerical stability
         y_pred = tf.clip_by_value(y_pred, eps, 1 - eps)
-        # Calculate cross entropy
         cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
-        # Calculate focal weight
         p_t = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), y_pred, 1 - y_pred)
         focal_weight = tf.pow(1 - p_t, gamma_c)
-        # Apply alpha weighting
         alpha_weight = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), alpha_c, 1 - alpha_c)
-        # Combine for final loss
         loss = alpha_weight * focal_weight * cross_entropy
         return tf.reduce_mean(loss)
-    
+
     return loss_function
 
-
-
-def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
-    """
-    Create positional encodings for the transformer model
-    
-    Args:
-        seq_len: sequence length (int)
-        d_model: depth of the model (int)
-        encoding_type: type of positional encoding
-        
-    Returns:
-        Positional encoding tensor with shape (1, seq_len, d_model)
-    """
-    # Create position vector
+# Positional encoding function
+def positional_encoding(seq_len, d_model):
+    encoding_type = config["positional_encoding"]["encoding_type"]
     positions = np.arange(seq_len)[:, np.newaxis]
-    
-    # Create dimension vector
     div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
-    
-    # Create encoding
     pe = np.zeros((seq_len, d_model))
-    
-    # Apply sin to even indices
     pe[:, 0::2] = np.sin(positions * div_term)
-    
-    # Apply cos to odd indices
     pe[:, 1::2] = np.cos(positions * div_term)
-    
-    # Add batch dimension and convert to tensor
     pe = np.expand_dims(pe, axis=0)
-    
     return tf.cast(pe, dtype=tf.float32)
-
-
 
 ########################################################################
 # setup STD I/O

@@ -1,3 +1,6 @@
+# General parameters
+version: "3.0.0"
+
 # Feature extraction parameters
 feature:
   n_mels: 128  # Increased from 64 for better frequency resolution
@@ -100,6 +103,9 @@ training:
     clear_memory_frequency: 50
     prefetch_buffer_size: 4
 
+# GPU memory clearing
+clear_gpu_memory: true
+
 # Enhanced transformer model settings
 model:
   architecture:
@@ -123,6 +129,15 @@ model:
     alpha: 0.5  # Increased from 0.25 - balances class importance
     use_safe_implementation: true
   l2_regularization: 0.0001  # Increased from 0.00001
+
+# Focal loss parameters
+focal_loss:
+  gamma: 2.0
+  alpha: 0.25
+
+# Positional encoding parameters
+positional_encoding:
+  encoding_type: "sinusoidal"
 
 # MAST specific configuration
 mast:
@@ -186,8 +201,9 @@ result_file: "result_MAST.yaml"
 
 # Logging parameters
 logging:
-  level: "DEBUG"
-  file: "./logs/log_MAST/baseline_MAST.log"
+  log_directory: "./logs/log_MAST"
+  log_file: "baseline_MAST.log"
+  log_level: "DEBUG"
 
 # Hyperparameter Optimization
 optimization:

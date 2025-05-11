@@ -25,8 +25,8 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 import seaborn as sns
 import optuna
-from functools import partial
 
+from functools import partial
 from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
@@ -726,7 +726,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 # Optuna integration
 ########################################################################
-def objective(trial, *, param, x_train, y_train, x_val, y_val):
+def objective(trial, param, x_train, y_train, x_val, y_val):
     """
     Define the objective function for Optuna optimization.
     """
@@ -956,7 +956,27 @@ def main():
     abnormal_count = sum(1 for label in train_labels_expanded if label == 1)
     print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
 
-    
+    print("============== OPTUNA OPTIMIZATION ==============")
+    if param.get("optuna", {}).get("enabled", False):
+        def objective(trial):
+            return objective(trial, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded)
+
+        study = optuna.create_study(direction='minimize')
+        study.optimize(partial(objective, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded),
+                       n_trials=param["optuna"].get("trials", 50))
+
+        # Log the best hyperparameters
+        logger.info(f"Best hyperparameters: {study.best_params}")
+
+        # Save the best hyperparameters to a YAML file
+        best_hyperparameters_file = f"{param['result_directory']}/best_hyperparameters.yaml"
+        with open(best_hyperparameters_file, 'w') as f:
+            yaml.dump(study.best_params, f)
+
+        print(f"Optuna optimization completed. Best hyperparameters saved to {best_hyperparameters_file}")
+    else:
+        print("Optuna optimization is disabled in the configuration.")
+
     print("============== MODEL TRAINING ==============")
     # Track model training time specifically
     model_start_time = time.time()
@@ -1028,27 +1048,6 @@ def main():
     model.save(model_file)
     visualizer.loss_plot(history)
     visualizer.save_figure(history_img)
-
-    print("============== OPTUNA OPTIMIZATION ==============")
-    if param.get("optuna", {}).get("enabled", False):
-        def objective(trial):
-            return objective(trial, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded)
-
-        study = optuna.create_study(direction='minimize')
-        study.optimize(partial(objective, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded),
-                       n_trials=param["optuna"].get("trials", 50))
-
-        # Log the best hyperparameters
-        logger.info(f"Best hyperparameters: {study.best_params}")
-
-        # Save the best hyperparameters to a YAML file
-        best_hyperparameters_file = f"{param['result_directory']}/best_hyperparameters.yaml"
-        with open(best_hyperparameters_file, 'w') as f:
-            yaml.dump(study.best_params, f)
-
-        print(f"Optuna optimization completed. Best hyperparameters saved to {best_hyperparameters_file}")
-    else:
-        print("Optuna optimization is disabled in the configuration.")
 
     print("============== EVALUATION ==============")
     y_pred = []

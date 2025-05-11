@@ -198,7 +198,7 @@ optimization:
     timeout: null        # Timeout in seconds for the study (null = no timeout)
     metric: "val_accuracy"  # Metric to optimize
     sampler: "TPESampler"  # Optuna sampler to use
-    trial_epochs: 5      # Number of epochs per trial for quick evaluation
+    trial_epochs: 1      # Number of epochs per trial for quick evaluation
     parameters:
       learning_rate:
         low: 1e-6

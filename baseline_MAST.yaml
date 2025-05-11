@@ -31,7 +31,7 @@ feature:
       probability: 0.6  # Increased from 0.5
       min_factor: 0.005  # Increased from 0.001
       max_factor: 0.04  # Increased from 0.02
-  preprocessing_batch_size: 64
+  preprocessing_batch_size: 32  # Reduced from 64 to lower memory usage
   dataset_chunking:
     enabled: true
     chunk_size: 5000
@@ -46,7 +46,7 @@ fit:
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
     weighted_metrics: ["accuracy"]
   epochs: 50  # Increased from 30
-  batch_size: 32  # Increased from 16 for better gradient estimation
+  batch_size: 16  # Reduced from 32 to fit within GPU memory
   shuffle: True
   validation_split: 0.1
   verbose: 1

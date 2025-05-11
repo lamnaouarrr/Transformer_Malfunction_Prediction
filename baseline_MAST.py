@@ -1939,7 +1939,7 @@ def main():
     if gpus:
         tf.config.experimental.set_virtual_device_configuration(
             gpus[0],
-            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=20000)]
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=30000)]  # Adjusted to fit within 32GB GPU memory
         )
     # Print current VRAM usage to verify GPU memory setup
     used_mem, total_mem, usage_pct = monitor_gpu_usage()

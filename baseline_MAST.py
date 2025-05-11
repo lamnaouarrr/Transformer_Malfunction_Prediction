@@ -29,6 +29,7 @@ import gc
 import hashlib
 import optuna
 import subprocess
+from numba import cuda
 
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,19 @@ from tensorflow.keras import layers
 ########################################################################
 __versions__ = "3.0.0"
 ########################################################################
+
+def clear_gpu_memory():
+    """Clear GPU memory to prevent OOM errors."""
+    tf.keras.backend.clear_session()
+    gc.collect()
+    try:
+        cuda.select_device(0)
+        cuda.close()
+    except Exception as e:
+        logger.warning(f"Failed to clear GPU memory: {e}")
+
+# Clear GPU memory at the start of the script
+clear_gpu_memory()
 
 def binary_cross_entropy_loss(y_true, y_pred):
     """

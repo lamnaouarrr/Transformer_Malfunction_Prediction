@@ -85,7 +85,7 @@ optuna:
   enabled: true
   trials: 1
   metric: "val_accuracy"  # Specify the metric to optimize
-  trial_epochs: 1  # Number of epochs per trial for quick evaluation
+  trial_epochs: 1  # Number of epochs per trial for quick evaluation debug
   search_space:
     learning_rate:
       type: "loguniform"

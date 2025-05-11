@@ -434,6 +434,10 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     # Check if caching is enabled in config
     use_cache = param.get("cache", {}).get("enabled", True) if param else True
     
+    # Add cache metrics tracking
+    cache_hits = 0
+    cache_misses = 0
+
     # First pass: determine dimensions and count valid files
     valid_files = []
     valid_labels = [] if labels is not None else None
@@ -443,6 +447,20 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
         try:
+            # Use cached version for dimension check if enabled and not augmenting
+            if use_cache and not augment:
+                spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+                if spec is not None:
+                    cache_hits += 1
+                    valid_files.append(file_path)
+                    if labels is not None:
+                        valid_labels.append(labels[idx])
+                    max_freq = max(max_freq, spec.shape[0])
+                    max_time = max(max_time, spec.shape[1])
+                    continue
+                else:
+                    cache_misses += 1
+                
             # Use cached version for dimension check if enabled and not augmenting
             if use_cache and not augment:
                 spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
@@ -462,6 +480,8 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         except Exception as e:
             logger.error(f"Error checking dimensions for {file_path}: {e}")
     
+    logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {cache_hits / (cache_hits + cache_misses) * 100:.1f}% hit rate")
+
     # Use target shape from parameters if available
     target_shape = param.get("feature", {}).get("target_shape", None)
     if target_shape:
@@ -478,10 +498,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     spectrograms = np.zeros((total_valid, max_freq, max_time), dtype=np.float32)
     processed_labels = np.array(valid_labels) if valid_labels else None
     
-    # Add cache metrics tracking
-    cache_hits = 0
-    cache_misses = 0
-    
     for batch_start in tqdm(range(0, total_valid, batch_size), desc=f"{msg} (processing)"):
         batch_end = min(batch_start + batch_size, total_valid)
         batch_files = valid_files[batch_start:batch_end]
@@ -489,19 +505,10 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         for i, file_path in enumerate(batch_files):
             try:
                 # Use cached version if enabled and not augmenting
-                cache_start_time = time.time()
                 if use_cache and not augment:
                     spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
-                    # Check if the file was pulled from cache
-                    cache_file = os.path.join(param.get("cache", {}).get("directory", "./cache/spectrograms"), 
-                                            hashlib.md5(f"{file_path}_{n_mels}_{n_fft}_{hop_length}_{power}".encode()).hexdigest() + ".npy")
-                    if os.path.exists(cache_file) and os.path.getmtime(cache_file) < cache_start_time:
-                        cache_hits += 1
-                    else:
-                        cache_misses += 1
                 else:
                     spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
-                    cache_misses += 1
                 
                 if spec is not None:
                     # Handle 3D input
@@ -533,12 +540,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                 spectrograms[batch_start + i] = np.zeros((max_freq, max_time))
         
         gc.collect()
-
-    # Log cache performance
-    if use_cache:
-        total_files = cache_hits + cache_misses
-        hit_rate = (cache_hits / total_files) * 100 if total_files > 0 else 0
-        logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {hit_rate:.1f}% hit rate")
 
     spectrograms = spectrograms.astype(np.float32)
     

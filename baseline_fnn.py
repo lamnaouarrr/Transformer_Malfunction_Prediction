@@ -958,12 +958,11 @@ def main():
 
     print("============== OPTUNA OPTIMIZATION ==============")
     if param.get("optuna", {}).get("enabled", False):
-        def objective(trial):
+        def optuna_objective(trial):
             return objective(trial, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded)
 
         study = optuna.create_study(direction='minimize')
-        study.optimize(partial(objective, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded),
-                       n_trials=param["optuna"].get("trials", 50))
+        study.optimize(optuna_objective, n_trials=param["optuna"].get("trials", 50))
 
         # Log the best hyperparameters
         logger.info(f"Best hyperparameters: {study.best_params}")

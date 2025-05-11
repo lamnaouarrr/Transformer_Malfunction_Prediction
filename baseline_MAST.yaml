@@ -194,7 +194,7 @@ optimization:
   optuna:
     enable: true         # Enable Optuna hyperparameter optimization
     direction: "maximize"  # Target metric direction (maximize validation accuracy)
-    n_trials: 20         # Number of hyperparameter trials
+    n_trials: 1         # Number of hyperparameter trials
     timeout: null        # Timeout in seconds for the study (null = no timeout)
     metric: "val_accuracy"  # Metric to optimize
     sampler: "TPESampler"  # Optuna sampler to use

@@ -2303,7 +2303,7 @@ def main():
         
         # Save the final model
         model = finetune_model
-        model.save(model_path)  # export full MAST model in .keras format
+        model.save(model_path, save_format='tf')  # Save the model in TensorFlow SavedModel format
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

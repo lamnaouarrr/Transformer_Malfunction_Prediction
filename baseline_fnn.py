@@ -726,7 +726,7 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 ########################################################################
 # Optuna integration
 ########################################################################
-def objective(trial, param, x_train, y_train, x_val, y_val):
+def objective(trial, *, param, x_train, y_train, x_val, y_val):
     """
     Define the objective function for Optuna optimization.
     """
@@ -1032,7 +1032,7 @@ def main():
     print("============== OPTUNA OPTIMIZATION ==============")
     if param.get("optuna", {}).get("enabled", False):
         def objective(trial):
-            return objective(trial, param, train_data, train_labels_expanded, val_data, val_labels_expanded)
+            return objective(trial, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded)
 
         study = optuna.create_study(direction='minimize')
         study.optimize(partial(objective, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded),

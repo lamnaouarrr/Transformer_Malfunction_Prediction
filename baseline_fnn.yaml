@@ -83,7 +83,7 @@ logging:
 # Optuna hyperparameter optimization parameters
 optuna:
   enabled: true
-  trials: 50
+  trials: 1
   search_space:
     learning_rate:
       type: "loguniform"

@@ -422,7 +422,7 @@ def file_to_spectrogram(file_name,
 
 
 
-def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
+def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=32):
     """
     Process a list of files into spectrograms with optional labels - memory optimized version with caching
     """
@@ -1939,7 +1939,7 @@ def main():
     if gpus:
         tf.config.experimental.set_virtual_device_configuration(
             gpus[0],
-            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=28672)]
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=20000)]
         )
     # Print current VRAM usage to verify GPU memory setup
     used_mem, total_mem, usage_pct = monitor_gpu_usage()
@@ -2303,7 +2303,7 @@ def main():
         
         # Save the final model
         model = finetune_model
-        model.save(model_path, save_format='tf')  # Save the model in TensorFlow SavedModel format
+        model.save(model_path)  # export full MAST model in .keras format
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

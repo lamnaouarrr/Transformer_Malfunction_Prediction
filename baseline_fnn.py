@@ -750,13 +750,21 @@ def objective(trial, param, x_train, y_train, x_val, y_val):
                   loss='binary_crossentropy',
                   metrics=['accuracy'])
 
-    # Train the model
+    # Add early stopping callback
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=3,
+        restore_best_weights=True
+    )
+
+    # Train the model with early stopping
     history = model.fit(
         x_train, y_train,
         validation_data=(x_val, y_val),
-        epochs=param['fit']['epochs'],
+        epochs=param['optuna']['trial_epochs'],  # Use trial_epochs for quick evaluation
         batch_size=param['fit']['batch_size'],
-        verbose=0
+        verbose=0,
+        callbacks=[early_stopping]  # Add early stopping here
     )
 
     # Return the validation loss as the objective value

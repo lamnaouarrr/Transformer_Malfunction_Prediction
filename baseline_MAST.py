@@ -2178,10 +2178,20 @@ def main():
                                     alpha=compile_cfg.get('focal_loss',{}).get('alpha',0.25)),
                     metrics=['accuracy']
                 )
-                # Quick trial training
-                history = finetune_model.fit(
-                    train_ds, validation_data=val_ds,
-                    epochs=opt_cfg.get('trial_epochs',5), verbose=0
+                # Add early stopping callback
+                early_stopping = tf.keras.callbacks.EarlyStopping(
+                    monitor="val_loss",
+                    patience=3,
+                    restore_best_weights=True
+                )
+
+                # Train the model with early stopping
+                finetune_model.fit(
+                    train_ds,
+                    validation_data=val_ds,
+                    epochs=opt_cfg['trial_epochs'],  # Use trial_epochs for quick evaluation
+                    verbose=1,
+                    callbacks=[early_stopping]  # Add early stopping here
                 )
                 return float(history.history['val_accuracy'][-1])
             sampler = getattr(optuna.samplers, opt_cfg.get('sampler','TPESampler'))()

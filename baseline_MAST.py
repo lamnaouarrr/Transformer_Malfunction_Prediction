@@ -2320,9 +2320,12 @@ def main():
         viz.save_figure(loss_acc_path)
         logger.info(f"Saved training curves to {loss_acc_path}")
         
-        # Save the final model in SavedModel format
-        model = finetune_model
-        model.save(model_path, save_format='tf')  # Use SavedModel format instead of .keras
+        # Save the final model in SavedModel format or fallback to saving weights
+        try:
+            model.save(model_path, save_format='tf')  # Use SavedModel format
+        except ValueError as e:
+            logger.warning(f"Failed to save model in SavedModel format: {e}. Saving weights instead.")
+            model.save_weights(model_path + '_weights.h5')
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

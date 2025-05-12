@@ -2284,8 +2284,10 @@ def main():
         # Add a custom callback to log predictions and labels during training
         class DebugMetricsCallback(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
-                # Log metrics at the end of each epoch
-                print(f"Epoch {epoch + 1}: Precision={logs.get('Precision')}, Recall={logs.get('Recall')}, AUC={logs.get('AUC')}")
+                precision = logs.get('precision') or logs.get('Precision')
+                recall = logs.get('recall') or logs.get('Recall')
+                auc = logs.get('auc') or logs.get('AUC')
+                print(f"Epoch {epoch + 1}: Precision={precision}, Recall={recall}, AUC={auc}")
 
         # Add DebugMetricsCallback to the list of callbacks
         callbacks.append(DebugMetricsCallback())
@@ -2330,6 +2332,11 @@ def main():
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
             pickle.dump(history.history, f)
     
+    # Ensure the model is always assigned
+    if 'model' not in locals():
+        logger.error("Model is not initialized. Creating a default model.")
+        model = create_mast_model(target_shape, mast_params, transformer_params)[1]
+
     # Evaluate model on test set
     logger.info("Evaluating model on test set")
     

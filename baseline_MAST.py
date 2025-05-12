@@ -899,6 +899,34 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 # model
 ########################################################################
+class ContrastSigmoidLayer(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return tf.sigmoid(5.0 * inputs)
+
+class ExtractCLSLayer(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return inputs[:, 0]
+
+class ExtractTokensLayer(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return inputs[:, 1:]
+
+class DepthToSpaceLayer(tf.keras.layers.Layer):
+    def __init__(self, num_patches_height, num_patches_width, patch_height, patch_width):
+        super().__init__()
+        self.num_patches_height = num_patches_height
+        self.num_patches_width = num_patches_width
+        self.patch_height = patch_height
+        self.patch_width = patch_width
+
+    def call(self, inputs):
+        reshaped = tf.reshape(inputs, [
+            tf.shape(inputs)[0],
+            self.num_patches_height, self.num_patches_width,
+            self.patch_height * self.patch_width
+        ])
+        return tf.nn.depth_to_space(reshaped, block_size=self.patch_height)
+
 def create_model(input_shape, transformer_params):
     # Extract transformer parameters
     num_heads = transformer_params.get("num_heads", 4)
@@ -968,12 +996,8 @@ def create_model(input_shape, transformer_params):
     # This is the key fix for the narrow prediction range issue
     raw_output = layers.Dense(1, activation=None)(x)
     
-    # Add a lambda layer to increase prediction contrast 
-    # This will help spread predictions further from 0.5 threshold
-    outputs = layers.Lambda(
-        lambda x: tf.sigmoid(5.0 * x),  # Multiply by 5 to increase contrast/separation
-        name='contrast_sigmoid'
-    )(raw_output)
+    # Add a subclassed layer to increase prediction contrast 
+    outputs = ContrastSigmoidLayer(name='contrast_sigmoid')(raw_output)
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model
@@ -1114,10 +1138,10 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     x = layers.LayerNormalization(epsilon=1e-6)(x)
     
     # Extract the [CLS] token output for classification (first token)
-    cls_output = layers.Lambda(lambda x: x[:, 0], name="extract_cls")(x)
+    cls_output = ExtractCLSLayer(name="extract_cls")(x)
     
     # For pretraining model: Reconstruct the original input from all tokens (excluding CLS)
-    reconstruction_tokens = layers.Lambda(lambda x: x[:, 1:], name="extract_tokens")(x)
+    reconstruction_tokens = ExtractTokensLayer(name="extract_tokens")(x)
     reconstructed = reconstruction_head(reconstruction_tokens)
     reconstructed = reconstruction_head_2(reconstructed)
     
@@ -1125,18 +1149,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     reconstructed = layers.Reshape((num_patches_height, num_patches_width, patch_height * patch_width))(reconstructed)
     
     # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
-    reconstructed = layers.Lambda(
-        lambda x: tf.nn.depth_to_space(
-            tf.reshape(x, [
-                tf.shape(x)[0],
-                tf.shape(x)[1] * patch_height // 2,  # Adjust dimensions to be compatible with block_size=2
-                tf.shape(x)[2] * patch_width // 2,
-                4  # Ensure this is block_size² (2²=4) for depth_to_space to work
-            ]),
-            block_size=2
-        ),
-        name="reconstruction_reshape"
-    )(reconstructed)
+    reconstructed = DepthToSpaceLayer(num_patches_height, num_patches_width, patch_height, patch_width)(reconstructed)
     
     # Create classifier head for anomaly detection
     classifier = layers.Dense(512, activation='gelu', name="classifier_dense_1")(cls_output)

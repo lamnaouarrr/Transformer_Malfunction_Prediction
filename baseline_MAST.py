@@ -2178,7 +2178,11 @@ def main():
             best = study.best_params
             logger.info(f"Optuna found best parameters: {best}")
             # Save best parameters to a separate YAML file
-            optuna_result_file = config.get('optuna_result_file', 'optuna_best_params.yaml')
+            # Ensure optuna_result_file is set and valid
+            optuna_result_file = config.get('optimization', {}).get('optuna', {}).get('result_file', 'result/result_MAST/optuna_best_params.yaml')
+            if not optuna_result_file:
+                raise ValueError("optuna_result_file is not set in the configuration.")
+
             # Ensure the result directory for Optuna exists
             optuna_result_dir = os.path.dirname(optuna_result_file)
             os.makedirs(optuna_result_dir, exist_ok=True)

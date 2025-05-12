@@ -423,18 +423,17 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
         try:
             # Use cached version for dimension check if enabled and not augmenting
-            if use_cache and not augment:
-                spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
-                if spec is not None:
-                    cache_hits += 1
-                    valid_files.append(file_path)
-                    if labels is not None:
-                        valid_labels.append(labels[idx])
-                    max_freq = max(max_freq, spec.shape[0])
-                    max_time = max(max_time, spec.shape[1])
-                    continue
-                else:
-                    cache_misses += 1
+            spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+            if spec is not None:
+                cache_hits += 1
+                valid_files.append(file_path)
+                if labels is not None:
+                    valid_labels.append(labels[idx])
+                max_freq = max(max_freq, spec.shape[0])
+                max_time = max(max_time, spec.shape[1])
+                continue
+            else:
+                cache_misses += 1
                 
             # Use cached version for dimension check if enabled and not augmenting
             if use_cache and not augment:
@@ -1896,11 +1895,11 @@ def cached_file_to_spectrogram(file_name, n_mels=64, n_fft=1024, hop_length=512,
     # Don't cache augmented spectrograms as they're random
     if augment:
         return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, augment, param)
-    
+
     # Define the calculation function to be cached
     def calculate_spectrogram():
-        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, False, param)
-    
+        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, augment, param)
+
     # Use the caching mechanism
     return file_caching_mechanism(file_name, calculate_spectrogram, param)
 

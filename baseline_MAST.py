@@ -73,11 +73,11 @@ if config.get("clear_gpu_memory", False):
     clear_gpu_memory()
 
 # Focal loss function
-def focal_loss():
-    gamma = config["focal_loss"]["gamma"]
-    alpha = config["focal_loss"]["alpha"]
-
+# Modify to accept gamma and alpha as parameters
+def focal_loss(gamma, alpha):
     def loss_function(y_true, y_pred):
+        dtype = y_pred.dtype
+        y_true = tf.cast(y_true, dtype)
         dtype = y_pred.dtype
         y_true = tf.cast(y_true, dtype)
         eps = tf.cast(tf.keras.backend.epsilon(), dtype)

@@ -238,3 +238,4 @@ optimization:
         type: "loguniform"
         low: 1e-4
         high: 1e-2
+    result_file: "result/result_MAST/optuna_best_params.yaml"

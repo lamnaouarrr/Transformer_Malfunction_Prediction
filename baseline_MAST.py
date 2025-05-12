@@ -2177,11 +2177,14 @@ def main():
             study.optimize(objective, n_trials=opt_cfg.get('n_trials',20), timeout=opt_cfg.get('timeout',None))
             best = study.best_params
             logger.info(f"Optuna found best parameters: {best}")
-            # Save best parameters to YAML file
-            result_file = config.get('result_file', 'result_MAST.yaml')
-            with open(result_file, 'w') as yaml_file:
+            # Save best parameters to a separate YAML file
+            optuna_result_file = config.get('optuna_result_file', 'optuna_best_params.yaml')
+            # Ensure the result directory for Optuna exists
+            optuna_result_dir = os.path.dirname(optuna_result_file)
+            os.makedirs(optuna_result_dir, exist_ok=True)
+            with open(optuna_result_file, 'w') as yaml_file:
                 yaml.dump(best, yaml_file, default_flow_style=False)
-            logger.info(f"Best hyperparameters saved to {result_file}")
+            logger.info(f"Best hyperparameters saved to {optuna_result_file}")
             # Apply best hyperparameters
             training_params['learning_rate'] = best['learning_rate']
             transformer_params['num_encoder_layers'] = best['num_encoder_layers']
@@ -2275,17 +2278,36 @@ def main():
                 )
             )
 
-        # Train the fine-tuning model
-        train_start = time.time()
-        history = finetune_model.fit(
-            train_ds,
-            validation_data=val_ds,
-            epochs=training_params.get('epochs', 100),
-            callbacks=callbacks,
-            verbose=1
-        )
+        # Add a custom callback to log predictions and labels during training
+        class DebugMetricsCallback(tf.keras.callbacks.Callback):
+            def on_epoch_end(self, epoch, logs=None):
+                # Log metrics at the end of each epoch
+                print(f"Epoch {epoch + 1}: Precision={logs.get('Precision')}, Recall={logs.get('Recall')}, AUC={logs.get('AUC')}")
+
+        # Add DebugMetricsCallback to the list of callbacks
+        callbacks.append(DebugMetricsCallback())
+
+        # Ensure class weights are used if the dataset is imbalanced
+        class_weights = training_params.get('class_weights', None)
+        if class_weights:
+            print(f"Using class weights: {class_weights}")
+            history = finetune_model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=training_params.get('epochs', 1), #debug 100
+                callbacks=callbacks,
+                class_weight=class_weights
+            )
+        else:
+            history = finetune_model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=training_params.get('epochs', 1), #debug 100
+                callbacks=callbacks
+            )
+        
         train_end = time.time()
-        model_training_time_seconds = train_end - train_start
+        model_training_time_seconds = train_end - exec_start
 
         # Generate and save training loss and accuracy graphs
         viz = Visualizer(param=config)
@@ -2294,9 +2316,9 @@ def main():
         viz.save_figure(loss_acc_path)
         logger.info(f"Saved training curves to {loss_acc_path}")
         
-        # Save the final model
+        # Save the final model in SavedModel format
         model = finetune_model
-        model.save(model_path)  # export full MAST model in .keras format
+        model.save(model_path, save_format='tf')  # Use SavedModel format instead of .keras
         
         # Save training history
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:

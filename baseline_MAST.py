@@ -1877,34 +1877,18 @@ def file_caching_mechanism(file_path, calculation_func, param=None, force_recalc
     # Check if cache file exists and whether to use it
     use_cache = param.get("cache", {}).get("enabled", True) and not force_recalculate
     
-    # Log cache key and file path for debugging
-    logger.info(f"Cache key: {cache_key} for file: {file_path}")
-
-    # Ensure force_recalculate is not set to True unless explicitly required
-    if force_recalculate:
-        logger.warning(f"Force recalculation enabled for {file_path}")
-
-    # Add logging for cache hits and misses
-    cache_hits = 0
-    cache_misses = 0
-
     if use_cache and os.path.exists(cache_file):
         try:
+            # Load from cache
             result = np.load(cache_file, allow_pickle=True)
             if result is not None and isinstance(result, np.ndarray):
-                if len(result.shape) >= 2:
-                    cache_hits += 1
-                    logger.info(f"Cache hit for {file_path}")
+                # If result is an array with the expected dimensions, return it
+                if len(result.shape) >= 2:  # Basic validation
                     return result
             logger.warning(f"Invalid cached data for {file_path}, recalculating")
         except Exception as e:
             logger.warning(f"Error loading cache for {file_path}: {e}, recalculating")
-            cache_misses += 1
-    else:
-        cache_misses += 1
-
-    logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses")
-
+    
     # Calculate the result
     result = calculation_func()
     
@@ -1954,21 +1938,20 @@ def main():
     with open('baseline_MAST.yaml', 'r') as config_file:
         config = yaml.safe_load(config_file)
     
-    # Convert relative paths to absolute paths for VPS
-    base_dir = os.path.abspath(config.get('base_directory', './dataset'))
-    model_dir = os.path.abspath(config.get('model_directory', './model/MAST'))
-    result_dir = os.path.abspath(config.get('result_directory', './result/result_MAST'))
-    model_path = os.path.join(model_dir, 'mast_model.keras')
-
-    # Ensure directories exist
-    os.makedirs(model_dir, exist_ok=True)
-    os.makedirs(result_dir, exist_ok=True)
-    os.makedirs('pickle/pickle_mast', exist_ok=True)
-
     # Extract configurations
     model_params = config.get('model', {})
     mast_params = config.get('mast', {})
     transformer_params = config.get('model', {}).get('architecture', {}).get('transformer', {})
+    # Ensure pickle directory exists for training history
+    os.makedirs('pickle/pickle_mast', exist_ok=True)
+
+    # Determine model save path: use model_path from config or default
+    model_dir = config.get('model_directory', './model/MAST')
+    model_path = model_params.get('model_path', os.path.join(model_dir, 'mast_model.keras'))
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    # Ensure result directory exists
+    result_dir = config.get('result_directory', './result/result_MAST')
+    os.makedirs(result_dir, exist_ok=True)
     dataset_params = config.get('dataset', {})
     training_params = config.get('training', {})
     
@@ -1997,6 +1980,7 @@ def main():
         # Load and preprocess dataset
         logger.info("Loading dataset")
         # Fix: Use the normal directory to properly process both normal and abnormal data
+        base_dir = config.get('base_directory', './dataset')
         normal_dir = os.path.join(base_dir, 'normal')
         
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
@@ -2321,16 +2305,6 @@ def main():
         # Add DebugMetricsCallback to the list of callbacks
         callbacks.append(DebugMetricsCallback())
 
-        # Add DebugLossCallback to the training callbacks
-        class DebugLossCallback(tf.keras.callbacks.Callback):
-            def on_batch_end(self, batch, logs=None):
-                logs = logs or {}
-                loss = logs.get('loss')
-                if loss is not None and (np.isnan(loss) or np.isinf(loss)):
-                    logger.warning(f"NaN or Inf loss detected at batch {batch}. Logs: {logs}")
-
-        callbacks.append(DebugLossCallback())
-
         # Ensure class weights are used if the dataset is imbalanced
         class_weights = training_params.get('class_weights', None)
         if class_weights:
@@ -2371,7 +2345,7 @@ def main():
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
             pickle.dump(history.history, f)
     
-    # Ensure the model is initialized before use
+    # Ensure the model is always assigned
     if 'model' not in locals():
         logger.error("Model is not initialized. Creating a default model.")
         model = create_mast_model(target_shape, mast_params, transformer_params)[1]

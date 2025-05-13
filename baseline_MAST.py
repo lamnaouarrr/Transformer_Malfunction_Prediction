@@ -1874,10 +1874,7 @@ def file_caching_mechanism(file_path, calculation_func, param=None, force_recalc
     # Full path to the cached file
     cache_file = os.path.join(cache_dir, f"{cache_key}.npy")
     
-    # Check if cache file exists and whether to use it
-    use_cache = param.get("cache", {}).get("enabled", True) and not force_recalculate
-    
-    # Log cache key and file path for debugging
+    # Comment out the cache key logging to avoid cluttering the progress line
     logger.info(f"Cache key: {cache_key} for file: {file_path}")
 
     # Ensure force_recalculate is not set to True unless explicitly required
@@ -1903,15 +1900,25 @@ def file_caching_mechanism(file_path, calculation_func, param=None, force_recalc
     else:
         cache_misses += 1
 
-    logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses")
+    # Add detailed logging for cache misses
+    if cache_misses > 0:
+        logger.info(f"Cache miss for {file_path}. Cache key: {cache_key}")
+        if not os.path.exists(cache_file):
+            logger.info(f"Cache file does not exist: {cache_file}")
+        else:
+            logger.info(f"Cache file exists but may be invalid: {cache_file}")
+
+    # Ensure cache key generation is consistent
+    logger.debug(f"Generated cache key: {cache_key} from file path and parameters: {hash_str}")
 
     # Calculate the result
     result = calculation_func()
     
-    # Save to cache if enabled
+    # Verify cache saving process
     if use_cache and result is not None:
         try:
             np.save(cache_file, result)
+            logger.info(f"Successfully cached result for {file_path} at {cache_file}")
         except Exception as e:
             logger.warning(f"Failed to cache result for {file_path}: {e}")
     

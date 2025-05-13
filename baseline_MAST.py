@@ -29,8 +29,8 @@ import gc
 import hashlib
 import optuna
 import subprocess
-from numba import cuda
 
+from numba import cuda
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm

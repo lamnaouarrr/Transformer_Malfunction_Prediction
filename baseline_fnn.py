@@ -1226,6 +1226,28 @@ def main():
     logger.info(f"Test Accuracy: {accuracy:.4f}")
     results[evaluation_result_key] = evaluation_result
 
+    # Ensure the `overall_model` key is initialized in the `results` dictionary
+    if "overall_model" not in results:
+        results["overall_model"] = {
+            "F1Score": {"class_0": 0, "class_1": 0},
+            "Precision": {"class_0": 0, "class_1": 0},
+            "Recall": {"class_0": 0, "class_1": 0},
+            "Support": {"class_0": 0, "class_1": 0},
+            "TestAccuracy": 0,
+            "TrainAccuracy": 0,
+            "ValidationAccuracy": 0,
+        }
+
+    # Populate the `overall_model` key with calculated metrics
+    results["overall_model"].update({
+        "F1Score": evaluation_result.get("F1Score", {"class_0": 0, "class_1": 0}),
+        "Precision": evaluation_result.get("Precision", {"class_0": 0, "class_1": 0}),
+        "Recall": evaluation_result.get("Recall", {"class_0": 0, "class_1": 0}),
+        "Support": evaluation_result.get("Support", {"class_0": 0, "class_1": 0}),
+        "TestAccuracy": evaluation_result.get("TestAccuracy", 0),
+        "TrainAccuracy": evaluation_result.get("TrainAccuracy", 0),
+        "ValidationAccuracy": evaluation_result.get("ValidationAccuracy", 0),
+    })
 
     #add the machine's predictions and true labels to the overall collection
     all_y_true.extend(y_true)

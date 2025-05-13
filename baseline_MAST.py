@@ -1938,20 +1938,21 @@ def main():
     with open('baseline_MAST.yaml', 'r') as config_file:
         config = yaml.safe_load(config_file)
     
+    # Convert relative paths to absolute paths for VPS
+    base_dir = os.path.abspath(config.get('base_directory', './dataset'))
+    model_dir = os.path.abspath(config.get('model_directory', './model/MAST'))
+    result_dir = os.path.abspath(config.get('result_directory', './result/result_MAST'))
+    model_path = os.path.join(model_dir, 'mast_model.keras')
+
+    # Ensure directories exist
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(result_dir, exist_ok=True)
+    os.makedirs('pickle/pickle_mast', exist_ok=True)
+
     # Extract configurations
     model_params = config.get('model', {})
     mast_params = config.get('mast', {})
     transformer_params = config.get('model', {}).get('architecture', {}).get('transformer', {})
-    # Ensure pickle directory exists for training history
-    os.makedirs('pickle/pickle_mast', exist_ok=True)
-
-    # Determine model save path: use model_path from config or default
-    model_dir = config.get('model_directory', './model/MAST')
-    model_path = model_params.get('model_path', os.path.join(model_dir, 'mast_model.keras'))
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    # Ensure result directory exists
-    result_dir = config.get('result_directory', './result/result_MAST')
-    os.makedirs(result_dir, exist_ok=True)
     dataset_params = config.get('dataset', {})
     training_params = config.get('training', {})
     
@@ -1980,7 +1981,6 @@ def main():
         # Load and preprocess dataset
         logger.info("Loading dataset")
         # Fix: Use the normal directory to properly process both normal and abnormal data
-        base_dir = config.get('base_directory', './dataset')
         normal_dir = os.path.join(base_dir, 'normal')
         
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(

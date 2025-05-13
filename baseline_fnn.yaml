@@ -23,7 +23,7 @@ fit:
     loss: "binary_crossentropy"
     metrics: ["accuracy"]
     weighted_metrics: ["accuracy"]
-  epochs: 150
+  epochs: 1 #debug 150
   batch_size: 512
   shuffle: True
   validation_split: 0.1
@@ -83,9 +83,9 @@ logging:
 # Optuna hyperparameter optimization parameters
 optuna:
   enabled: true
-  trials: 100
+  trials: 1 #debug 100
   metric: "val_accuracy"
-  trial_epochs: 50
+  trial_epochs: 1 #debug 50
   search_space:
     learning_rate:
       type: "adam"

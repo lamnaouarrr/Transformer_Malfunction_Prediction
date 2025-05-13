@@ -2305,6 +2305,16 @@ def main():
         # Add DebugMetricsCallback to the list of callbacks
         callbacks.append(DebugMetricsCallback())
 
+        # Add DebugLossCallback to the training callbacks
+        class DebugLossCallback(tf.keras.callbacks.Callback):
+            def on_batch_end(self, batch, logs=None):
+                logs = logs or {}
+                loss = logs.get('loss')
+                if loss is not None and (np.isnan(loss) or np.isinf(loss)):
+                    logger.warning(f"NaN or Inf loss detected at batch {batch}. Logs: {logs}")
+
+        callbacks.append(DebugLossCallback())
+
         # Ensure class weights are used if the dataset is imbalanced
         class_weights = training_params.get('class_weights', None)
         if class_weights:

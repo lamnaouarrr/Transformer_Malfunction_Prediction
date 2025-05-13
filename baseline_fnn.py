@@ -785,20 +785,33 @@ def save_results_to_yaml(results, result_file):
         logger.warning("'overall_model' key is missing in results. Initializing with default values.")
         results["overall_model"] = {
             "F1Score": {"class_0": 0, "class_1": 0},
-            "Accuracy": 0,
             "Precision": {"class_0": 0, "class_1": 0},
             "Recall": {"class_0": 0, "class_1": 0},
-            "Support": {"class_0": 0, "class_1": 0}  # Added support field
+            "Support": {"class_0": 0, "class_1": 0},
+            "TestAccuracy": 0,
+            "TrainAccuracy": 0,
+            "ValidationAccuracy": 0
         }
+
+    # Ensure execution and training times are present
+    if "execution_time_seconds" not in results:
+        results["execution_time_seconds"] = 0
+    if "model_training_time_seconds" not in results:
+        results["model_training_time_seconds"] = 0
 
     # Prepare data for YAML
     yaml_data = {
-        "class_0": results["overall_model"].get("F1Score", {}).get("class_0", 0),
-        "class_1": results["overall_model"].get("F1Score", {}).get("class_1", 0),
-        "accuracy": results["overall_model"].get("Accuracy", 0),
-        "precision": results["overall_model"].get("Precision", {}),
-        "recall": results["overall_model"].get("Recall", {}),
-        "support": results["overall_model"].get("Support", {})  # Include support in YAML
+        "execution_time_seconds": results.get("execution_time_seconds", 0),
+        "model_training_time_seconds": results.get("model_training_time_seconds", 0),
+        "overall_model": {
+            "F1Score": results["overall_model"].get("F1Score", {}),
+            "Precision": results["overall_model"].get("Precision", {}),
+            "Recall": results["overall_model"].get("Recall", {}),
+            "Support": results["overall_model"].get("Support", {}),
+            "TestAccuracy": results["overall_model"].get("TestAccuracy", 0),
+            "TrainAccuracy": results["overall_model"].get("TrainAccuracy", 0),
+            "ValidationAccuracy": results["overall_model"].get("ValidationAccuracy", 0)
+        }
     }
 
     # Save to YAML file

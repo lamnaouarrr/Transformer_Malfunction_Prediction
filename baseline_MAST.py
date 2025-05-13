@@ -1019,7 +1019,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     logger.info(f"Creating MAST model with input shape {input_shape}")
     
     # Extract parameters
-    patch_size = mast_params.get("patch_size", 16)
+    patch_size = mast_params.get("patch_size", config.get("mast", {}).get("patch_size", 16))
     # Define base patch dimensions for reconstruction head
     patch_height = min(patch_size, input_shape[0])
     patch_width = min(patch_size, input_shape[1])
@@ -1031,7 +1031,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     num_heads = transformer_params.get("num_heads", 12)
     num_layers = transformer_params.get("num_layers", 12)
     mlp_dim = transformer_params.get("mlp_dim", 3072)
-    dropout_rate = transformer_params.get("dropout_rate", 0.1)
+    dropout_rate = 0.1
     
     # Add explicit masking rate for pretraining
     mask_prob = mast_params.get("pretraining", {}).get("masking", {}).get("probability", 0.15)
@@ -2165,6 +2165,8 @@ def main():
         optimizer = tf.keras.optimizers.experimental.AdamW(
             learning_rate=lr_schedule, weight_decay=weight_decay
         )
+        
+        # Compile the fine-tuning model before training
         finetune_model.compile(
             optimizer=optimizer,
             loss=loss_fn,
@@ -2226,7 +2228,7 @@ def main():
         history = finetune_model.fit(
             train_ds,
             validation_data=val_ds,
-            epochs=training_params.get('epochs', 100),
+            epochs=training_params.get('epochs', 1), #debug 100
             callbacks=callbacks,
             verbose=1
         )

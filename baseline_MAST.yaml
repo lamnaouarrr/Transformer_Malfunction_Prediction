@@ -232,7 +232,7 @@ optimization:
         high: 0.7
       early_stopping_patience:
         type: "int"
-        low: 3
+        low: 5
         high: 15
       early_stopping_threshold:
         type: "loguniform"

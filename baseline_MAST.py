@@ -406,6 +406,9 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     hop_length = param.get("feature", {}).get("hop_length", 512)
     power = param.get("feature", {}).get("power", 2.0)
     
+    # Ensure use_cache is defined and accessible
+    use_cache = param.get("cache", {}).get("enabled", True) if param else True
+    
     # Check if caching is enabled in config
     use_cache = param.get("cache", {}).get("enabled", True) if param else True
     
@@ -1324,8 +1327,10 @@ def preprocess_spectrograms(spectrograms, target_shape, param=None):
         else:
             spectrograms = result
     
-    if spectrograms.shape[0] == 0:
-        return spectrograms
+    # Handle empty preprocessed data
+    if spectrograms.shape[0] == 0 or spectrograms.shape[1] == 0 or spectrograms.shape[2] == 0:
+        logger.error("No valid spectrograms generated. Please check the input data and parameters.")
+        return None, None
         
     batch_size = spectrograms.shape[0]
     processed = np.zeros((batch_size, target_shape[0], target_shape[1]), dtype=np.float32)
@@ -1464,36 +1469,38 @@ def balance_dataset(train_data, train_labels, augment_minority=True):
         
         all_augmented.append(batch_augmented)
     
-    # Combine all batches
-    if all_augmented:
-        batch_augmented = np.vstack(all_augmented)
-        logger.info(f"Finished creating {batch_augmented.shape[0]} augmented samples")
+    # Fix augmentation error by ensuring consistent dimensions
+    if len(all_augmented) > 0:
+        try:
+            batch_augmented = np.vstack(all_augmented)
+        except ValueError as e:
+            logger.error(f"Error during augmentation: {e}")
+            return train_data, train_labels
+    
+    logger.info(f"Finished creating {batch_augmented.shape[0]} augmented samples")
         
-        # Create the labels array
-        augmented_labels = np.full(batch_augmented.shape[0], minority_class)
-        
-        # Combine original and augmented data
-        balanced_data = np.vstack([train_data, batch_augmented])
-        balanced_labels = np.concatenate([train_labels, augmented_labels])
-        
-        # Free memory
-        del all_augmented, batch_augmented
-        gc.collect()
-        
-        # Shuffle the data
-        indices = np.arange(len(balanced_labels))
-        np.random.shuffle(indices)
-        balanced_data = balanced_data[indices]
-        balanced_labels = balanced_labels[indices]
-        
-        logger.info(f"New dataset shape: {balanced_data.shape}")
-        new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
-        logger.info(f"New class distribution: {new_class_counts}")
-        
-        return balanced_data, balanced_labels
-    else:
-        logger.warning("No augmented samples created, returning original data")
-        return train_data, train_labels
+    # Create the labels array
+    augmented_labels = np.full(batch_augmented.shape[0], minority_class)
+    
+    # Combine original and augmented data
+    balanced_data = np.vstack([train_data, batch_augmented])
+    balanced_labels = np.concatenate([train_labels, augmented_labels])
+    
+    # Free memory
+    del all_augmented, batch_augmented
+    gc.collect()
+    
+    # Shuffle the data
+    indices = np.arange(len(balanced_labels))
+    np.random.shuffle(indices)
+    balanced_data = balanced_data[indices]
+    balanced_labels = balanced_labels[indices]
+    
+    logger.info(f"New dataset shape: {balanced_data.shape}")
+    new_class_counts = dict(zip(*np.unique(balanced_labels, return_counts=True)))
+    logger.info(f"New class distribution: {new_class_counts}")
+    
+    return balanced_data, balanced_labels
 
 
 def mixup_data(x, y, alpha=0.2):
@@ -1918,7 +1925,7 @@ def file_caching_mechanism(file_path, calculation_func, param=None, force_recalc
     # Calculate the result
     result = calculation_func()
     
-    # Verify cache saving process
+    # Ensure spectrograms are saved to the cache
     if use_cache and result is not None:
         try:
             np.save(cache_file, result)

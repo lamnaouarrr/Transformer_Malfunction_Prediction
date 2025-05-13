@@ -591,6 +591,28 @@ def preprocess_spectrograms(spectrograms, target_shape, param=None, use_cache=Fa
 
 
 ########################################################################
+# GPU monitoring
+########################################################################
+def monitor_gpu_usage():
+    """
+    Monitor GPU memory usage and return used memory, total memory, and usage percentage.
+    """
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if not gpus:
+        logger.warning("No GPUs detected. Using CPU instead.")
+        return 0, 0, 0.0
+
+    try:
+        memory_info = tf.config.experimental.get_memory_info('GPU:0')
+        used_mem = memory_info['current'] // (1024 * 1024)  # Convert to MB
+        total_mem = memory_info['peak'] // (1024 * 1024)  # Convert to MB
+        usage_pct = (used_mem / total_mem) * 100 if total_mem > 0 else 0.0
+        return used_mem, total_mem, usage_pct
+    except Exception as e:
+        logger.error(f"Failed to monitor GPU usage: {e}")
+        return 0, 0, 0.0
+
+########################################################################
 # main
 ########################################################################
 def main():

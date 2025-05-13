@@ -774,42 +774,40 @@ def objective(trial, param, x_train, y_train, x_val, y_val):
 ########################################################################
 # Save results to YAML
 ########################################################################
-def save_results_to_yaml(results, output_path):
+def save_results_to_yaml(results, result_file):
     """
-    Save the results to a YAML file in the correct format.
+    Save results to a YAML file with proper structure and error handling.
+    """
+    logger.info(f"Saving results to {result_file}")
 
-    Args:
-        results (dict): Dictionary containing the results.
-        output_path (str): Path to save the YAML file.
-    """
-    formatted_results = {
-        "execution_time_seconds": results.get("execution_time_seconds", 0),
-        "model_training_time_seconds": results.get("model_training_time_seconds", 0),
-        "overall_model": {
-            "F1Score": {
-                "class_0": results["overall_model"].get("F1Score", {}).get("class_0", 0),
-                "class_1": results["overall_model"].get("F1Score", {}).get("class_1", 0),
-            },
-            "Precision": {
-                "class_0": results["overall_model"].get("Precision", {}).get("class_0", 0),
-                "class_1": results["overall_model"].get("Precision", {}).get("class_1", 0),
-            },
-            "Recall": {
-                "class_0": results["overall_model"].get("Recall", {}).get("class_0", 0),
-                "class_1": results["overall_model"].get("Recall", {}).get("class_1", 0),
-            },
-            "Support": {
-                "class_0": results["overall_model"].get("Support", {}).get("class_0", 0),
-                "class_1": results["overall_model"].get("Support", {}).get("class_1", 0),
-            },
-            "TestAccuracy": results["overall_model"].get("TestAccuracy", 0),
-            "TrainAccuracy": results["overall_model"].get("TrainAccuracy", 0),
-            "ValidationAccuracy": results["overall_model"].get("ValidationAccuracy", 0),
-        },
+    # Ensure 'overall_model' key exists in results
+    if "overall_model" not in results:
+        logger.warning("'overall_model' key is missing in results. Initializing with default values.")
+        results["overall_model"] = {
+            "F1Score": {"class_0": 0, "class_1": 0},
+            "Accuracy": 0,
+            "Precision": {"class_0": 0, "class_1": 0},
+            "Recall": {"class_0": 0, "class_1": 0},
+            "Support": {"class_0": 0, "class_1": 0}  # Added support field
+        }
+
+    # Prepare data for YAML
+    yaml_data = {
+        "class_0": results["overall_model"].get("F1Score", {}).get("class_0", 0),
+        "class_1": results["overall_model"].get("F1Score", {}).get("class_1", 0),
+        "accuracy": results["overall_model"].get("Accuracy", 0),
+        "precision": results["overall_model"].get("Precision", {}),
+        "recall": results["overall_model"].get("Recall", {}),
+        "support": results["overall_model"].get("Support", {})  # Include support in YAML
     }
 
-    with open(output_path, "w") as yaml_file:
-        yaml.dump(formatted_results, yaml_file, default_flow_style=False)
+    # Save to YAML file
+    try:
+        with open(result_file, 'w') as yaml_file:
+            yaml.dump(yaml_data, yaml_file, default_flow_style=False)
+        logger.info(f"Results successfully saved to {result_file}")
+    except Exception as e:
+        logger.error(f"Failed to save results to {result_file}: {e}")
 
 ########################################################################
 # main
@@ -1225,6 +1223,24 @@ def main():
 
     logger.info(f"Test Accuracy: {accuracy:.4f}")
     results[evaluation_result_key] = evaluation_result
+
+    # Ensure 'overall_model' key is initialized in the results dictionary before saving
+    if 'overall_model' not in results:
+        results['overall_model'] = {
+            "F1Score": {
+                "class_0": 0,
+                "class_1": 0
+            },
+            "Accuracy": 0,
+            "Precision": {
+                "class_0": 0,
+                "class_1": 0
+            },
+            "Recall": {
+                "class_0": 0,
+                "class_1": 0
+            }
+        }
 
     # Ensure the `overall_model` key is initialized in the `results` dictionary
     if "overall_model" not in results:

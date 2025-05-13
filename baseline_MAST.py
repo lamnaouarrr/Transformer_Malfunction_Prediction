@@ -454,7 +454,11 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         except Exception as e:
             logger.error(f"Error checking dimensions for {file_path}: {e}")
     
-    logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {cache_hits / (cache_hits + cache_misses) * 100:.1f}% hit rate")
+    # Handle division by zero in cache performance logging
+    if cache_hits + cache_misses > 0:
+        logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {cache_hits / (cache_hits + cache_misses) * 100:.1f}% hit rate")
+    else:
+        logger.info("Cache performance: No cache hits or misses recorded.")
 
     # Use target shape from parameters if available
     target_shape = param.get("feature", {}).get("target_shape", None)

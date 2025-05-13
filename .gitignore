@@ -7,3 +7,4 @@ logs
 get-pip.py
 __pycache__
 transformer_venv
+result_fnn

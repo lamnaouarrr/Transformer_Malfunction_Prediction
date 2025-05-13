@@ -1877,6 +1877,13 @@ def file_caching_mechanism(file_path, calculation_func, param=None, force_recalc
     # Check if cache file exists and whether to use it
     use_cache = param.get("cache", {}).get("enabled", True) and not force_recalculate
     
+    # Log cache key and file path for debugging
+    logger.info(f"Cache key: {cache_key} for file: {file_path}")
+
+    # Ensure force_recalculate is not set to True unless explicitly required
+    if force_recalculate:
+        logger.warning(f"Force recalculation enabled for {file_path}")
+
     # Add logging for cache hits and misses
     cache_hits = 0
     cache_misses = 0

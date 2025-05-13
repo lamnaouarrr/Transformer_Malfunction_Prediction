@@ -1001,7 +1001,7 @@ def create_model(input_shape, transformer_params):
     return model
 
 
-def create_mast_model(input_shape, mast_params, transformer_params):
+def create_mast_model(input_shape, mast_params, transformer_params, config):
     """
     Creates a MAST (Masked Audio Spectrogram Transformer) model with two variants:
     1. A pretraining model that reconstructs masked inputs
@@ -2033,7 +2033,7 @@ def main():
         train_data, train_labels_expanded = balance_dataset(train_data, train_labels, augment_minority=True)
         
         # Create pretrain and finetune models
-        pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
+        pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params, config)
         
         # Check if we should perform pretraining
         if mast_params.get('pretraining', {}).get('enabled', True):

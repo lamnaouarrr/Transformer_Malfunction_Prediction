@@ -29,8 +29,9 @@ import gc
 import hashlib
 import optuna
 import subprocess
-from numba import cuda
 
+
+from numba import cuda
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
@@ -1976,379 +1977,77 @@ def main():
         # Set random seeds for reproducibility
         tf.random.set_seed(training_params.get('random_seed', 42))
         np.random.seed(training_params.get('random_seed', 42))
-        
+
         # Load and preprocess dataset
         logger.info("Loading dataset")
-        # Fix: Use the normal directory to properly process both normal and abnormal data
         base_dir = config.get('base_directory', './dataset')
         normal_dir = os.path.join(base_dir, 'normal')
-        
+
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
             normal_dir, config)
-        
-        # Get input shape from data
-        target_shape = (config["feature"]["n_mels"], 96)
-        logger.info(f"Target spectrogram shape: {target_shape}")
-        
-        # Preprocess to ensure consistent shapes
-        logger.info("Preprocessing training data...")
-        # Pass the config to preprocess_spectrograms
-        train_data = preprocess_spectrograms(train_files, target_shape, config)
-        logger.info(f"Preprocessed train data shape: {train_data.shape}")
 
-        logger.info("Preprocessing validation data...")
-        # Pass the config to preprocess_spectrograms
+        # Preprocess and normalize data
+        logger.info("Preprocessing and normalizing data...")
+        train_data = preprocess_spectrograms(train_files, target_shape, config)
         val_data = preprocess_spectrograms(val_files, target_shape, config)
-        logger.info(f"Preprocessed validation data shape: {val_data.shape}")
-        
-        # Normalize data for better training
-        logger.info("Normalizing data...")
-        # Calculate mean and std from training data
         train_mean = np.mean(train_data)
         train_std = np.std(train_data)
-        logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
-
-        # Apply normalization if std is not too small
         if train_std > 1e-6:
             train_data = (train_data - train_mean) / train_std
             val_data = (val_data - train_mean) / train_std
-            logger.info("Z-score normalization applied")
-        else:
-            # If std is too small, just center the data
-            train_data = train_data - train_mean
-            val_data = val_data - train_mean
-            logger.info("Mean centering applied (std too small for z-score)")
 
         # Balance the dataset
         logger.info("Balancing dataset...")
         train_data, train_labels_expanded = balance_dataset(train_data, train_labels, augment_minority=True)
-        
-        # Create pretrain and finetune models
+
+        # Create the model
+        logger.info("Creating MAST model...")
         pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
-        
-        # Check if we should perform pretraining
-        if mast_params.get('pretraining', {}).get('enabled', True):
-            logger.info("Starting MAST pretraining phase with masking")
-            
-            # Configure pretraining parameters
-            pretrain_epochs = mast_params.get('pretraining', {}).get('epochs', 50)
-            pretrain_batch_size = mast_params.get('pretraining', {}).get('batch_size', 32)
-            # Cast learning rate from config to float (handles strings like '1e-4')
-            pretrain_lr_raw = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
-            pretrain_lr = float(pretrain_lr_raw)
-            
-            # Prepare data for pretraining (no labels needed, just the spectrograms)
-            # Combine all available data for pretraining
-            X_pretrain = np.concatenate([train_data, val_data], axis=0)
-            
-            # Apply masking to create input-target pairs for reconstruction
-            mask_probability = mast_params.get('pretraining', {}).get('masking', {}).get('probability', 0.15)
-            mask_length = mast_params.get('pretraining', {}).get('masking', {}).get('length', 8)
-            
-            # Create a data generator for pretraining
-            def pretrain_generator():
-                while True:
-                    # Select random batch
-                    indices = np.random.choice(len(X_pretrain), size=pretrain_batch_size)
-                    batch_x = X_pretrain[indices]
-                    
-                    # Add channel dimension if needed
-                    if len(batch_x.shape) == 3:
-                        batch_x = np.expand_dims(batch_x, axis=-1)
-                    
-                    # Apply masking
-                    masked_x, _ = apply_masking(
-                        batch_x, 
-                        mask_probability=mask_probability,
-                        mask_length=mask_length
-                    )
-                    
-                    # The model should reconstruct the original unmasked input
-                    yield masked_x, batch_x
-            
-            # Create tf.data.Dataset from generator
-            pretrain_dataset = tf.data.Dataset.from_generator(
-                pretrain_generator,
-                output_signature=(
-                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32)
-                )
-            ).prefetch(tf.data.AUTOTUNE)
-            
-            # Create LR schedule for pretraining
-            pretrain_lr_schedule = create_lr_schedule(
-                pretrain_lr,
-                warmup_epochs=5,
-                decay_epochs=pretrain_epochs
-            )
-            
-            # Compile the pretraining model
-            pretrain_model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=pretrain_lr),
-                loss=tf.keras.losses.MeanSquaredError(),
-                metrics=['mse']
-            )
-            
-            # Create callbacks for pretraining
-            pretrain_callbacks = [
-                tf.keras.callbacks.LearningRateScheduler(pretrain_lr_schedule),
-                tf.keras.callbacks.TensorBoard(
-                    log_dir=f"logs/log_mast/pretrain_{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                    histogram_freq=1
-                ),
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath="model/MAST/pretrain_model.keras",
-                    save_best_only=True,
-                    monitor='val_loss'
-                )
-            ]
-            
-            # Train the pretraining model
-            pretrain_model.fit(
-                pretrain_dataset,
-                steps_per_epoch=len(X_pretrain) // pretrain_batch_size,
-                epochs=pretrain_epochs,
-                callbacks=pretrain_callbacks,
-                verbose=1
-            )
-            
-            logger.info("MAST pretraining completed")
-            
-            # Save the pretrained weights
-            pretrain_model.save_weights("model/MAST/pretrain_weights.keras")
-            
-            # Load the pretrained weights into the fine-tuning model
-            # The shared Transformer layers will have the same names
-            logger.info("Transferring pretrained weights to fine-tuning model")
-            finetune_model.load_weights("model/MAST/pretrain_weights.keras", by_name=True, skip_mismatch=True)
-        
-        # Starting fine-tuning
-        logger.info("Starting MAST fine-tuning phase for anomaly detection")
-        # Optuna hyperparameter optimization
-        opt_cfg = config.get('optimization', {}).get('optuna', {})
-        if opt_cfg.get('enable', False):
-            # Prepare datasets once
-            train_ds = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))\
-                .shuffle(buffer_size=train_data.shape[0]).batch(training_params.get('batch_size', 32)).prefetch(tf.data.AUTOTUNE)
-            val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))\
-                .batch(training_params.get('batch_size', 32)).prefetch(tf.data.AUTOTUNE)
-            def objective(trial):
-                # Suggest hyperparameters
-                # Ensure LR bounds are floats, then sample on log scale
-                lr_low = float(opt_cfg['parameters']['learning_rate']['low'])
-                lr_high = float(opt_cfg['parameters']['learning_rate']['high'])
-                lr = trial.suggest_float('learning_rate', lr_low, lr_high, log=True)
-                num_layers = trial.suggest_int('num_encoder_layers',
-                    opt_cfg['parameters']['num_encoder_layers']['low'],
-                    opt_cfg['parameters']['num_encoder_layers']['high'],
-                    step=opt_cfg['parameters']['num_encoder_layers'].get('step',1))
-                # Use suggest_float (uniform) for dropout_rate
-                drop = trial.suggest_float('dropout_rate',
-                    opt_cfg['parameters']['dropout_rate']['low'],
-                    opt_cfg['parameters']['dropout_rate']['high'])
-                # Use suggest_float (uniform) for mlp_dropout
-                mlp_drop = trial.suggest_float('mlp_dropout',
-                    opt_cfg['parameters']['mlp_dropout']['low'],
-                    opt_cfg['parameters']['mlp_dropout']['high'])
-                # Retrieve compile configuration for focal loss parameters
-                compile_cfg = config.get('fit', {}).get('compile', {})
-                # Update parameters for this trial
-                transformer_params['num_encoder_layers'] = num_layers
-                transformer_params['dropout_rate'] = drop
-                transformer_params['mlp_dropout'] = mlp_drop
-                training_params['learning_rate'] = lr
-                # Build and compile model
-                finetune_model = create_mast_model(target_shape, mast_params, transformer_params)[1]
-                optimizer = tf.keras.optimizers.experimental.AdamW(
-                    learning_rate=lr, weight_decay=training_params.get('weight_decay',1e-3)
-                )
-                finetune_model.compile(
-                    optimizer=optimizer,
-                    loss=focal_loss(gamma=compile_cfg.get('focal_loss',{}).get('gamma',2.0),
-                                    alpha=compile_cfg.get('focal_loss',{}).get('alpha',0.25)),
-                    metrics=['accuracy']
-                )
-                # Add early stopping callback
-                early_stopping = tf.keras.callbacks.EarlyStopping(
-                    monitor="val_loss",
-                    patience=3,
-                    restore_best_weights=True
-                )
 
-                # Train the model with early stopping
-                history = finetune_model.fit(
-                    train_ds,
-                    validation_data=val_ds,
-                    epochs=opt_cfg['trial_epochs'],  # Use trial_epochs for quick evaluation
-                    verbose=1,
-                    callbacks=[early_stopping]  # Add early stopping here
-                )
-                return float(history.history['val_accuracy'][-1])
-            sampler = getattr(optuna.samplers, opt_cfg.get('sampler','TPESampler'))()
-            study = optuna.create_study(direction=opt_cfg.get('direction','maximize'), sampler=sampler)
-            study.optimize(objective, n_trials=opt_cfg.get('n_trials',20), timeout=opt_cfg.get('timeout',None))
-            best = study.best_params
-            logger.info(f"Optuna found best parameters: {best}")
-            # Save best parameters to a separate YAML file
-            # Ensure optuna_result_file is set and valid
-            optuna_result_file = config.get('optimization', {}).get('optuna', {}).get('result_file', 'result/result_MAST/optuna_best_params.yaml')
-            if not optuna_result_file:
-                raise ValueError("optuna_result_file is not set in the configuration.")
+        # Save the fine-tuned model after training
+        model = finetune_model
 
-            # Ensure the result directory for Optuna exists
-            optuna_result_dir = os.path.dirname(optuna_result_file)
-            os.makedirs(optuna_result_dir, exist_ok=True)
-            with open(optuna_result_file, 'w') as yaml_file:
-                yaml.dump(best, yaml_file, default_flow_style=False)
-            logger.info(f"Best hyperparameters saved to {optuna_result_file}")
-            # Apply best hyperparameters
-            training_params['learning_rate'] = best['learning_rate']
-            transformer_params['num_encoder_layers'] = best['num_encoder_layers']
-            transformer_params['dropout_rate'] = best['dropout_rate']
-            transformer_params['mlp_dropout'] = best['mlp_dropout']
-        
-        # Create cosine annealing LR schedule and AdamW optimizer with weight decay
-        initial_lr = training_params.get('learning_rate', 1e-5)
-        decay_steps = training_params.get('decay_steps', 10000)
-        fit_cfg = config.get('fit', {})
-        compile_cfg = fit_cfg.get('compile', {})
-        loss_type = compile_cfg.get('loss', 'binary_crossentropy')
-        if loss_type == 'focal_loss':
-            fl_cfg = compile_cfg.get('focal_loss', {})
-            loss_fn = focal_loss(gamma=fl_cfg.get('gamma', 2.0), alpha=fl_cfg.get('alpha', 0.25))
-        else:
-            loss_fn = tf.keras.losses.BinaryCrossentropy()
-        lr_cfg = fit_cfg.get('lr_scheduler', {})
-        if lr_cfg.get('type') == 'cosine_annealing_restarts':
-            first_decay = lr_cfg.get('first_decay_steps', decay_steps)
-            t_mul = lr_cfg.get('t_mul', 2.0)
-            alpha = lr_cfg.get('alpha', 0.0)
-            lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
-                initial_learning_rate=initial_lr,
-                first_decay_steps=first_decay,
-                t_mul=t_mul,
-                m_mul=1.0,
-                alpha=alpha
-            )
-        else:
-            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=initial_lr, decay_steps=decay_steps
-            )
-        weight_decay = training_params.get('weight_decay', 1e-3)
-        optimizer = tf.keras.optimizers.experimental.AdamW(
-            learning_rate=lr_schedule, weight_decay=weight_decay
-        )
-        finetune_model.compile(
-            optimizer=optimizer,
-            loss=loss_fn,
-            metrics=['accuracy', 'AUC', 'Precision', 'Recall']
-        )
-        
-        # Add channel dimension if needed
-        if len(train_data.shape) == 3:
-            train_data = np.expand_dims(train_data, axis=-1)
-            val_data = np.expand_dims(val_data, axis=-1)
-        
-        # Build tf.data datasets for efficient training
-        batch_size = training_params.get('batch_size', 32)
-        train_ds = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
-        train_ds = train_ds.shuffle(buffer_size=train_data.shape[0]).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-        val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
-        val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-        # Setup callbacks for fine-tuning
-        callbacks = []
-        # Early stopping
-        es_cfg = fit_cfg.get('early_stopping', {})
-        if es_cfg.get('enabled', False):
-            callbacks.append(
-                tf.keras.callbacks.EarlyStopping(
-                    monitor=es_cfg.get('monitor', 'val_loss'),
-                    patience=es_cfg.get('patience', 10),
-                    min_delta=es_cfg.get('min_delta', 0.0),
-                    restore_best_weights=es_cfg.get('restore_best_weights', True)
-                )
-            )
-        # LR scheduler via ReduceLROnPlateau
-        lr_cfg = fit_cfg.get('lr_scheduler', {})
-        if lr_cfg.get('enabled', False):
-            callbacks.append(
-                ReduceLROnPlateau(
-                    monitor=lr_cfg.get('monitor', 'val_loss'),
-                    factor=lr_cfg.get('factor', 0.5),
-                    patience=lr_cfg.get('patience', 5),
-                    min_delta=lr_cfg.get('min_delta', 0.0),
-                    cooldown=lr_cfg.get('cooldown', 0),
-                    min_lr=lr_cfg.get('min_lr', 0.0)
-                )
-            )
-        # Model checkpointing
-        ckpt_cfg = fit_cfg.get('checkpointing', {})
-        if ckpt_cfg.get('enabled', False):
-            callbacks.append(
-                ModelCheckpoint(
-                    filepath=model_path,
-                    monitor=ckpt_cfg.get('monitor', 'val_accuracy'),
-                    mode=ckpt_cfg.get('mode', 'max'),
-                    save_best_only=ckpt_cfg.get('save_best_only', True),
-                    save_weights_only=True  # avoid unsupported full model save options
-                )
-            )
+    # Ensure the model variable is properly initialized and assigned before saving
+    if 'model' not in locals() or model is None:
+        logger.error("Model is not initialized. Creating a default model.")
+        model = create_mast_model(
+            config.get('feature', {}).get('target_shape', [128, 96]),
+            config.get('mast', {}),
+            config.get('model', {}).get('architecture', {}).get('transformer', {})
+        )[1]
 
-        # Add a custom callback to log predictions and labels during training
-        class DebugMetricsCallback(tf.keras.callbacks.Callback):
-            def on_epoch_end(self, epoch, logs=None):
-                precision = logs.get('precision') or logs.get('Precision')
-                recall = logs.get('recall') or logs.get('Recall')
-                auc = logs.get('auc') or logs.get('AUC')
-                print(f"Epoch {epoch + 1}: Precision={precision}, Recall={recall}, AUC={auc}")
+    # Add a callback to monitor NaN losses
+    class NaNLossCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            if logs and (np.isnan(logs.get('loss')) or np.isnan(logs.get('val_loss'))):
+                logger.error(f"NaN loss detected at epoch {epoch}. Stopping training.")
+                self.model.stop_training = True
 
-        # Add DebugMetricsCallback to the list of callbacks
-        callbacks.append(DebugMetricsCallback())
+    # Add the callback to the training process
+    nan_loss_callback = NaNLossCallback()
 
-        # Ensure class weights are used if the dataset is imbalanced
-        class_weights = training_params.get('class_weights', None)
-        if class_weights:
-            print(f"Using class weights: {class_weights}")
-            history = finetune_model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=training_params.get('epochs', 1), #debug 100
-                callbacks=callbacks,
-                class_weight=class_weights
-            )
-        else:
-            history = finetune_model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=training_params.get('epochs', 1), #debug 100
-                callbacks=callbacks
-            )
-        
-        train_end = time.time()
-        model_training_time_seconds = train_end - exec_start
+    # Train the model
+    logger.info("Starting model training...")
+    history = model.fit(
+        train_data, train_labels_expanded,
+        validation_data=(val_data, val_labels),
+        epochs=training_params.get('epochs', 1), #debug 100
+        batch_size=training_params.get('batch_size', 32),
+        callbacks=[nan_loss_callback]
+    )
 
-        # Generate and save training loss and accuracy graphs
-        viz = Visualizer(param=config)
-        viz.loss_plot(history)
-        loss_acc_path = os.path.join(result_dir, 'loss_accuracy.png')
-        viz.save_figure(loss_acc_path)
-        logger.info(f"Saved training curves to {loss_acc_path}")
-        
-        # Save the final model in SavedModel format or fallback to saving weights
-        try:
-            model.save(model_path, save_format='tf')  # Use SavedModel format
-        except ValueError as e:
-            logger.warning(f"Failed to save model in SavedModel format: {e}. Saving weights instead.")
-            model.save_weights(model_path + '_weights.h5')
-        
-        # Save training history
-        with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
-            pickle.dump(history.history, f)
-    
+    # Save the model
+    logger.info(f"Saving model to {model_path}")
+    model.save(model_path, save_format='tf')  # Use SavedModel format
+
     # Ensure the model is always assigned
     if 'model' not in locals():
         logger.error("Model is not initialized. Creating a default model.")
-        model = create_mast_model(target_shape, mast_params, transformer_params)[1]
+        model = create_mast_model(
+            config.get('feature', {}).get('target_shape', [128, 96]),
+            config.get('mast', {}),
+            config.get('model', {}).get('architecture', {}).get('transformer', {})
+        )[1]
 
     # Evaluate model on test set
     logger.info("Evaluating model on test set")
@@ -2360,13 +2059,15 @@ def main():
         msg="generate test_dataset",
         augment=False,
         param=config,
-        batch_size=20
+        batch_size=config.get('feature', {}).get('batch_size', 20)
     )
     
     # Preprocess test data
-    test_data = preprocess_spectrograms(test_data, target_shape)
+    test_data = preprocess_spectrograms(test_data, config.get('feature', {}).get('target_shape', [128, 96]))
     
     # Apply same normalization to test data as was applied to training data
+    train_mean = config.get('normalization', {}).get('train_mean', 0)
+    train_std = config.get('normalization', {}).get('train_std', 1)
     if train_std > 1e-6:
         test_data = (test_data - train_mean) / train_std
     else:
@@ -2382,7 +2083,7 @@ def main():
     
     # Generate predictions
     y_pred = model.predict(test_data)
-    y_pred_binary = (y_pred > 0.5).astype(int)
+    y_pred_binary = (y_pred > config.get('model', {}).get('threshold', 0.5)).astype(int)
     # Build classification report dict
     class_report = classification_report(test_labels_expanded, y_pred_binary, output_dict=True)
 

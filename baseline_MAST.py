@@ -37,6 +37,7 @@ from tqdm import tqdm
 from sklearn import metrics
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.mixture import GaussianMixture
+from sklearn.model_selection import train_test_split
 from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention, LayerNormalization, Reshape, Permute, Concatenate, GlobalAveragePooling1D
@@ -629,6 +630,39 @@ def configure_mixed_precision(enable=True):
             logger.warning(f"Failed to enable mixed precision: {e}")
     else:
         logger.info("Mixed precision training is disabled.")
+
+########################################################################
+# Dataset generator
+########################################################################
+def dataset_generator(base_dir, config):
+    """
+    Placeholder function to load and split the dataset into training, validation, and test sets.
+    Args:
+        base_dir (str): Base directory containing the dataset.
+        config (dict): Configuration dictionary.
+
+    Returns:
+        tuple: Train files, train labels, validation files, validation labels, test files, test labels.
+    """
+    from sklearn.model_selection import train_test_split
+    import glob
+
+    # Load all files with the specified extension
+    file_extension = config.get('dataset', {}).get('file_extension', 'wav')
+    all_files = glob.glob(f"{base_dir}/**/*.{file_extension}", recursive=True)
+
+    # Generate dummy labels (0 for normal, 1 for abnormal)
+    labels = [0 if 'normal' in file else 1 for file in all_files]
+
+    # Split into train, validation, and test sets
+    train_files, test_files, train_labels, test_labels = train_test_split(
+        all_files, labels, test_size=0.2, random_state=42, stratify=labels
+    )
+    train_files, val_files, train_labels, val_labels = train_test_split(
+        train_files, train_labels, test_size=0.1, random_state=42, stratify=train_labels
+    )
+
+    return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
 ########################################################################
 # main

@@ -2355,7 +2355,7 @@ def main():
         with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
             pickle.dump(history.history, f)
     
-    # Ensure the model is always assigned
+    # Ensure the model is initialized before use
     if 'model' not in locals():
         logger.error("Model is not initialized. Creating a default model.")
         model = create_mast_model(target_shape, mast_params, transformer_params)[1]

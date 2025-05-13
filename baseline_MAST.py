@@ -1986,6 +1986,10 @@ def main():
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
             normal_dir, config)
 
+        # Ensure target_shape is defined from the YAML configuration
+        if 'target_shape' not in locals():
+            target_shape = config.get('feature', {}).get('target_shape', [128, 96])
+
         # Preprocess and normalize data
         logger.info("Preprocessing and normalizing data...")
         train_data = preprocess_spectrograms(train_files, target_shape, config)

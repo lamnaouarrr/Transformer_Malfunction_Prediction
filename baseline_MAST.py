@@ -665,6 +665,50 @@ def dataset_generator(base_dir, config):
     return train_files, train_labels, val_files, val_labels, test_files, test_labels
 
 ########################################################################
+# Cached spectrogram function
+########################################################################
+def cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param):
+    """
+    Retrieve a spectrogram from the cache if available, or generate and save it to the cache.
+
+    Args:
+        file_path (str): Path to the audio file.
+        n_mels (int): Number of mel bands.
+        n_fft (int): FFT window size.
+        hop_length (int): Hop length for FFT.
+        power (float): Power for the mel spectrogram.
+        augment (bool): Whether to apply augmentation.
+        param (dict): Additional parameters.
+
+    Returns:
+        np.ndarray: Spectrogram array.
+    """
+    # Generate a unique cache key based on the file path and parameters
+    cache_dir = param.get("cache", {}).get("directory", "./cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = hashlib.md5((file_path + str(n_mels) + str(n_fft) + str(hop_length) + str(power) + str(augment)).encode()).hexdigest()
+    cache_path = os.path.join(cache_dir, f"{cache_key}.npy")
+
+    # Check if the spectrogram is already cached
+    if os.path.exists(cache_path):
+        try:
+            return np.load(cache_path)
+        except Exception as e:
+            logger.warning(f"Failed to load cached spectrogram for {file_path}: {e}")
+
+    # Generate the spectrogram if not cached
+    spectrogram = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+
+    # Save the spectrogram to the cache
+    if spectrogram is not None:
+        try:
+            np.save(cache_path, spectrogram)
+        except Exception as e:
+            logger.warning(f"Failed to save spectrogram to cache for {file_path}: {e}")
+
+    return spectrogram
+
+########################################################################
 # main
 ########################################################################
 def main():

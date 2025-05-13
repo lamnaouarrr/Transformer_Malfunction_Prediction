@@ -27,11 +27,8 @@ import seaborn as sns
 import math
 import gc
 import hashlib
-import optuna
-import subprocess
 
 
-from numba import cuda
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
@@ -46,7 +43,7 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from skimage.metrics import structural_similarity as ssim
 from transformers import TFViTModel, ViTConfig
-from tensorflow.keras import layers
+from tensorflow.keras import layers  # Add explicit import for layers module
 ########################################################################
 
 ########################################################################
@@ -55,55 +52,81 @@ from tensorflow.keras import layers
 __versions__ = "3.0.0"
 ########################################################################
 
-# Load configuration from YAML
-with open("baseline_MAST.yaml", "r") as yaml_file:
-    config = yaml.safe_load(yaml_file)
+def binary_cross_entropy_loss(y_true, y_pred):
+    """
+    Binary cross-entropy loss for autoencoder with improved memory efficiency
+    """
+    # Use TF's built-in binary_crossentropy for better memory efficiency
+    return tf.keras.losses.binary_crossentropy(y_true, y_pred)
 
-# Clear GPU memory if enabled in config
-if config.get("clear_gpu_memory", False):
-    def clear_gpu_memory():
-        """Clear GPU memory to prevent OOM errors."""
-        tf.keras.backend.clear_session()
-        gc.collect()
-        try:
-            cuda.select_device(0)
-            cuda.close()
-        except Exception as e:
-            logger.warning(f"Failed to clear GPU memory: {e}")
-
-    clear_gpu_memory()
-
-# Focal loss function
-# Modify to accept gamma and alpha as parameters
-def focal_loss(gamma, alpha):
+def focal_loss(gamma=2.0, alpha=0.25):
+    """
+    Focal Loss implementation for binary classification with imbalanced datasets.
+    
+    Args:
+        gamma: Focusing parameter. Higher values increase focus on hard examples.
+        alpha: Weighting factor for the positive class.
+    
+    Returns:
+        A loss function that computes focal loss.
+    """
     def loss_function(y_true, y_pred):
-        dtype = y_pred.dtype
-        y_true = tf.cast(y_true, dtype)
+        # Cast true labels and constants to prediction dtype
         dtype = y_pred.dtype
         y_true = tf.cast(y_true, dtype)
         eps = tf.cast(tf.keras.backend.epsilon(), dtype)
         gamma_c = tf.cast(gamma, dtype)
         alpha_c = tf.cast(alpha, dtype)
+        # Clip predictions for numerical stability
         y_pred = tf.clip_by_value(y_pred, eps, 1 - eps)
+        # Calculate cross entropy
         cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
+        # Calculate focal weight
         p_t = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), y_pred, 1 - y_pred)
         focal_weight = tf.pow(1 - p_t, gamma_c)
+        # Apply alpha weighting
         alpha_weight = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), alpha_c, 1 - alpha_c)
+        # Combine for final loss
         loss = alpha_weight * focal_weight * cross_entropy
         return tf.reduce_mean(loss)
-
+    
     return loss_function
 
-# Positional encoding function
-def positional_encoding(seq_len, d_model):
-    encoding_type = config["positional_encoding"]["encoding_type"]
+
+
+def positional_encoding(seq_len, d_model, encoding_type="sinusoidal"):
+    """
+    Create positional encodings for the transformer model
+    
+    Args:
+        seq_len: sequence length (int)
+        d_model: depth of the model (int)
+        encoding_type: type of positional encoding
+        
+    Returns:
+        Positional encoding tensor with shape (1, seq_len, d_model)
+    """
+    # Create position vector
     positions = np.arange(seq_len)[:, np.newaxis]
+    
+    # Create dimension vector
     div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
+    
+    # Create encoding
     pe = np.zeros((seq_len, d_model))
+    
+    # Apply sin to even indices
     pe[:, 0::2] = np.sin(positions * div_term)
+    
+    # Apply cos to odd indices
     pe[:, 1::2] = np.cos(positions * div_term)
+    
+    # Add batch dimension and convert to tensor
     pe = np.expand_dims(pe, axis=0)
+    
     return tf.cast(pe, dtype=tf.float32)
+
+
 
 ########################################################################
 # setup STD I/O
@@ -398,7 +421,7 @@ def file_to_spectrogram(file_name,
 
 
 
-def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=16):
+def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
     """
     Process a list of files into spectrograms with optional labels - memory optimized version with caching
     """
@@ -410,10 +433,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     # Check if caching is enabled in config
     use_cache = param.get("cache", {}).get("enabled", True) if param else True
     
-    # Add cache metrics tracking
-    cache_hits = 0
-    cache_misses = 0
-
     # First pass: determine dimensions and count valid files
     valid_files = []
     valid_labels = [] if labels is not None else None
@@ -423,19 +442,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
         try:
-            # Use cached version for dimension check if enabled and not augmenting
-            spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
-            if spec is not None:
-                cache_hits += 1
-                valid_files.append(file_path)
-                if labels is not None:
-                    valid_labels.append(labels[idx])
-                max_freq = max(max_freq, spec.shape[0])
-                max_time = max(max_time, spec.shape[1])
-                continue
-            else:
-                cache_misses += 1
-                
             # Use cached version for dimension check if enabled and not augmenting
             if use_cache and not augment:
                 spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
@@ -455,8 +461,6 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         except Exception as e:
             logger.error(f"Error checking dimensions for {file_path}: {e}")
     
-    logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {cache_hits / (cache_hits + cache_misses) * 100:.1f}% hit rate")
-
     # Use target shape from parameters if available
     target_shape = param.get("feature", {}).get("target_shape", None)
     if target_shape:
@@ -473,6 +477,10 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     spectrograms = np.zeros((total_valid, max_freq, max_time), dtype=np.float32)
     processed_labels = np.array(valid_labels) if valid_labels else None
     
+    # Add cache metrics tracking
+    cache_hits = 0
+    cache_misses = 0
+    
     for batch_start in tqdm(range(0, total_valid, batch_size), desc=f"{msg} (processing)"):
         batch_end = min(batch_start + batch_size, total_valid)
         batch_files = valid_files[batch_start:batch_end]
@@ -480,10 +488,19 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         for i, file_path in enumerate(batch_files):
             try:
                 # Use cached version if enabled and not augmenting
+                cache_start_time = time.time()
                 if use_cache and not augment:
                     spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+                    # Check if the file was pulled from cache
+                    cache_file = os.path.join(param.get("cache", {}).get("directory", "./cache/spectrograms"), 
+                                            hashlib.md5(f"{file_path}_{n_mels}_{n_fft}_{hop_length}_{power}".encode()).hexdigest() + ".npy")
+                    if os.path.exists(cache_file) and os.path.getmtime(cache_file) < cache_start_time:
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
                 else:
                     spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                    cache_misses += 1
                 
                 if spec is not None:
                     # Handle 3D input
@@ -494,9 +511,14 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                     if spec.shape[0] != max_freq or spec.shape[1] != max_time:
                         try:
                             from skimage.transform import resize
-                            spec = resize(spec, (max_freq, max_time), mode='reflect', anti_aliasing=True)
-                        except ImportError:
-                            logger.error("scikit-image is required for resizing spectrograms")
+                            spec = resize(spec, (max_freq, max_time), anti_aliasing=True, mode='reflect')
+                        except Exception as e:
+                            # Fall back to simple padding/cropping
+                            temp_spec = np.zeros((max_freq, max_time))
+                            freq_dim = min(spec.shape[0], max_freq)
+                            time_dim = min(spec.shape[1], max_time)
+                            temp_spec[:freq_dim, :time_dim] = spec[:freq_dim, :time_dim]
+                            spec = temp_spec
                     
                     # Store in output array
                     spectrograms[batch_start + i] = spec
@@ -504,19 +526,18 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
                     # Clear memory
                     del spec
                     
-            except tf.errors.ResourceExhaustedError:
-                logger.warning("CUDA OOM detected. Reducing batch size dynamically.")
-                batch_size = max(1, batch_size // 2)
-                gc.collect()
-                tf.keras.backend.clear_session()
-                return list_to_spectrograms(file_list, labels, msg, augment, param, batch_size)
-
             except Exception as e:
                 logger.error(f"Error processing file {file_path}: {e}")
                 # Fill with zeros for failed files
                 spectrograms[batch_start + i] = np.zeros((max_freq, max_time))
         
         gc.collect()
+
+    # Log cache performance
+    if use_cache:
+        total_files = cache_hits + cache_misses
+        hit_rate = (cache_hits / total_files) * 100 if total_files > 0 else 0
+        logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {hit_rate:.1f}% hit rate")
 
     spectrograms = spectrograms.astype(np.float32)
     
@@ -900,34 +921,6 @@ class TerminateOnNaN(tf.keras.callbacks.Callback):
 ########################################################################
 # model
 ########################################################################
-class ContrastSigmoidLayer(tf.keras.layers.Layer):
-    def call(self, inputs):
-        return tf.sigmoid(5.0 * inputs)
-
-class ExtractCLSLayer(tf.keras.layers.Layer):
-    def call(self, inputs):
-        return inputs[:, 0]
-
-class ExtractTokensLayer(tf.keras.layers.Layer):
-    def call(self, inputs):
-        return inputs[:, 1:]
-
-class DepthToSpaceLayer(tf.keras.layers.Layer):
-    def __init__(self, num_patches_height, num_patches_width, patch_height, patch_width):
-        super().__init__()
-        self.num_patches_height = num_patches_height
-        self.num_patches_width = num_patches_width
-        self.patch_height = patch_height
-        self.patch_width = patch_width
-
-    def call(self, inputs):
-        reshaped = tf.reshape(inputs, [
-            tf.shape(inputs)[0],
-            self.num_patches_height, self.num_patches_width,
-            self.patch_height * self.patch_width
-        ])
-        return tf.nn.depth_to_space(reshaped, block_size=self.patch_height)
-
 def create_model(input_shape, transformer_params):
     # Extract transformer parameters
     num_heads = transformer_params.get("num_heads", 4)
@@ -997,8 +990,12 @@ def create_model(input_shape, transformer_params):
     # This is the key fix for the narrow prediction range issue
     raw_output = layers.Dense(1, activation=None)(x)
     
-    # Add a subclassed layer to increase prediction contrast 
-    outputs = ContrastSigmoidLayer(name='contrast_sigmoid')(raw_output)
+    # Add a lambda layer to increase prediction contrast 
+    # This will help spread predictions further from 0.5 threshold
+    outputs = layers.Lambda(
+        lambda x: tf.sigmoid(5.0 * x),  # Multiply by 5 to increase contrast/separation
+        name='contrast_sigmoid'
+    )(raw_output)
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model
@@ -1034,7 +1031,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     num_heads = transformer_params.get("num_heads", 12)
     num_layers = transformer_params.get("num_layers", 12)
     mlp_dim = transformer_params.get("mlp_dim", 3072)
-    dropout_rate = 0.1
+    dropout_rate = transformer_params.get("dropout_rate", 0.1)
     
     # Add explicit masking rate for pretraining
     mask_prob = mast_params.get("pretraining", {}).get("masking", {}).get("probability", 0.15)
@@ -1139,10 +1136,10 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     x = layers.LayerNormalization(epsilon=1e-6)(x)
     
     # Extract the [CLS] token output for classification (first token)
-    cls_output = ExtractCLSLayer(name="extract_cls")(x)
+    cls_output = layers.Lambda(lambda x: x[:, 0], name="extract_cls")(x)
     
     # For pretraining model: Reconstruct the original input from all tokens (excluding CLS)
-    reconstruction_tokens = ExtractTokensLayer(name="extract_tokens")(x)
+    reconstruction_tokens = layers.Lambda(lambda x: x[:, 1:], name="extract_tokens")(x)
     reconstructed = reconstruction_head(reconstruction_tokens)
     reconstructed = reconstruction_head_2(reconstructed)
     
@@ -1150,7 +1147,18 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     reconstructed = layers.Reshape((num_patches_height, num_patches_width, patch_height * patch_width))(reconstructed)
     
     # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
-    reconstructed = DepthToSpaceLayer(num_patches_height, num_patches_width, patch_height, patch_width)(reconstructed)
+    reconstructed = layers.Lambda(
+        lambda x: tf.nn.depth_to_space(
+            tf.reshape(x, [
+                tf.shape(x)[0],
+                tf.shape(x)[1] * patch_height // 2,  # Adjust dimensions to be compatible with block_size=2
+                tf.shape(x)[2] * patch_width // 2,
+                4  # Ensure this is block_size² (2²=4) for depth_to_space to work
+            ]),
+            block_size=2
+        ),
+        name="reconstruction_reshape"
+    )(reconstructed)
     
     # Create classifier head for anomaly detection
     classifier = layers.Dense(512, activation='gelu', name="classifier_dense_1")(cls_output)
@@ -1909,11 +1917,11 @@ def cached_file_to_spectrogram(file_name, n_mels=64, n_fft=1024, hop_length=512,
     # Don't cache augmented spectrograms as they're random
     if augment:
         return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, augment, param)
-
+    
     # Define the calculation function to be cached
     def calculate_spectrogram():
-        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, augment, param)
-
+        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, False, param)
+    
     # Use the caching mechanism
     return file_caching_mechanism(file_name, calculate_spectrogram, param)
 
@@ -1930,7 +1938,7 @@ def main():
     if gpus:
         tf.config.experimental.set_virtual_device_configuration(
             gpus[0],
-            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=30000)]  # Adjusted to fit within 32GB GPU memory
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=28672)]
         )
     # Print current VRAM usage to verify GPU memory setup
     used_mem, total_mem, usage_pct = monitor_gpu_usage()
@@ -1977,82 +1985,270 @@ def main():
         # Set random seeds for reproducibility
         tf.random.set_seed(training_params.get('random_seed', 42))
         np.random.seed(training_params.get('random_seed', 42))
-
+        
         # Load and preprocess dataset
         logger.info("Loading dataset")
+        # Fix: Use the normal directory to properly process both normal and abnormal data
         base_dir = config.get('base_directory', './dataset')
         normal_dir = os.path.join(base_dir, 'normal')
-
+        
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
             normal_dir, config)
-
-        # Ensure target_shape is defined from the YAML configuration
-        if 'target_shape' not in locals():
-            target_shape = config.get('feature', {}).get('target_shape', [128, 96])
-
-        # Preprocess and normalize data
-        logger.info("Preprocessing and normalizing data...")
+        
+        # Get input shape from data
+        target_shape = (config["feature"]["n_mels"], 96)
+        logger.info(f"Target spectrogram shape: {target_shape}")
+        
+        # Preprocess to ensure consistent shapes
+        logger.info("Preprocessing training data...")
+        # Pass the config to preprocess_spectrograms
         train_data = preprocess_spectrograms(train_files, target_shape, config)
+        logger.info(f"Preprocessed train data shape: {train_data.shape}")
+
+        logger.info("Preprocessing validation data...")
+        # Pass the config to preprocess_spectrograms
         val_data = preprocess_spectrograms(val_files, target_shape, config)
+        logger.info(f"Preprocessed validation data shape: {val_data.shape}")
+        
+        # Normalize data for better training
+        logger.info("Normalizing data...")
+        # Calculate mean and std from training data
         train_mean = np.mean(train_data)
         train_std = np.std(train_data)
+        logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
+
+        # Apply normalization if std is not too small
         if train_std > 1e-6:
             train_data = (train_data - train_mean) / train_std
             val_data = (val_data - train_mean) / train_std
+            logger.info("Z-score normalization applied")
+        else:
+            # If std is too small, just center the data
+            train_data = train_data - train_mean
+            val_data = val_data - train_mean
+            logger.info("Mean centering applied (std too small for z-score)")
 
         # Balance the dataset
         logger.info("Balancing dataset...")
         train_data, train_labels_expanded = balance_dataset(train_data, train_labels, augment_minority=True)
-
-        # Create the model
-        logger.info("Creating MAST model...")
+        
+        # Create pretrain and finetune models
         pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
+        
+        # Check if we should perform pretraining
+        if mast_params.get('pretraining', {}).get('enabled', True):
+            logger.info("Starting MAST pretraining phase with masking")
+            
+            # Configure pretraining parameters
+            pretrain_epochs = mast_params.get('pretraining', {}).get('epochs', 50)
+            pretrain_batch_size = mast_params.get('pretraining', {}).get('batch_size', 32)
+            # Cast learning rate from config to float (handles strings like '1e-4')
+            pretrain_lr_raw = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
+            pretrain_lr = float(pretrain_lr_raw)
+            
+            # Prepare data for pretraining (no labels needed, just the spectrograms)
+            # Combine all available data for pretraining
+            X_pretrain = np.concatenate([train_data, val_data], axis=0)
+            
+            # Apply masking to create input-target pairs for reconstruction
+            mask_probability = mast_params.get('pretraining', {}).get('masking', {}).get('probability', 0.15)
+            mask_length = mast_params.get('pretraining', {}).get('masking', {}).get('length', 8)
+            
+            # Create a data generator for pretraining
+            def pretrain_generator():
+                while True:
+                    # Select random batch
+                    indices = np.random.choice(len(X_pretrain), size=pretrain_batch_size)
+                    batch_x = X_pretrain[indices]
+                    
+                    # Add channel dimension if needed
+                    if len(batch_x.shape) == 3:
+                        batch_x = np.expand_dims(batch_x, axis=-1)
+                    
+                    # Apply masking
+                    masked_x, _ = apply_masking(
+                        batch_x, 
+                        mask_probability=mask_probability,
+                        mask_length=mask_length
+                    )
+                    
+                    # The model should reconstruct the original unmasked input
+                    yield masked_x, batch_x
+            
+            # Create tf.data.Dataset from generator
+            pretrain_dataset = tf.data.Dataset.from_generator(
+                pretrain_generator,
+                output_signature=(
+                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32),
+                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32)
+                )
+            ).prefetch(tf.data.AUTOTUNE)
+            
+            # Create LR schedule for pretraining
+            pretrain_lr_schedule = create_lr_schedule(
+                pretrain_lr,
+                warmup_epochs=5,
+                decay_epochs=pretrain_epochs
+            )
+            
+            # Compile the pretraining model
+            pretrain_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=pretrain_lr),
+                loss=tf.keras.losses.MeanSquaredError(),
+                metrics=['mse']
+            )
+            
+            # Create callbacks for pretraining
+            pretrain_callbacks = [
+                tf.keras.callbacks.LearningRateScheduler(pretrain_lr_schedule),
+                tf.keras.callbacks.TensorBoard(
+                    log_dir=f"logs/log_mast/pretrain_{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                    histogram_freq=1
+                ),
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath="model/MAST/pretrain_model.keras",
+                    save_best_only=True,
+                    monitor='val_loss'
+                )
+            ]
+            
+            # Train the pretraining model
+            pretrain_model.fit(
+                pretrain_dataset,
+                steps_per_epoch=len(X_pretrain) // pretrain_batch_size,
+                epochs=pretrain_epochs,
+                callbacks=pretrain_callbacks,
+                verbose=1
+            )
+            
+            logger.info("MAST pretraining completed")
+            
+            # Save the pretrained weights
+            pretrain_model.save_weights("model/MAST/pretrain_weights.keras")
+            
+            # Load the pretrained weights into the fine-tuning model
+            # The shared Transformer layers will have the same names
+            logger.info("Transferring pretrained weights to fine-tuning model")
+            finetune_model.load_weights("model/MAST/pretrain_weights.keras", by_name=True, skip_mismatch=True)
+        
+        # Now proceed with fine-tuning for anomaly detection
+        logger.info("Starting MAST fine-tuning phase for anomaly detection")
+        
+        # Create cosine annealing LR schedule and AdamW optimizer with weight decay
+        initial_lr = training_params.get('learning_rate', 1e-5)
+        decay_steps = training_params.get('decay_steps', 10000)
+        fit_cfg = config.get('fit', {})
+        compile_cfg = fit_cfg.get('compile', {})
+        loss_type = compile_cfg.get('loss', 'binary_crossentropy')
+        if loss_type == 'focal_loss':
+            fl_cfg = compile_cfg.get('focal_loss', {})
+            loss_fn = focal_loss(gamma=fl_cfg.get('gamma', 2.0), alpha=fl_cfg.get('alpha', 0.25))
+        else:
+            loss_fn = tf.keras.losses.BinaryCrossentropy()
+        lr_cfg = fit_cfg.get('lr_scheduler', {})
+        if lr_cfg.get('type') == 'cosine_annealing_restarts':
+            first_decay = lr_cfg.get('first_decay_steps', decay_steps)
+            t_mul = lr_cfg.get('t_mul', 2.0)
+            alpha = lr_cfg.get('alpha', 0.0)
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+                initial_learning_rate=initial_lr,
+                first_decay_steps=first_decay,
+                t_mul=t_mul,
+                m_mul=1.0,
+                alpha=alpha
+            )
+        else:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=initial_lr, decay_steps=decay_steps
+            )
+        weight_decay = training_params.get('weight_decay', 1e-3)
+        optimizer = tf.keras.optimizers.experimental.AdamW(
+            learning_rate=lr_schedule, weight_decay=weight_decay
+        )
+        finetune_model.compile(
+            optimizer=optimizer,
+            loss=loss_fn,
+            metrics=['accuracy', 'AUC', 'Precision', 'Recall']
+        )
+        
+        # Add channel dimension if needed
+        if len(train_data.shape) == 3:
+            train_data = np.expand_dims(train_data, axis=-1)
+            val_data = np.expand_dims(val_data, axis=-1)
+        
+        # Build tf.data datasets for efficient training
+        batch_size = training_params.get('batch_size', 32)
+        train_ds = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+        train_ds = train_ds.shuffle(buffer_size=train_data.shape[0]).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
+        val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        # Setup callbacks for fine-tuning
+        callbacks = []
+        # Early stopping
+        es_cfg = fit_cfg.get('early_stopping', {})
+        if es_cfg.get('enabled', False):
+            callbacks.append(
+                tf.keras.callbacks.EarlyStopping(
+                    monitor=es_cfg.get('monitor', 'val_loss'),
+                    patience=es_cfg.get('patience', 10),
+                    min_delta=es_cfg.get('min_delta', 0.0),
+                    restore_best_weights=es_cfg.get('restore_best_weights', True)
+                )
+            )
+        # LR scheduler via ReduceLROnPlateau
+        lr_cfg = fit_cfg.get('lr_scheduler', {})
+        if lr_cfg.get('enabled', False):
+            callbacks.append(
+                ReduceLROnPlateau(
+                    monitor=lr_cfg.get('monitor', 'val_loss'),
+                    factor=lr_cfg.get('factor', 0.5),
+                    patience=lr_cfg.get('patience', 5),
+                    min_delta=lr_cfg.get('min_delta', 0.0),
+                    cooldown=lr_cfg.get('cooldown', 0),
+                    min_lr=lr_cfg.get('min_lr', 0.0)
+                )
+            )
+        # Model checkpointing
+        ckpt_cfg = fit_cfg.get('checkpointing', {})
+        if ckpt_cfg.get('enabled', False):
+            callbacks.append(
+                ModelCheckpoint(
+                    filepath=model_path,
+                    monitor=ckpt_cfg.get('monitor', 'val_accuracy'),
+                    mode=ckpt_cfg.get('mode', 'max'),
+                    save_best_only=ckpt_cfg.get('save_best_only', True),
+                    save_weights_only=True  # avoid unsupported full model save options
+                )
+            )
 
-        # Save the fine-tuned model after training
+        # Train the fine-tuning model
+        train_start = time.time()
+        history = finetune_model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=training_params.get('epochs', 100),
+            callbacks=callbacks,
+            verbose=1
+        )
+        train_end = time.time()
+        model_training_time_seconds = train_end - train_start
+
+        # Generate and save training loss and accuracy graphs
+        viz = Visualizer(param=config)
+        viz.loss_plot(history)
+        loss_acc_path = os.path.join(result_dir, 'loss_accuracy.png')
+        viz.save_figure(loss_acc_path)
+        logger.info(f"Saved training curves to {loss_acc_path}")
+        
+        # Save the final model
         model = finetune_model
-
-    # Ensure the model variable is properly initialized and assigned before saving
-    if 'model' not in locals() or model is None:
-        logger.error("Model is not initialized. Creating a default model.")
-        model = create_mast_model(
-            config.get('feature', {}).get('target_shape', [128, 96]),
-            config.get('mast', {}),
-            config.get('model', {}).get('architecture', {}).get('transformer', {})
-        )[1]
-
-    # Add a callback to monitor NaN losses
-    class NaNLossCallback(tf.keras.callbacks.Callback):
-        def on_epoch_end(self, epoch, logs=None):
-            if logs and (np.isnan(logs.get('loss')) or np.isnan(logs.get('val_loss'))):
-                logger.error(f"NaN loss detected at epoch {epoch}. Stopping training.")
-                self.model.stop_training = True
-
-    # Add the callback to the training process
-    nan_loss_callback = NaNLossCallback()
-
-    # Train the model
-    logger.info("Starting model training...")
-    history = model.fit(
-        train_data, train_labels_expanded,
-        validation_data=(val_data, val_labels),
-        epochs=training_params.get('epochs', 1), #debug 100
-        batch_size=training_params.get('batch_size', 32),
-        callbacks=[nan_loss_callback]
-    )
-
-    # Save the model
-    logger.info(f"Saving model to {model_path}")
-    model.save(model_path, save_format='tf')  # Use SavedModel format
-
-    # Ensure the model is always assigned
-    if 'model' not in locals():
-        logger.error("Model is not initialized. Creating a default model.")
-        model = create_mast_model(
-            config.get('feature', {}).get('target_shape', [128, 96]),
-            config.get('mast', {}),
-            config.get('model', {}).get('architecture', {}).get('transformer', {})
-        )[1]
-
+        # Save only weights to avoid JSON serialization issues
+        model.save_weights(model_path)
+        
+        # Save training history
+        with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
+            pickle.dump(history.history, f)
+    
     # Evaluate model on test set
     logger.info("Evaluating model on test set")
     
@@ -2063,15 +2259,13 @@ def main():
         msg="generate test_dataset",
         augment=False,
         param=config,
-        batch_size=config.get('feature', {}).get('batch_size', 20)
+        batch_size=20
     )
     
     # Preprocess test data
-    test_data = preprocess_spectrograms(test_data, config.get('feature', {}).get('target_shape', [128, 96]))
+    test_data = preprocess_spectrograms(test_data, target_shape)
     
     # Apply same normalization to test data as was applied to training data
-    train_mean = config.get('normalization', {}).get('train_mean', 0)
-    train_std = config.get('normalization', {}).get('train_std', 1)
     if train_std > 1e-6:
         test_data = (test_data - train_mean) / train_std
     else:
@@ -2087,7 +2281,7 @@ def main():
     
     # Generate predictions
     y_pred = model.predict(test_data)
-    y_pred_binary = (y_pred > config.get('model', {}).get('threshold', 0.5)).astype(int)
+    y_pred_binary = (y_pred > 0.5).astype(int)
     # Build classification report dict
     class_report = classification_report(test_labels_expanded, y_pred_binary, output_dict=True)
 
@@ -2130,14 +2324,16 @@ def main():
             'TestAccuracy': accuracy,
             'TrainAccuracy': train_acc,
             'ValidationAccuracy': val_acc
-        }
+        },
+        'model_path': model_path,  # Include model path for API to load
+        'result_file_path': yaml_file_path  # Include result file path for API to locate
     }
 
     # Save as YAML file
     yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))
     with open(yaml_file_path, 'w') as f:
         yaml.safe_dump(results, f, default_flow_style=False)
-    
+
     logger.info(f"Test results saved to {yaml_file_path}")
     
     return model

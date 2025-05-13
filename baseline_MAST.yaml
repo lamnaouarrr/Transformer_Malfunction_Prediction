@@ -204,8 +204,3 @@ logging:
   log_directory: "./logs/log_MAST"
   log_file: "baseline_MAST.log"
   log_level: "DEBUG"
-
-# Hyperparameter Optimization
-optimization:
-  optuna:
-    enable: false

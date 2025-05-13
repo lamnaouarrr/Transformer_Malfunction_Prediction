@@ -208,34 +208,4 @@ logging:
 # Hyperparameter Optimization
 optimization:
   optuna:
-    enable: true
-    direction: "maximize"
-    n_trials: 1  # Increased from 50 for maximum exploration debug 100
-    timeout: null
-    metric: "val_accuracy"
-    sampler: "TPESampler"
-    trial_epochs: 1  # Increased for better evaluation debug 20
-    parameters:
-      learning_rate:
-        low: 1e-8
-        high: 1e-1
-        log: true
-      num_encoder_layers:
-        low: 2
-        high: 12
-        step: 1
-      dropout_rate:
-        low: 0.0
-        high: 0.7
-      mlp_dropout:
-        low: 0.0
-        high: 0.7
-      early_stopping_patience:
-        type: "int"
-        low: 5
-        high: 15
-      early_stopping_threshold:
-        type: "loguniform"
-        low: 1e-4
-        high: 1e-2
-    result_file: "result/result_MAST/optuna_best_params.yaml"
+    enable: false

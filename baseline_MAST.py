@@ -1327,7 +1327,7 @@ def preprocess_spectrograms(spectrograms, target_shape, param=None):
         else:
             spectrograms = result
     
-    # Handle empty preprocessed data
+    # Handle empty spectrograms
     if spectrograms.shape[0] == 0 or spectrograms.shape[1] == 0 or spectrograms.shape[2] == 0:
         logger.error("No valid spectrograms generated. Please check the input data and parameters.")
         return None, None
@@ -2028,6 +2028,12 @@ def main():
         logger.info("Preprocessing training data...")
         # Pass the config to preprocess_spectrograms
         train_data = preprocess_spectrograms(train_files, target_shape, config)
+
+        # Fix AttributeError by checking train_data
+        if train_data is None or isinstance(train_data, tuple):
+            logger.error("Train data is invalid. Please check preprocessing.")
+            return
+
         logger.info(f"Preprocessed train data shape: {train_data.shape}")
 
         logger.info("Preprocessing validation data...")

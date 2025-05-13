@@ -1877,18 +1877,27 @@ def file_caching_mechanism(file_path, calculation_func, param=None, force_recalc
     # Check if cache file exists and whether to use it
     use_cache = param.get("cache", {}).get("enabled", True) and not force_recalculate
     
+    # Add logging for cache hits and misses
+    cache_hits = 0
+    cache_misses = 0
+
     if use_cache and os.path.exists(cache_file):
         try:
-            # Load from cache
             result = np.load(cache_file, allow_pickle=True)
             if result is not None and isinstance(result, np.ndarray):
-                # If result is an array with the expected dimensions, return it
-                if len(result.shape) >= 2:  # Basic validation
+                if len(result.shape) >= 2:
+                    cache_hits += 1
+                    logger.info(f"Cache hit for {file_path}")
                     return result
             logger.warning(f"Invalid cached data for {file_path}, recalculating")
         except Exception as e:
             logger.warning(f"Error loading cache for {file_path}: {e}, recalculating")
-    
+            cache_misses += 1
+    else:
+        cache_misses += 1
+
+    logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses")
+
     # Calculate the result
     result = calculation_func()
     

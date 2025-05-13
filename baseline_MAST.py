@@ -613,6 +613,24 @@ def monitor_gpu_usage():
         return 0, 0, 0.0
 
 ########################################################################
+# Mixed precision configuration
+########################################################################
+def configure_mixed_precision(enable=True):
+    """
+    Configure mixed precision training if enabled and supported by the hardware.
+    """
+    if enable:
+        try:
+            from tensorflow.keras.mixed_precision import experimental as mixed_precision
+            policy = mixed_precision.Policy('mixed_float16')
+            mixed_precision.set_policy(policy)
+            logger.info("Mixed precision training enabled.")
+        except ImportError as e:
+            logger.warning(f"Failed to enable mixed precision: {e}")
+    else:
+        logger.info("Mixed precision training is disabled.")
+
+########################################################################
 # main
 ########################################################################
 def main():

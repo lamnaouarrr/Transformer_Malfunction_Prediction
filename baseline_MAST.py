@@ -1046,7 +1046,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     x = layers.Dropout(dropout_rate)(x)
     
     # Define block_size based on patch size
-    block_size = patch_size // patch_height
+    block_size = max(2, patch_size // patch_height)
     
     # Create a separate reconstruction head for pretraining
     reconstruction_head = layers.Dense(

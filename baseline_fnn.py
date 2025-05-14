@@ -216,12 +216,15 @@ def file_to_vector_array(file_name,
     
     try:
         sr, y = demux_wav(file_name)
+        print(f"DEBUG: Processing file: {file_name}")
         if y is None:
+            print(f"DEBUG: Failed to load audio for file: {file_name}")
             logger.error(f"Failed to load {file_name}")
             return np.empty((0, dims), float)
         
         # Skip files that are too short
         if len(y) < n_fft:
+            print(f"DEBUG: File too short: {file_name}")
             logger.warning(f"File too short: {file_name}")
             return np.empty((0, dims), float)
             
@@ -320,6 +323,10 @@ def list_to_vector_array_with_labels(file_list, labels,
         batch_end = min(batch_start + batch_size, len(file_list))
         batch_files = file_list[batch_start:batch_end]
         batch_labels = labels[batch_start:batch_end]
+        
+        print(f"DEBUG: Processing batch from {batch_start} to {batch_end}")
+        print(f"DEBUG: Batch files: {batch_files[:5]} (showing up to 5)")
+        print(f"DEBUG: Batch labels: {batch_labels[:5]} (showing up to 5)")
         
         batch_vectors = []
         batch_expanded_labels = []

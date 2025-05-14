@@ -216,7 +216,6 @@ def file_to_vector_array(file_name,
     
     try:
         sr, y = demux_wav(file_name)
-        print(f"DEBUG: Processing file: {file_name}")
         if y is None:
             print(f"DEBUG: Failed to load audio for file: {file_name}")
             logger.error(f"Failed to load {file_name}")

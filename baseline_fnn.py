@@ -29,7 +29,7 @@ from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention
-from tensorflow.keras.losses import mean_squared_error
+from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import classification_report, confusion_matrix
@@ -43,6 +43,8 @@ from tensorflow.keras.optimizers import AdamW
 ########################################################################
 __versions__ = "2.1.0"
 ########################################################################
+
+mean_squared_error = MeanSquaredError()
 
 def binary_cross_entropy_loss(y_true, y_pred):
     """

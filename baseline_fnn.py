@@ -377,6 +377,7 @@ def dataset_generator(target_dir, param=None):
     target_dir: Base directory ('normal' or 'abnormal')
     param: parameters dictionary from the YAML config
     """
+    # Add debug logs to validate dataset generation
     print(f"DEBUG: dataset_generator called with target_dir: {target_dir}")
     logger.info(f"target_dir : {target_dir}")
     
@@ -393,8 +394,8 @@ def dataset_generator(target_dir, param=None):
     
     # Get all files in the directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
-    print(f"Looking for files in: {target_dir}")
-    print(f"Found {len(files_in_dir)} files")
+    print(f"DEBUG: Looking for files in: {target_dir}")
+    print(f"DEBUG: Found {len(files_in_dir)} files")
 
     # If no files found, try listing the directory contents
     if len(files_in_dir) == 0:
@@ -405,10 +406,11 @@ def dataset_generator(target_dir, param=None):
     normal_data = {}  # {(db, machine_type, machine_id): [files]}
     abnormal_data = {}  # {(db, machine_type, machine_id): [files]}
     
-    # Process current directory files
+    # Add debug logs for file parsing
     for file_path in files_in_dir:
         filename = file_path.name
         parts = filename.split('_')
+        print(f"DEBUG: Parsing filename '{filename}' into parts: {parts}")
         
         if len(parts) >= 4:  # Ensure we have enough parts in the filename
             # Format: normal_0dB_fan_id_00-00000000.wav

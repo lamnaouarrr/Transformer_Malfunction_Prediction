@@ -416,10 +416,12 @@ def file_to_spectrogram(file_name,
 
 
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
-
     """
     Process a list of files into spectrograms with optional labels - memory optimized version
     """
+    # Ensure param is not None
+    param = param or {}
+    
     n_mels = param.get("feature", {}).get("n_mels", 64)
     n_fft = param.get("feature", {}).get("n_fft", 1024)
     hop_length = param.get("feature", {}).get("hop_length", 512)
@@ -1251,14 +1253,15 @@ def create_lr_schedule(initial_lr, warmup_epochs, decay_epochs):
     return schedule_fn
 
 
-def preprocess_spectrograms(spectrograms, target_shape):
+def preprocess_spectrograms(spectrograms, target_shape, param=None):
     """
     Resize all spectrograms to a consistent shape.
     """
+    # Ensure param is not None
+    param = param or {}
+    
     # Handle case where input is a list of file paths instead of spectrograms
-    if isinstance(spectrograms, list):
-        logger.info(f"Converting {len(spectrograms)} file paths to spectrograms...")
-        spectrograms, _ = list_to_spectrograms(spectrograms, None, "Processing files", False, None)
+    spectrograms, _ = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
     
     if spectrograms.shape[0] == 0:
         return spectrograms

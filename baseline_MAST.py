@@ -1091,6 +1091,9 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     reconstructed = layers.Reshape((num_patches_height, num_patches_width, patch_height * patch_width))(reconstructed)
     
     # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
+    # Calculate block_size dynamically as a Python integer
+    block_size = int(patch_height)
+
     reconstructed = layers.Lambda(
         lambda x: tf.nn.depth_to_space(
             tf.reshape(x, [
@@ -1099,7 +1102,7 @@ def create_mast_model(input_shape, mast_params, transformer_params):
                 tf.shape(x)[2] * patch_width,
                 1
             ]),
-            block_size=int(tf.sqrt(tf.cast(tf.shape(x)[3], tf.float32)))
+            block_size=block_size
         ),
         name="reconstruction_reshape"
     )(reconstructed)

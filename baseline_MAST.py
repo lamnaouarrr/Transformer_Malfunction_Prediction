@@ -2314,6 +2314,9 @@ def main():
     sup_0 = int(class_report['0.0']['support'])
     sup_1 = int(class_report['1.0']['support'])
 
+    # Define the YAML file path for results
+    yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))
+
     # Summary results with requested custom fields only
     results = {
         'execution_time_seconds': float(execution_time_seconds),
@@ -2332,7 +2335,6 @@ def main():
     }
 
     # Save as YAML file
-    yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))
     with open(yaml_file_path, 'w') as f:
         yaml.safe_dump(results, f, default_flow_style=False)
 

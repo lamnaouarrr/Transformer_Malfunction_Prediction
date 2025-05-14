@@ -939,7 +939,7 @@ def main():
     )
     model.summary()
 
-    if os.path.exists(model_file):
+    if os.path.exists(model_file) and param.get("fit", {}).get("load_model", True):
         model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
         logger.info("Model loaded from file, no training performed")
     else:

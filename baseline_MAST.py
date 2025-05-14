@@ -1261,7 +1261,7 @@ def preprocess_spectrograms(spectrograms, target_shape, param=None):
     param = param or {}
     
     # Handle case where input is a list of file paths instead of spectrograms
-    spectrograms, _ = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
+    spectrograms = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
     
     if spectrograms.shape[0] == 0:
         return spectrograms

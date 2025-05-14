@@ -43,8 +43,8 @@ feature:
 # Fit algorithm parameters
 fit:
   compile:
-    optimizer: "adam"
-    learning_rate: 0.0003
+    optimizer: "adamW"
+    learning_rate: 0.00001 #0.0003
     loss: "focal_loss"
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
   epochs: 100

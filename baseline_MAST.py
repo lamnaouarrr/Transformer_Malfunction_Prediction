@@ -43,6 +43,7 @@ from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from skimage.metrics import structural_similarity as ssim
 from transformers import TFViTModel, ViTConfig
 from tensorflow.keras import layers  # Add explicit import for layers module
+from tensorflow.keras.optimizers import AdamW
 ########################################################################
 
 ########################################################################
@@ -1915,7 +1916,7 @@ def main():
             
             # Compile the pretraining model
             pretrain_model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=pretrain_lr),
+                optimizer=tf.keras.optimizers.AdamW(learning_rate=pretrain_lr),
                 loss=tf.keras.losses.MeanSquaredError(),
                 metrics=['mse']
             )
@@ -1957,7 +1958,7 @@ def main():
         logger.info("Starting MAST fine-tuning phase for anomaly detection")
         
         # Configure fine-tuning optimizer
-        optimizer = tf.keras.optimizers.Adam(learning_rate=training_params.get('learning_rate', 0.0001))
+        optimizer = tf.keras.optimizers.AdamW(learning_rate=training_params.get('learning_rate', 0.0001))
         
         # Configure loss function based on configuration
         loss_fn = tf.keras.losses.BinaryCrossentropy()

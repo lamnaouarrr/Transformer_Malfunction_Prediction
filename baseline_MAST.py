@@ -1090,17 +1090,22 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     # Reshape back to image shape for reconstruction
     reconstructed = layers.Reshape((num_patches_height, num_patches_width, patch_height * patch_width))(reconstructed)
     
-    # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
-    # Calculate block_size dynamically as a Python integer
-    block_size = int(patch_height)
+    # Adjust channel dimension to be divisible by block_size^2
+    reconstructed = layers.Conv2D(
+        filters=block_size**2,  # Ensure channel dimension matches block_size^2
+        kernel_size=1,  # Use 1x1 convolution to adjust channels without affecting spatial dimensions
+        padding="same",
+        name="channel_adjustment"
+    )(reconstructed)
 
+    # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
     reconstructed = layers.Lambda(
         lambda x: tf.nn.depth_to_space(
             tf.reshape(x, [
                 tf.shape(x)[0],
                 tf.shape(x)[1] * patch_height,
                 tf.shape(x)[2] * patch_width,
-                1
+                block_size**2
             ]),
             block_size=block_size
         ),

@@ -82,7 +82,7 @@ logging:
 
 # Optuna hyperparameter optimization parameters
 optuna:
-  enabled: true
+  enabled: false
   trials: 100
   metric: "val_accuracy"
   trial_epochs: 50

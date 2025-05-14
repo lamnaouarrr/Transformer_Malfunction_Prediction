@@ -24,14 +24,12 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow.keras.backend as K
 import seaborn as sns
-import optuna
 
-from functools import partial
 from tqdm import tqdm
 from sklearn import metrics
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, BatchNormalization, Activation, Dropout, Add, MultiHeadAttention
-from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.losses import mean_squared_error
 from tensorflow.keras.regularizers import l2
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import classification_report, confusion_matrix
@@ -447,7 +445,7 @@ def dataset_generator(target_dir, param=None):
             db = parts[1]
             machine_type = parts[2]
             machine_id_with_file = parts[3]
-            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id
+            machine_id = machine_id_with_file.split('-')[0] if '-' in machine_id_with_file else machine_id_with_file
             
             key = (db, machine_type, machine_id)
             
@@ -724,105 +722,6 @@ def normalize_spectrograms(spectrograms, method="minmax"):
 
 
 ########################################################################
-# Optuna integration
-########################################################################
-def objective(trial, param, x_train, y_train, x_val, y_val):
-    """
-    Define the objective function for Optuna optimization.
-    """
-    # Define the hyperparameter search space
-    learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-1, log=True)
-    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
-    depth = trial.suggest_int('depth', 2, 6)
-    width = trial.suggest_int('width', 64, 256)
-
-    # Build the model
-    inputs = Input(shape=(x_train.shape[1],))
-    x = inputs
-    for _ in range(depth):
-        x = Dense(width, activation='relu')(x)
-        x = Dropout(dropout_rate)(x)
-    outputs = Dense(1, activation='sigmoid')(x)
-    model = Model(inputs, outputs)
-
-    # Compile the model
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-                  loss='binary_crossentropy',
-                  metrics=['accuracy'])
-
-    # Add early stopping callback
-    early_stopping = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss",
-        patience=3,
-        restore_best_weights=True
-    )
-
-    # Train the model with early stopping
-    history = model.fit(
-        x_train, y_train,
-        validation_data=(x_val, y_val),
-        epochs=param['optuna']['trial_epochs'],  # Use trial_epochs for quick evaluation
-        batch_size=param['fit']['batch_size'],
-        verbose=0,
-        callbacks=[early_stopping]  # Add early stopping here
-    )
-
-    # Return the validation loss as the objective value
-    val_loss = min(history.history['val_loss'])
-    return val_loss
-
-########################################################################
-# Save results to YAML
-########################################################################
-def save_results_to_yaml(results, result_file):
-    """
-    Save results to a YAML file with proper structure and error handling.
-    """
-    logger.info(f"Saving results to {result_file}")
-
-    # Ensure 'overall_model' key exists in results
-    if "overall_model" not in results:
-        logger.warning("'overall_model' key is missing in results. Initializing with default values.")
-        results["overall_model"] = {
-            "F1Score": {"class_0": 0, "class_1": 0},
-            "Precision": {"class_0": 0, "class_1": 0},
-            "Recall": {"class_0": 0, "class_1": 0},
-            "Support": {"class_0": 0, "class_1": 0},
-            "TestAccuracy": 0,
-            "TrainAccuracy": 0,
-            "ValidationAccuracy": 0
-        }
-
-    # Ensure execution and training times are present
-    if "execution_time_seconds" not in results:
-        results["execution_time_seconds"] = 0
-    if "model_training_time_seconds" not in results:
-        results["model_training_time_seconds"] = 0
-
-    # Prepare data for YAML
-    yaml_data = {
-        "execution_time_seconds": results.get("execution_time_seconds", 0),
-        "model_training_time_seconds": results.get("model_training_time_seconds", 0),
-        "overall_model": {
-            "F1Score": results["overall_model"].get("F1Score", {}),
-            "Precision": results["overall_model"].get("Precision", {}),
-            "Recall": results["overall_model"].get("Recall", {}),
-            "Support": results["overall_model"].get("Support", {}),
-            "TestAccuracy": results["overall_model"].get("TestAccuracy", 0),
-            "TrainAccuracy": results["overall_model"].get("TrainAccuracy", 0),
-            "ValidationAccuracy": results["overall_model"].get("ValidationAccuracy", 0)
-        }
-    }
-
-    # Save to YAML file
-    try:
-        with open(result_file, 'w') as yaml_file:
-            yaml.dump(yaml_data, yaml_file, default_flow_style=False)
-        logger.info(f"Results successfully saved to {result_file}")
-    except Exception as e:
-        logger.error(f"Failed to save results to {result_file}: {e}")
-
-########################################################################
 # main
 ########################################################################
 def main():
@@ -952,14 +851,10 @@ def main():
         os.path.exists(test_files_pickle) and os.path.exists(test_labels_pickle)):
         train_data = load_pickle(train_pickle)
         train_labels = load_pickle(train_labels_pickle)
-        train_labels_expanded = train_labels  # Ensure train_labels_expanded is assigned
         val_data = load_pickle(val_pickle)
         val_labels = load_pickle(val_labels_pickle)
-        val_labels_expanded = val_labels  # Ensure val_labels_expanded is assigned
         test_files = load_pickle(test_files_pickle)
         test_labels = load_pickle(test_labels_pickle)
-        print('DEBUG: Loaded preprocessed data from pickle files.')
-
     else:
         train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(target_dir, param=param)
 
@@ -967,41 +862,41 @@ def main():
             logger.error(f"No files found for {evaluation_result_key}, skipping...")
             return  # Exit main() if no files are found after generation
 
-        train_data, train_labels_expanded = list_to_vector_array_with_labels(
-            train_files,
-            train_labels,
-            msg="generate train_dataset",
-            n_mels=param["feature"]["n_mels"],
-            frames=param["feature"]["frames"],
-            n_fft=param["feature"]["n_fft"],
-            hop_length=param["feature"]["hop_length"],
-            power=param["feature"]["power"],
-            augment=True
-        )
-        print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
+    train_data, train_labels_expanded = list_to_vector_array_with_labels(
+        train_files,
+        train_labels,
+        msg="generate train_dataset",
+        n_mels=param["feature"]["n_mels"],
+        frames=param["feature"]["frames"],
+        n_fft=param["feature"]["n_fft"],
+        hop_length=param["feature"]["hop_length"],
+        power=param["feature"]["power"],
+        augment=True
+    )
+    print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels_expanded.shape}")
 
-        val_data, val_labels_expanded = list_to_vector_array_with_labels(
-            val_files,
-            val_labels,
-            msg="generate validation_dataset",
-            n_mels=param["feature"]["n_mels"],
-            frames=param["feature"]["frames"],
-            n_fft=param["feature"]["n_fft"],
-            hop_length=param["feature"]["hop_length"],
-            power=param["feature"]["power"],
-            augment=False
-        )
+    val_data, val_labels_expanded = list_to_vector_array_with_labels(
+        val_files,
+        val_labels,
+        msg="generate validation_dataset",
+        n_mels=param["feature"]["n_mels"],
+        frames=param["feature"]["frames"],
+        n_fft=param["feature"]["n_fft"],
+        hop_length=param["feature"]["hop_length"],
+        power=param["feature"]["power"],
+        augment=False
+    )
 
-        if train_data.shape[0] == 0 or val_data.shape[0] == 0:
-            logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
-            return  # Exit main() if no valid training/validation data
+    if train_data.shape[0] == 0 or val_data.shape[0] == 0:
+        logger.error(f"No valid training/validation data for {evaluation_result_key}, skipping...")
+        return  # Exit main() if no valid training/validation data
 
-        save_pickle(train_pickle, train_data)
-        save_pickle(train_labels_pickle, train_labels_expanded)
-        save_pickle(val_pickle, val_data)
-        save_pickle(val_labels_pickle, val_labels_expanded)
-        save_pickle(test_files_pickle, test_files)
-        save_pickle(test_labels_pickle, test_labels)
+    save_pickle(train_pickle, train_data)
+    save_pickle(train_labels_pickle, train_labels_expanded)
+    save_pickle(val_pickle, val_data)
+    save_pickle(val_labels_pickle, val_labels_expanded)
+    save_pickle(test_files_pickle, test_files)
+    save_pickle(test_labels_pickle, test_labels)
 
     # Print shapes
     logger.info(f"Training data shape: {train_data.shape}")
@@ -1016,24 +911,8 @@ def main():
     print(f"Training data composition: Normal={normal_count}, Abnormal={abnormal_count}")
 
     print("============== OPTUNA OPTIMIZATION ==============")
-    if param.get("optuna", {}).get("enabled", False):
-        def optuna_objective(trial):
-            return objective(trial, param=param, x_train=train_data, y_train=train_labels_expanded, x_val=val_data, y_val=val_labels_expanded)
-
-        study = optuna.create_study(direction='minimize')
-        study.optimize(optuna_objective, n_trials=param["optuna"].get("trials", 50))
-
-        # Log the best hyperparameters
-        logger.info(f"Best hyperparameters: {study.best_params}")
-
-        # Save the best hyperparameters to a YAML file
-        best_hyperparameters_file = f"{param['result_directory']}/best_hyperparameters.yaml"
-        with open(best_hyperparameters_file, 'w') as f:
-            yaml.dump(study.best_params, f)
-
-        print(f"Optuna optimization completed. Best hyperparameters saved to {best_hyperparameters_file}")
-    else:
-        print("Optuna optimization is disabled in the configuration.")
+    # Optuna optimization has been disabled.
+    print("Optuna optimization is currently disabled in this script.")
 
     print("============== MODEL TRAINING ==============")
     # Track model training time specifically
@@ -1049,63 +928,102 @@ def main():
     )
     model.summary()
 
-    # Always train the model, ignoring any pre-existing model file
-    compile_params = param["fit"]["compile"].copy()
-    loss_type = param.get("model", {}).get("loss", "mse")
-
-    # Handle learning_rate separately for the optimizer
-    learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
-
-    if loss_type == "binary_crossentropy":
-        compile_params["loss"] = binary_cross_entropy_loss
+    if os.path.exists(model_file):
+        model = tf.keras.models.load_model(model_file, custom_objects={"binary_cross_entropy_loss": binary_cross_entropy_loss})
+        logger.info("Model loaded from file, no training performed")
     else:
-        # Default to standard binary_crossentropy from Keras
-        compile_params["loss"] = "binary_crossentropy"
+        compile_params = param["fit"]["compile"].copy()
+        loss_type = param.get("model", {}).get("loss", "mse")
 
-    if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-        compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        # Handle learning_rate separately for the optimizer
+        learning_rate = compile_params.pop("learning_rate", 0.001) if "learning_rate" in compile_params else 0.001
 
-    # Add weighted_metrics to fix the warning
-    if "weighted_metrics" not in compile_params:
-        compile_params["weighted_metrics"] = []
+        if loss_type == "binary_crossentropy":
+            compile_params["loss"] = binary_cross_entropy_loss
+        else:
+            # Default to standard binary_crossentropy from Keras
+            compile_params["loss"] = "binary_crossentropy"
 
-    compile_params["metrics"] = ['accuracy']
-    model.compile(**compile_params)
+        if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
+            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-    callbacks = []
-    early_stopping_config = param.get("fit", {}).get("early_stopping", {})
-    if early_stopping_config.get("enabled", False):
-        callbacks.append(tf.keras.callbacks.EarlyStopping(
-            monitor=early_stopping_config.get("monitor", "val_loss"),
-            patience=early_stopping_config.get("patience", 10),
-            min_delta=early_stopping_config.get("min_delta", 0.001),
-            restore_best_weights=early_stopping_config.get("restore_best_weights", True)
-        ))
+        # Add weighted_metrics to fix the warning
+        if "weighted_metrics" not in compile_params:
+            compile_params["weighted_metrics"] = []
 
-    sample_weights = np.ones(len(train_data))
+        compile_params["metrics"] = ['accuracy']
+        model.compile(**compile_params)
+        
+        callbacks = []
+        early_stopping_config = param.get("fit", {}).get("early_stopping", {})
+        if early_stopping_config.get("enabled", False):
+            callbacks.append(tf.keras.callbacks.EarlyStopping(
+                monitor=early_stopping_config.get("monitor", "val_loss"),
+                patience=early_stopping_config.get("patience", 10),
+                min_delta=early_stopping_config.get("min_delta", 0.001),
+                restore_best_weights=early_stopping_config.get("restore_best_weights", True)
+            ))
+        
+        sample_weights = np.ones(len(train_data))
 
-    # Apply uniform sample weights - no machine-specific weighting
-    if param.get("fit", {}).get("apply_sample_weights", False):
-        # Apply a uniform weight factor if needed
-        weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
-        sample_weights *= weight_factor
+        # Apply uniform sample weights - no machine-specific weighting
+        if param.get("fit", {}).get("apply_sample_weights", False):
+            # Apply a uniform weight factor if needed
+            weight_factor = param.get("fit", {}).get("weight_factor", 1.0)
+            sample_weights *= weight_factor
 
-    print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
-    history = model.fit(
-        train_data,
-        train_labels_expanded,
-        epochs=param["fit"]["epochs"],
-        batch_size=param["fit"]["batch_size"],
-        shuffle=param["fit"]["shuffle"],
-        validation_data=(val_data, val_labels_expanded),
-        verbose=param["fit"]["verbose"],
-        callbacks=callbacks,
-        sample_weight=sample_weights
-    )
+        
+        print(f"Final training shapes - X: {train_data.shape}, y: {train_labels.shape}, weights: {sample_weights.shape}")
+        history = model.fit(
+            train_data,
+            train_labels_expanded,
+            epochs=param["fit"]["epochs"],
+            batch_size=param["fit"]["batch_size"],
+            shuffle=param["fit"]["shuffle"],
+            validation_data=(val_data, val_labels_expanded),
+            verbose=param["fit"]["verbose"],
+            callbacks=callbacks,
+            sample_weight=sample_weights
+        )
 
-    model.save(model_file)
-    visualizer.loss_plot(history)
-    visualizer.save_figure(history_img)
+        model.save(model_file)
+        visualizer.loss_plot(history)
+        visualizer.save_figure(history_img)
+    
+
+    if not os.path.exists(model_file):
+        # Capture the final training and validation accuracies
+        train_accuracy = history.history['accuracy'][-1]
+        val_accuracy = history.history['val_accuracy'][-1]
+        
+        # Store these in the results dictionary
+        evaluation_result["TrainAccuracy"] = float(train_accuracy)
+        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
+        
+        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
+        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
+    else:
+        # If model was loaded from file and not trained, we need to evaluate on train and validation data
+        train_pred = model.predict(train_data, verbose=0)
+        train_pred_binary = (train_pred.flatten() >= 0.5).astype(int)
+        train_accuracy = metrics.accuracy_score(train_labels_expanded, train_pred_binary)
+        
+        val_pred = model.predict(val_data, verbose=0)
+        val_pred_binary = (val_pred.flatten() >= 0.5).astype(int)
+        val_accuracy = metrics.accuracy_score(val_labels_expanded, val_pred_binary)
+
+        # Calculate model training time
+        model_end_time = time.time()
+        model_training_time = model_end_time - model_start_time
+        logger.info(f"Model training time: {model_training_time:.2f} seconds")
+        
+        # Store these in the results dictionary
+        evaluation_result["TrainAccuracy"] = float(train_accuracy)
+        evaluation_result["ValidationAccuracy"] = float(val_accuracy)
+        
+        logger.info(f"Train Accuracy: {train_accuracy:.4f}")
+        logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
+
 
     print("============== EVALUATION ==============")
     y_pred = []
@@ -1145,12 +1063,6 @@ def main():
     else:
         optimal_threshold = 0.5  # Default threshold
         logger.info(f"Using default threshold: {optimal_threshold}")
-
-    # Save the optimal threshold to the evaluation result
-    evaluation_result["OptimalThreshold"] = float(optimal_threshold)
-
-    # Save results to YAML file
-    save_results_to_yaml(results, result_file)
 
     # Convert predictions to binary using optimal threshold
     y_pred_binary = (np.array(y_pred) >= optimal_threshold).astype(int)
@@ -1237,46 +1149,6 @@ def main():
     logger.info(f"Test Accuracy: {accuracy:.4f}")
     results[evaluation_result_key] = evaluation_result
 
-    # Ensure 'overall_model' key is initialized in the results dictionary before saving
-    if 'overall_model' not in results:
-        results['overall_model'] = {
-            "F1Score": {
-                "class_0": 0,
-                "class_1": 0
-            },
-            "Accuracy": 0,
-            "Precision": {
-                "class_0": 0,
-                "class_1": 0
-            },
-            "Recall": {
-                "class_0": 0,
-                "class_1": 0
-            }
-        }
-
-    # Ensure the `overall_model` key is initialized in the `results` dictionary
-    if "overall_model" not in results:
-        results["overall_model"] = {
-            "F1Score": {"class_0": 0, "class_1": 0},
-            "Precision": {"class_0": 0, "class_1": 0},
-            "Recall": {"class_0": 0, "class_1": 0},
-            "Support": {"class_0": 0, "class_1": 0},
-            "TestAccuracy": 0,
-            "TrainAccuracy": 0,
-            "ValidationAccuracy": 0,
-        }
-
-    # Populate the `overall_model` key with calculated metrics
-    results["overall_model"].update({
-        "F1Score": evaluation_result.get("F1Score", {"class_0": 0, "class_1": 0}),
-        "Precision": evaluation_result.get("Precision", {"class_0": 0, "class_1": 0}),
-        "Recall": evaluation_result.get("Recall", {"class_0": 0, "class_1": 0}),
-        "Support": evaluation_result.get("Support", {"class_0": 0, "class_1": 0}),
-        "TestAccuracy": evaluation_result.get("TestAccuracy", 0),
-        "TrainAccuracy": evaluation_result.get("TrainAccuracy", 0),
-        "ValidationAccuracy": evaluation_result.get("ValidationAccuracy", 0),
-    })
 
     #add the machine's predictions and true labels to the overall collection
     all_y_true.extend(y_true)
@@ -1292,7 +1164,8 @@ def main():
 
     print("\n===========================")
     logger.info(f"all results -> {result_file}")
-    save_results_to_yaml(results, result_file)
+    with open(result_file, "w") as f:
+        yaml.dump(results, f, default_flow_style=False)
     print("===========================")
 
 if __name__ == "__main__":

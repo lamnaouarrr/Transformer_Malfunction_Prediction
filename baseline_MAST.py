@@ -1093,14 +1093,13 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
     reconstructed = layers.Lambda(
         lambda x: tf.nn.depth_to_space(
-            x,
-            block_size=int(tf.sqrt(tf.cast(tf.shape(x)[3], tf.float32))),
             tf.reshape(x, [
                 tf.shape(x)[0],
                 tf.shape(x)[1] * patch_height,
                 tf.shape(x)[2] * patch_width,
                 1
-            ])
+            ]),
+            block_size=int(tf.sqrt(tf.cast(tf.shape(x)[3], tf.float32)))
         ),
         name="reconstruction_reshape"
     )(reconstructed)

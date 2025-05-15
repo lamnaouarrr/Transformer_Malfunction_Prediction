@@ -1861,7 +1861,20 @@ def main():
         # Check if we should load existing model or create a new one
         if training_params.get('load_model', False) and os.path.exists(model_params.get('model_path', '')):
             logger.info(f"Loading existing model from {model_params['model_path']}")
-            model = tf.keras.models.load_model(model_params['model_path'])
+            try:
+                model = tf.keras.models.load_model(model_params['model_path'])
+                logger.info("Full model loaded successfully.")
+            except Exception as e:
+                logger.warning(f"Failed to load full model: {e}")
+                logger.info("Attempting to load model weights into a new model instance...")
+                # Reconstruct the model architecture
+                target_shape = (config["feature"]["n_mels"], 96)
+                mast_params = model_params.get('mast', {})
+                transformer_params = model_params.get('architecture', {}).get('transformer', {})
+                _, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
+                finetune_model.load_weights(model_params['model_path'])
+                model = finetune_model
+                logger.info("Weights loaded into new model instance.")
         else:
             # Set random seeds for reproducibility
             tf.random.set_seed(training_params.get('random_seed', 42))

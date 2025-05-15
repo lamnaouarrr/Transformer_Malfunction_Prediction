@@ -73,8 +73,12 @@ training:
     enabled: true
     alpha: 0.3
 
+
+training:
+  load_model: true
 # Enhanced transformer model settings
 model:
+  model_path: model/MAST/mast_model.keras 
   architecture:
     transformer:
       num_heads: 8
@@ -88,6 +92,8 @@ model:
   focal_loss:
     gamma: 2.5
     alpha: 0.5
+
+
 
 # MAST specific configuration
 mast:

@@ -26,6 +26,7 @@ import tensorflow.keras.backend as K
 import seaborn as sns
 import math
 import gc
+import hashlib
 
 
 from datetime import datetime
@@ -43,7 +44,6 @@ from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from skimage.metrics import structural_similarity as ssim
 from transformers import TFViTModel, ViTConfig
 from tensorflow.keras import layers  # Add explicit import for layers module
-from tensorflow.keras.optimizers import AdamW
 ########################################################################
 
 ########################################################################
@@ -71,24 +71,24 @@ def focal_loss(gamma=2.0, alpha=0.25):
         A loss function that computes focal loss.
     """
     def loss_function(y_true, y_pred):
+        # Cast true labels and constants to prediction dtype
+        dtype = y_pred.dtype
+        y_true = tf.cast(y_true, dtype)
+        eps = tf.cast(tf.keras.backend.epsilon(), dtype)
+        gamma_c = tf.cast(gamma, dtype)
+        alpha_c = tf.cast(alpha, dtype)
         # Clip predictions for numerical stability
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
-        
+        y_pred = tf.clip_by_value(y_pred, eps, 1 - eps)
         # Calculate cross entropy
         cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
-        
         # Calculate focal weight
-        p_t = tf.where(tf.equal(y_true, 1), y_pred, 1 - y_pred)
-        focal_weight = tf.pow(1 - p_t, gamma)
-        
+        p_t = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), y_pred, 1 - y_pred)
+        focal_weight = tf.pow(1 - p_t, gamma_c)
         # Apply alpha weighting
-        alpha_weight = tf.where(tf.equal(y_true, 1), alpha, 1 - alpha)
-        
+        alpha_weight = tf.where(tf.equal(y_true, tf.constant(1, dtype=dtype)), alpha_c, 1 - alpha_c)
         # Combine for final loss
-        focal_loss = alpha_weight * focal_weight * cross_entropy
-        
-        return tf.reduce_mean(focal_loss)
+        loss = alpha_weight * focal_weight * cross_entropy
+        return tf.reduce_mean(loss)
     
     return loss_function
 
@@ -135,6 +135,11 @@ def setup_logging():
     os.makedirs("./logs/log_MAST", exist_ok=True)
     logging.basicConfig(level=logging.DEBUG, filename="./logs/log_MAST/baseline_MAST.log")
     logger = logging.getLogger(' ')
+    
+    # Clear existing handlers to prevent duplicate messages
+    if logger.handlers:
+        logger.handlers.clear()
+        
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
@@ -418,15 +423,15 @@ def file_to_spectrogram(file_name,
 
 def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, param=None, batch_size=64):
     """
-    Process a list of files into spectrograms with optional labels - memory optimized version
+    Process a list of files into spectrograms with optional labels - memory optimized version with caching
     """
-    # Ensure param is not None
-    param = param or {}
-    
     n_mels = param.get("feature", {}).get("n_mels", 64)
     n_fft = param.get("feature", {}).get("n_fft", 1024)
     hop_length = param.get("feature", {}).get("hop_length", 512)
     power = param.get("feature", {}).get("power", 2.0)
+    
+    # Check if caching is enabled in config
+    use_cache = param.get("cache", {}).get("enabled", True) if param else True
     
     # First pass: determine dimensions and count valid files
     valid_files = []
@@ -437,7 +442,12 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     logger.info(f"First pass: checking dimensions of {len(file_list)} files")
     for idx, file_path in enumerate(tqdm(file_list, desc=f"{msg} (dimension check)")):
         try:
-            spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+            # Use cached version for dimension check if enabled and not augmenting
+            if use_cache and not augment:
+                spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+            else:
+                spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                
             if spec is not None:
                 # Handle 3D input
                 if len(spec.shape) == 3:
@@ -462,10 +472,14 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
     
     logger.info(f"Using target shape: ({max_freq}, {max_time})")
     
-    # Second pass: process files in batches
+    # Second pass: process files in batches with caching
     total_valid = len(valid_files)
     spectrograms = np.zeros((total_valid, max_freq, max_time), dtype=np.float32)
     processed_labels = np.array(valid_labels) if valid_labels else None
+    
+    # Add cache metrics tracking
+    cache_hits = 0
+    cache_misses = 0
     
     for batch_start in tqdm(range(0, total_valid, batch_size), desc=f"{msg} (processing)"):
         batch_end = min(batch_start + batch_size, total_valid)
@@ -473,7 +487,20 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         
         for i, file_path in enumerate(batch_files):
             try:
-                spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                # Use cached version if enabled and not augmenting
+                cache_start_time = time.time()
+                if use_cache and not augment:
+                    spec = cached_file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, False, param)
+                    # Check if the file was pulled from cache
+                    cache_file = os.path.join(param.get("cache", {}).get("directory", "./cache/spectrograms"), 
+                                            hashlib.md5(f"{file_path}_{n_mels}_{n_fft}_{hop_length}_{power}".encode()).hexdigest() + ".npy")
+                    if os.path.exists(cache_file) and os.path.getmtime(cache_file) < cache_start_time:
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
+                else:
+                    spec = file_to_spectrogram(file_path, n_mels, n_fft, hop_length, power, augment, param)
+                    cache_misses += 1
                 
                 if spec is not None:
                     # Handle 3D input
@@ -506,6 +533,12 @@ def list_to_spectrograms(file_list, labels=None, msg="calc...", augment=False, p
         
         gc.collect()
 
+    # Log cache performance
+    if use_cache:
+        total_files = cache_hits + cache_misses
+        hit_rate = (cache_hits / total_files) * 100 if total_files > 0 else 0
+        logger.info(f"Cache performance: {cache_hits} hits, {cache_misses} misses, {hit_rate:.1f}% hit rate")
+
     spectrograms = spectrograms.astype(np.float32)
     
     if labels is not None:
@@ -537,7 +570,7 @@ def dataset_generator(target_dir, param=None):
     
     # Get all files in the directory
     files_in_dir = list(Path(target_dir).glob(f"*.{ext}"))
-    print(f"Looking for files in: {target_dir}")
+    print(f"Initial scan - Looking for files in: {target_dir}")
     print(f"Found {len(files_in_dir)} files")
 
     # If no files found, try listing the directory contents
@@ -751,10 +784,8 @@ def dataset_generator(target_dir, param=None):
     logger.info(f"val_file num : {len(val_files)} (normal: {len(normal_val_files)}, abnormal: {len(abnormal_val_files)})")
     logger.info(f"test_file num : {len(test_files)} (normal: {len(normal_test_files)}, abnormal: {len(abnormal_test_files)})")
 
-    # Debug info
-    print(f"Looking for files in: {target_dir}")
-    print(f"Found {len(files_in_dir)} files")
-    print(f"DEBUG - Dataset summary:")
+    # Debug info - make it clear this is a summary section
+    print(f"=== DATASET SUMMARY ===")
     print(f"  Normal files found: {len(normal_files)}")
     print(f"  Abnormal files found: {len(abnormal_files)}")
     print(f"  Normal train: {len(normal_train_files)}, Normal val: {len(normal_val_files)}, Normal test: {len(normal_test_files)}")
@@ -989,6 +1020,13 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     
     # Extract parameters
     patch_size = mast_params.get("patch_size", 16)
+    # Define base patch dimensions for reconstruction head
+    patch_height = min(patch_size, input_shape[0])
+    patch_width = min(patch_size, input_shape[1])
+    # Number of patches for reconstruction (applies to patch_size scale)
+    num_patches_height = input_shape[0] // patch_height
+    num_patches_width = input_shape[1] // patch_width
+
     embed_dim = transformer_params.get("embed_dim", 768)
     num_heads = transformer_params.get("num_heads", 12)
     num_layers = transformer_params.get("num_layers", 12)
@@ -1000,54 +1038,68 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     
     # Input layers
     inputs = layers.Input(shape=(*input_shape, 1))  # Add channel dimension
-    
-    # Patch embedding
-    patch_height = min(patch_size, input_shape[0])
-    patch_width = min(patch_size, input_shape[1])
-    
-    # Calculate number of patches
-    num_patches_height = input_shape[0] // patch_height
-    num_patches_width = input_shape[1] // patch_width
-    total_patches = num_patches_height * num_patches_width
-    
-    logger.info(f"MAST: Using patch size {patch_height}x{patch_width} with {total_patches} total patches")
-    
-    # Create patches using Conv2D
-    x = layers.Conv2D(
-        filters=embed_dim,
-        kernel_size=(patch_height, patch_width),
-        strides=(patch_height, patch_width),
-        padding="valid",
-        name="patch_embedding"
-    )(inputs)
-    
-    # Reshape to sequence
+    # Define batch_size for use throughout the function
     batch_size = tf.shape(inputs)[0]
-    x = layers.Reshape((total_patches, embed_dim))(x)
+
+    # Multi-scale feature selection
+    ms_cfg = mast_params.get('multi_scale', {})
+    if ms_cfg.get('enabled', False):
+        scales = ms_cfg.get('scales', [patch_size, patch_size * 2])
+        streams = []
+        for s in scales:
+            # Compute number of patches for scale
+            h_steps = input_shape[0] // s
+            w_steps = input_shape[1] // s
+            x_s = layers.Conv2D(filters=embed_dim, kernel_size=(s, s), strides=(s, s), padding='valid')(inputs)
+            x_s = layers.Reshape((h_steps * w_steps, embed_dim))(x_s)
+            streams.append(x_s)
+        # Cross-scale attention: fine queries attending to coarse keys
+        # streams[0] is fine-scale patches, streams[1] is coarse-scale patches
+        fine, coarse = streams[0], streams[1]
+        # Query=fine, Key=coarse to produce fine-grained fused features
+        cs_attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim//num_heads, dropout=dropout_rate)(fine, coarse)
+        x = layers.Add()([fine, cs_attn])  # fused fine-scale representation
+        # Sequence length for positional embeddings = number of fine-scale patches + CLS token
+        seq_len = (input_shape[0] // patch_size) * (input_shape[1] // patch_size) + 1
+    else:
+        # Single-scale patch embedding
+        
+        total_patches = num_patches_height * num_patches_width
+        # Sequence length for positional embeddings = total patches + CLS token
+        seq_len = total_patches + 1
+        
+        logger.info(f"MAST: Using patch size {patch_height}x{patch_width} with {total_patches} total patches")
+        
+        # Create patches using Conv2D
+        x = layers.Conv2D(
+            filters=embed_dim,
+            kernel_size=(patch_height, patch_width),
+            strides=(patch_height, patch_width),
+            padding="valid",
+            name="patch_embedding"
+        )(inputs)
+        
+        # Reshape to sequence
+        x = layers.Reshape((total_patches, embed_dim))(x)
     
-    # Add positional embedding
-    positions = tf.range(start=0, limit=total_patches, delta=1)
-    pos_embedding = layers.Embedding(
-        input_dim=total_patches,
-        output_dim=embed_dim,
-        name="position_embedding"
-    )(positions)
-    
-    # Add positional embedding to patches
-    x = x + tf.expand_dims(pos_embedding, axis=0)  # (1, total_patches, embed_dim)
-    
-    # Add classification token ([CLS])
-    cls_token = layers.Layer(name="cls_token")(
-        tf.Variable(initial_value=tf.random.normal([1, 1, embed_dim]), trainable=True)
+    # Create a trainable [CLS] token variable matching embedding dtype
+    cls_var = tf.Variable(
+        initial_value=tf.random.normal([1, 1, embed_dim], dtype=x.dtype),
+        trainable=True,
+        name="cls_token_var"
     )
-    cls_tokens = tf.repeat(cls_token, repeats=batch_size, axis=0)
-    x = tf.concat([cls_tokens, x], axis=1)  # (batch_size, total_patches + 1, embed_dim)
-    
+    cls_tokens = tf.repeat(cls_var, repeats=batch_size, axis=0)  # (batch_size,1,embed_dim)
+    # Concatenate CLS tokens with patch embeddings
+    x = tf.concat([cls_tokens, x], axis=1)
+
+    # Static positional embeddings applied after CLS concatenation
+    positions = tf.range(start=0, limit=seq_len, delta=1)
+    pos_embedding_layer = layers.Embedding(input_dim=seq_len, output_dim=embed_dim, name="position_embedding")
+    pos_embedding = pos_embedding_layer(positions)
+    x = x + tf.expand_dims(pos_embedding, axis=0)
+
     # Apply dropout
     x = layers.Dropout(dropout_rate)(x)
-    
-    # Define block_size based on patch size
-    block_size = max(2, patch_size // patch_height)
     
     # Create a separate reconstruction head for pretraining
     reconstruction_head = layers.Dense(
@@ -1094,50 +1146,19 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     # Reshape back to image shape for reconstruction
     reconstructed = layers.Reshape((num_patches_height, num_patches_width, patch_height * patch_width))(reconstructed)
     
-    # Adjust channel dimension to be divisible by block_size^2
-    reconstructed = layers.Conv2D(
-        filters=block_size**2,  # Ensure channel dimension matches block_size^2
-        kernel_size=1,  # Use 1x1 convolution to adjust channels without affecting spatial dimensions
-        padding="same",
-        name="channel_adjustment"
-    )(reconstructed)
-
     # Use depth-to-space (pixel shuffle) to go from patch embeddings back to full image
     reconstructed = layers.Lambda(
         lambda x: tf.nn.depth_to_space(
             tf.reshape(x, [
                 tf.shape(x)[0],
-                num_patches_height,
-                num_patches_width,
-                block_size**2
+                tf.shape(x)[1] * patch_height // 2,  # Adjust dimensions to be compatible with block_size=2
+                tf.shape(x)[2] * patch_width // 2,
+                4  # Ensure this is block_size² (2²=4) for depth_to_space to work
             ]),
-            block_size=block_size
+            block_size=2
         ),
         name="reconstruction_reshape"
     )(reconstructed)
-
-    # Ensure output shape matches input shape
-    reconstructed = layers.Conv2D(
-        filters=1,
-        kernel_size=1,
-        padding="same",
-        activation=None,
-        name="reconstruction_output_shape_fix"
-    )(reconstructed)
-    # Robust cropping/padding to match input shape
-    def crop_or_pad_to_shape(x):
-        input_h, input_w = input_shape
-        out_h = tf.shape(x)[1]
-        out_w = tf.shape(x)[2]
-        # Crop if too large
-        x = x[:, :input_h, :input_w, :]
-        # Pad if too small
-        pad_h = tf.maximum(0, input_h - out_h)
-        pad_w = tf.maximum(0, input_w - out_w)
-        paddings = [[0, 0], [0, pad_h], [0, pad_w], [0, 0]]
-        x = tf.pad(x, paddings)
-        return x
-    reconstructed = layers.Lambda(crop_or_pad_to_shape, name="output_shape_match")(reconstructed)
     
     # Create classifier head for anomaly detection
     classifier = layers.Dense(512, activation='gelu', name="classifier_dense_1")(cls_output)
@@ -1151,15 +1172,6 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     finetune_model = tf.keras.Model(inputs=inputs, outputs=classifier, name="MAST_finetune")
     
     return pretrain_model, finetune_model
-
-
-def get_mast_pretraining_model(input_shape=(128, 128), patch_size=(16, 16), masking_ratio=0.5):
-    mast_params = {"patch_size": patch_size[0], "pretraining": {"masking": {"probability": masking_ratio}}}
-    transformer_params = {
-        "embed_dim": 64, "num_heads": 4, "num_layers": 2, "mlp_dim": 128, "dropout_rate": 0.1
-    }
-    pretrain_model, _ = create_mast_model(input_shape, mast_params, transformer_params)
-    return pretrain_model
 
 
 class MaskingLayer(layers.Layer):
@@ -1216,7 +1228,7 @@ class MaskingLayer(layers.Layer):
         return masked_x
     
     def get_config(self):
-        config = super(MaskingLayer, self).get_config()
+        config = super(MaskingLayer, self).__init__()
         config.update({
             'mask_probability': self.mask_probability,
             'mask_length': self.mask_length,
@@ -1301,11 +1313,21 @@ def preprocess_spectrograms(spectrograms, target_shape, param=None):
     """
     Resize all spectrograms to a consistent shape.
     """
-    # Ensure param is not None
-    param = param or {}
-    
     # Handle case where input is a list of file paths instead of spectrograms
-    spectrograms = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
+    if isinstance(spectrograms, list):
+        logger.info(f"Converting {len(spectrograms)} file paths to spectrograms...")
+        # Pass the param to the list_to_spectrograms function
+        # Fix: Handle the correct number of return values from list_to_spectrograms
+        result = list_to_spectrograms(spectrograms, None, "Processing files", False, param)
+        
+        # Check if the result is a tuple and unpack accordingly
+        if isinstance(result, tuple):
+            if len(result) >= 2:
+                spectrograms, _ = result[:2]
+            else:
+                spectrograms = result[0]
+        else:
+            spectrograms = result
     
     if spectrograms.shape[0] == 0:
         return spectrograms
@@ -1816,17 +1838,129 @@ def verify_gpu_usage_during_training():
 
 
 ########################################################################
+# caching mechanism
+########################################################################
+def file_caching_mechanism(file_path, calculation_func, param=None, force_recalculate=False):
+    """
+    Generic caching mechanism for expensive file computations.
+    
+    Args:
+        file_path: Path to the file being processed
+        calculation_func: Function to compute the result if not cached
+        param: Parameters dictionary that affects the calculation
+        force_recalculate: Whether to ignore cache and recalculate
+        
+    Returns:
+        The calculated or cached result
+    """
+    # Generate a unique cache key based on file path and relevant parameters
+    import hashlib
+    
+    # Create a deterministic cache key from file path and parameters
+    if param is None:
+        param = {}
+    
+    # Extract only the parameters that affect the calculation
+    cache_keys = {
+        "n_mels": param.get("feature", {}).get("n_mels", 64),
+        "n_fft": param.get("feature", {}).get("n_fft", 1024),
+        "hop_length": param.get("feature", {}).get("hop_length", 512),
+        "power": param.get("feature", {}).get("power", 2.0),
+        "frames": param.get("feature", {}).get("frames", None),
+        "stride": param.get("feature", {}).get("stride", None),
+        "target_shape": param.get("feature", {}).get("target_shape", None),
+        "sr": param.get("feature", {}).get("sr", None),
+    }
+    
+    # Create hash from file path and parameters
+    hash_str = f"{file_path}_{str(cache_keys)}"
+    cache_key = hashlib.md5(hash_str.encode()).hexdigest()
+    
+    # Define cache directory and ensure it exists
+    cache_dir = param.get("cache", {}).get("directory", "./cache/spectrograms")
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Full path to the cached file
+    cache_file = os.path.join(cache_dir, f"{cache_key}.npy")
+    
+    # Check if cache file exists and whether to use it
+    use_cache = param.get("cache", {}).get("enabled", True) and not force_recalculate
+    
+    if use_cache and os.path.exists(cache_file):
+        try:
+            # Load from cache
+            result = np.load(cache_file, allow_pickle=True)
+            if result is not None and isinstance(result, np.ndarray):
+                # If result is an array with the expected dimensions, return it
+                if len(result.shape) >= 2:  # Basic validation
+                    return result
+            logger.warning(f"Invalid cached data for {file_path}, recalculating")
+        except Exception as e:
+            logger.warning(f"Error loading cache for {file_path}: {e}, recalculating")
+    
+    # Calculate the result
+    result = calculation_func()
+    
+    # Save to cache if enabled
+    if use_cache and result is not None:
+        try:
+            np.save(cache_file, result)
+        except Exception as e:
+            logger.warning(f"Failed to cache result for {file_path}: {e}")
+    
+    return result
+
+def cached_file_to_spectrogram(file_name, n_mels=64, n_fft=1024, hop_length=512, power=2.0, augment=False, param=None):
+    """
+    Cached version of file_to_spectrogram that uses the caching mechanism
+    """
+    # Don't cache augmented spectrograms as they're random
+    if augment:
+        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, augment, param)
+    
+    # Define the calculation function to be cached
+    def calculate_spectrogram():
+        return file_to_spectrogram(file_name, n_mels, n_fft, hop_length, power, False, param)
+    
+    # Use the caching mechanism
+    return file_caching_mechanism(file_name, calculate_spectrogram, param)
+
+
+########################################################################
 # main
 ########################################################################
 def main():
+    exec_start = time.time()
+    # Enable dynamic GPU memory growth and cap usage
+    gpus = tf.config.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    if gpus:
+        tf.config.experimental.set_virtual_device_configuration(
+            gpus[0],
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=28672)]
+        )
+    # Print current VRAM usage to verify GPU memory setup
+    used_mem, total_mem, usage_pct = monitor_gpu_usage()
+    logger.info(f"Initial GPU memory usage: {used_mem}MB/{total_mem}MB ({usage_pct:.1f}%)")
     # Load configurations
     with open('baseline_MAST.yaml', 'r') as config_file:
         config = yaml.safe_load(config_file)
     
     # Extract configurations
     model_params = config.get('model', {})
-    mast_params = model_params.get('mast', {})
-    transformer_params = model_params.get('architecture', {}).get('transformer', {})
+    mast_params = config.get('mast', {})
+    transformer_params = config.get('model', {}).get('architecture', {}).get('transformer', {})
+    # Ensure pickle directory exists for training history
+    os.makedirs('pickle/pickle_mast', exist_ok=True)
+
+    # Determine model save path: use model_path from config or default
+    model_dir = config.get('model_directory', './model/MAST')
+    model_path = model_params.get('model_path', os.path.join(model_dir, 'mast_model.keras'))
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    # Ensure result directory exists
+    result_dir = config.get('result_directory', './result/result_MAST')
+    os.makedirs(result_dir, exist_ok=True)
     dataset_params = config.get('dataset', {})
     training_params = config.get('training', {})
     
@@ -1836,65 +1970,289 @@ def main():
     # Log configuration info
     logger.info(f"Starting MAST model training with config: {config}")
     
-    # --- FAST PICKLE LOADING BLOCK ---
-    import pickle
-    pickle_dir = config.get('pickle_directory', './pickle/pickle_mast')
-    train_pickle = os.path.join(pickle_dir, 'train_data.pkl')
-    train_labels_pickle = os.path.join(pickle_dir, 'train_labels.pkl')
-    val_pickle = os.path.join(pickle_dir, 'val_data.pkl')
-    val_labels_pickle = os.path.join(pickle_dir, 'val_labels.pkl')
-    test_pickle = os.path.join(pickle_dir, 'test_data.pkl')
-    test_labels_pickle = os.path.join(pickle_dir, 'test_labels.pkl')
-
-    if all(os.path.exists(f) for f in [train_pickle, train_labels_pickle, val_pickle, val_labels_pickle, test_pickle, test_labels_pickle]):
-        logger.info('Loading preprocessed data from pickle files...')
-        with open(train_pickle, 'rb') as f: train_data = pickle.load(f)
-        with open(train_labels_pickle, 'rb') as f: train_labels = pickle.load(f)
-        with open(val_pickle, 'rb') as f: val_data = pickle.load(f)
-        with open(val_labels_pickle, 'rb') as f: val_labels = pickle.load(f)
-        with open(test_pickle, 'rb') as f: test_data = pickle.load(f)
-        with open(test_labels_pickle, 'rb') as f: test_labels = pickle.load(f)
-        logger.info(f'Loaded train_data shape: {getattr(train_data, "shape", type(train_data))}')
-        logger.info(f'Loaded val_data shape: {getattr(val_data, "shape", type(val_data))}')
-        logger.info(f'Loaded test_data shape: {getattr(test_data, "shape", type(test_data))}')
+    # Enable optimized training modes
+    # Mixed precision for V100 GPU
+    configure_mixed_precision(training_params.get('mixed_precision', True))
+    # Enable XLA if configured
+    if training_params.get('xla_acceleration', False):
+        logger.info("Enabling XLA JIT compilation")
+        tf.config.optimizer.set_jit(True)
+    # Check if we should load existing model or create a new one
+    if training_params.get('load_model', False) and os.path.exists(model_path):
+        logger.info(f"Loading existing model from {model_path}")
+        model = tf.keras.models.load_model(model_path)
     else:
-        # Check if we should load existing model or create a new one
-        if training_params.get('load_model', False) and os.path.exists(model_params.get('model_path', '')):
-            logger.info(f"Loading existing model from {model_params['model_path']}")
-            try:
-                model = tf.keras.models.load_model(model_params['model_path'])
-                logger.info("Full model loaded successfully.")
-            except Exception as e:
-                logger.warning(f"Failed to load full model: {e}")
-                logger.info("Attempting to load model weights into a new model instance...")
-                # Reconstruct the model architecture
-                target_shape = (config["feature"]["n_mels"], 96)
-                mast_params = model_params.get('mast', {})
-                transformer_params = model_params.get('architecture', {}).get('transformer', {})
-                _, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
-                try:
-                    finetune_model.load_weights(model_params['model_path'], by_name=True, skip_mismatch=True)
-                    logger.info("Weights loaded into new model instance with by_name=True, skip_mismatch=True.")
-                except Exception as e2:
-                    logger.error(f"Failed to load weights with by_name=True, skip_mismatch=True: {e2}")
-                    raise e2
-                model = finetune_model
-        else:
-            # Set random seeds for reproducibility
-            tf.random.set_seed(training_params.get('random_seed', 42))
-            np.random.seed(training_params.get('random_seed', 42))
-            # Load and preprocess dataset
-            logger.info("Loading dataset")
-            base_dir = config.get('base_directory', './dataset')
-            normal_dir = os.path.join(base_dir, 'normal')
-            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(normal_dir, config)
-    # If loading model, but not loading data from pickle, we must still generate test_files, test_labels for evaluation
-    if 'test_files' not in locals() or 'test_labels' not in locals():
+        # Set random seeds for reproducibility
+        tf.random.set_seed(training_params.get('random_seed', 42))
+        np.random.seed(training_params.get('random_seed', 42))
+        
+        # Load and preprocess dataset
+        logger.info("Loading dataset")
+        # Fix: Use the normal directory to properly process both normal and abnormal data
         base_dir = config.get('base_directory', './dataset')
         normal_dir = os.path.join(base_dir, 'normal')
-        _, _, _, _, test_files, test_labels = dataset_generator(normal_dir, config)
+        
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
+            normal_dir, config)
+        
+        # Get input shape from data
+        target_shape = (config["feature"]["n_mels"], 96)
+        logger.info(f"Target spectrogram shape: {target_shape}")
+        
+        # Preprocess to ensure consistent shapes
+        logger.info("Preprocessing training data...")
+        # Pass the config to preprocess_spectrograms
+        train_data = preprocess_spectrograms(train_files, target_shape, config)
+        logger.info(f"Preprocessed train data shape: {train_data.shape}")
+
+        logger.info("Preprocessing validation data...")
+        # Pass the config to preprocess_spectrograms
+        val_data = preprocess_spectrograms(val_files, target_shape, config)
+        logger.info(f"Preprocessed validation data shape: {val_data.shape}")
+        
+        # Normalize data for better training
+        logger.info("Normalizing data...")
+        # Calculate mean and std from training data
+        train_mean = np.mean(train_data)
+        train_std = np.std(train_data)
+        logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
+
+        # Apply normalization if std is not too small
+        if train_std > 1e-6:
+            train_data = (train_data - train_mean) / train_std
+            val_data = (val_data - train_mean) / train_std
+            logger.info("Z-score normalization applied")
+        else:
+            # If std is too small, just center the data
+            train_data = train_data - train_mean
+            val_data = val_data - train_mean
+            logger.info("Mean centering applied (std too small for z-score)")
+
+        # Balance the dataset
+        logger.info("Balancing dataset...")
+        train_data, train_labels_expanded = balance_dataset(train_data, train_labels, augment_minority=True)
+        
+        # Create pretrain and finetune models
+        pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
+        
+        # Check if we should perform pretraining
+        if mast_params.get('pretraining', {}).get('enabled', True):
+            logger.info("Starting MAST pretraining phase with masking")
             
-    # Preprocess test data
+            # Configure pretraining parameters
+            pretrain_epochs = mast_params.get('pretraining', {}).get('epochs', 50)
+            pretrain_batch_size = mast_params.get('pretraining', {}).get('batch_size', 32)
+            # Cast learning rate from config to float (handles strings like '1e-4')
+            pretrain_lr_raw = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
+            pretrain_lr = float(pretrain_lr_raw)
+            
+            # Prepare data for pretraining (no labels needed, just the spectrograms)
+            # Combine all available data for pretraining
+            X_pretrain = np.concatenate([train_data, val_data], axis=0)
+            
+            # Apply masking to create input-target pairs for reconstruction
+            mask_probability = mast_params.get('pretraining', {}).get('masking', {}).get('probability', 0.15)
+            mask_length = mast_params.get('pretraining', {}).get('masking', {}).get('length', 8)
+            
+            # Create a data generator for pretraining
+            def pretrain_generator():
+                while True:
+                    # Select random batch
+                    indices = np.random.choice(len(X_pretrain), size=pretrain_batch_size)
+                    batch_x = X_pretrain[indices]
+                    
+                    # Add channel dimension if needed
+                    if len(batch_x.shape) == 3:
+                        batch_x = np.expand_dims(batch_x, axis=-1)
+                    
+                    # Apply masking
+                    masked_x, _ = apply_masking(
+                        batch_x, 
+                        mask_probability=mask_probability,
+                        mask_length=mask_length
+                    )
+                    
+                    # The model should reconstruct the original unmasked input
+                    yield masked_x, batch_x
+            
+            # Create tf.data.Dataset from generator
+            pretrain_dataset = tf.data.Dataset.from_generator(
+                pretrain_generator,
+                output_signature=(
+                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32),
+                    tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32)
+                )
+            ).prefetch(tf.data.AUTOTUNE)
+            
+            # Create LR schedule for pretraining
+            pretrain_lr_schedule = create_lr_schedule(
+                pretrain_lr,
+                warmup_epochs=5,
+                decay_epochs=pretrain_epochs
+            )
+            
+            # Compile the pretraining model
+            pretrain_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=pretrain_lr),
+                loss=tf.keras.losses.MeanSquaredError(),
+                metrics=['mse']
+            )
+            
+            # Create callbacks for pretraining
+            pretrain_callbacks = [
+                tf.keras.callbacks.LearningRateScheduler(pretrain_lr_schedule),
+                tf.keras.callbacks.TensorBoard(
+                    log_dir=f"logs/log_mast/pretrain_{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                    histogram_freq=1
+                ),
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath="model/MAST/pretrain_model.keras",
+                    save_best_only=True,
+                    monitor='val_loss'
+                )
+            ]
+            
+            # Train the pretraining model
+            pretrain_model.fit(
+                pretrain_dataset,
+                steps_per_epoch=len(X_pretrain) // pretrain_batch_size,
+                epochs=pretrain_epochs,
+                callbacks=pretrain_callbacks,
+                verbose=1
+            )
+            
+            logger.info("MAST pretraining completed")
+            
+            # Save the pretrained weights
+            pretrain_model.save_weights("model/MAST/pretrain_weights.keras")
+            
+            # Load the pretrained weights into the fine-tuning model
+            # The shared Transformer layers will have the same names
+            logger.info("Transferring pretrained weights to fine-tuning model")
+            finetune_model.load_weights("model/MAST/pretrain_weights.keras", by_name=True, skip_mismatch=True)
+        
+        # Now proceed with fine-tuning for anomaly detection
+        logger.info("Starting MAST fine-tuning phase for anomaly detection")
+        
+        # Create cosine annealing LR schedule and AdamW optimizer with weight decay
+        initial_lr = training_params.get('learning_rate', 1e-5)
+        decay_steps = training_params.get('decay_steps', 10000)
+        fit_cfg = config.get('fit', {})
+        compile_cfg = fit_cfg.get('compile', {})
+        loss_type = compile_cfg.get('loss', 'binary_crossentropy')
+        if loss_type == 'focal_loss':
+            fl_cfg = compile_cfg.get('focal_loss', {})
+            loss_fn = focal_loss(gamma=fl_cfg.get('gamma', 2.0), alpha=fl_cfg.get('alpha', 0.25))
+        else:
+            loss_fn = tf.keras.losses.BinaryCrossentropy()
+        lr_cfg = fit_cfg.get('lr_scheduler', {})
+        if lr_cfg.get('type') == 'cosine_annealing_restarts':
+            first_decay = lr_cfg.get('first_decay_steps', decay_steps)
+            t_mul = lr_cfg.get('t_mul', 2.0)
+            alpha = lr_cfg.get('alpha', 0.0)
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+                initial_learning_rate=initial_lr,
+                first_decay_steps=first_decay,
+                t_mul=t_mul,
+                m_mul=1.0,
+                alpha=alpha
+            )
+        else:
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=initial_lr, decay_steps=decay_steps
+            )
+        weight_decay = training_params.get('weight_decay', 1e-3)
+        optimizer = tf.keras.optimizers.experimental.AdamW(
+            learning_rate=lr_schedule, weight_decay=weight_decay
+        )
+        finetune_model.compile(
+            optimizer=optimizer,
+            loss=loss_fn,
+            metrics=['accuracy', 'AUC', 'Precision', 'Recall']
+        )
+        
+        # Add channel dimension if needed
+        if len(train_data.shape) == 3:
+            train_data = np.expand_dims(train_data, axis=-1)
+            val_data = np.expand_dims(val_data, axis=-1)
+        
+        # Build tf.data datasets for efficient training
+        batch_size = training_params.get('batch_size', 32)
+        train_ds = tf.data.Dataset.from_tensor_slices((train_data, train_labels_expanded))
+        train_ds = train_ds.shuffle(buffer_size=train_data.shape[0]).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        val_ds = tf.data.Dataset.from_tensor_slices((val_data, val_labels))
+        val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        # Setup callbacks for fine-tuning
+        callbacks = []
+        # Early stopping
+        es_cfg = fit_cfg.get('early_stopping', {})
+        if es_cfg.get('enabled', False):
+            callbacks.append(
+                tf.keras.callbacks.EarlyStopping(
+                    monitor=es_cfg.get('monitor', 'val_loss'),
+                    patience=es_cfg.get('patience', 10),
+                    min_delta=es_cfg.get('min_delta', 0.0),
+                    restore_best_weights=es_cfg.get('restore_best_weights', True)
+                )
+            )
+        # LR scheduler via ReduceLROnPlateau
+        lr_cfg = fit_cfg.get('lr_scheduler', {})
+        if lr_cfg.get('enabled', False):
+            callbacks.append(
+                ReduceLROnPlateau(
+                    monitor=lr_cfg.get('monitor', 'val_loss'),
+                    factor=lr_cfg.get('factor', 0.5),
+                    patience=lr_cfg.get('patience', 5),
+                    min_delta=lr_cfg.get('min_delta', 0.0),
+                    cooldown=lr_cfg.get('cooldown', 0),
+                    min_lr=lr_cfg.get('min_lr', 0.0)
+                )
+            )
+        # Model checkpointing
+        ckpt_cfg = fit_cfg.get('checkpointing', {})
+        if ckpt_cfg.get('enabled', False):
+            callbacks.append(
+                ModelCheckpoint(
+                    filepath=model_path,
+                    monitor=ckpt_cfg.get('monitor', 'val_accuracy'),
+                    mode=ckpt_cfg.get('mode', 'max'),
+                    save_best_only=ckpt_cfg.get('save_best_only', True),
+                    save_weights_only=True  # avoid unsupported full model save options
+                )
+            )
+
+        # Train the fine-tuning model
+        train_start = time.time()
+        history = finetune_model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=training_params.get('epochs', 100),
+            callbacks=callbacks,
+            verbose=1
+        )
+        train_end = time.time()
+        model_training_time_seconds = train_end - train_start
+
+        # Generate and save training loss and accuracy graphs
+        viz = Visualizer(param=config)
+        viz.loss_plot(history)
+        loss_acc_path = os.path.join(result_dir, 'loss_accuracy.png')
+        viz.save_figure(loss_acc_path)
+        logger.info(f"Saved training curves to {loss_acc_path}")
+        
+        # Save the final model
+        model = finetune_model
+        # Save only weights to avoid JSON serialization issues
+        model.save_weights(model_path)
+        
+        # Save training history
+        with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
+            pickle.dump(history.history, f)
+    
+    # Evaluate model on test set
+    logger.info("Evaluating model on test set")
+    
+    # Process test data
     test_data, test_labels_expanded = list_to_spectrograms(
         test_files,
         test_labels,
@@ -1904,16 +2262,14 @@ def main():
         batch_size=20
     )
     
-    # Normalize test data
-    target_shape = (config["feature"]["n_mels"], 96)
+    # Preprocess test data
     test_data = preprocess_spectrograms(test_data, target_shape)
     
     # Apply same normalization to test data as was applied to training data
-    if 'train_mean' in locals() and 'train_std' in locals():
-        if train_std > 1e-6:
-            test_data = (test_data - train_mean) / train_std
-        else:
-            test_data = test_data - train_mean
+    if train_std > 1e-6:
+        test_data = (test_data - train_mean) / train_std
+    else:
+        test_data = test_data - train_mean
     
     # Ensure test data has channel dimension
     if len(test_data.shape) == 3:
@@ -1926,82 +2282,56 @@ def main():
     # Generate predictions
     y_pred = model.predict(test_data)
     y_pred_binary = (y_pred > 0.5).astype(int)
-    
+    # Build classification report dict
+    class_report = classification_report(test_labels_expanded, y_pred_binary, output_dict=True)
+
+    # Plot and save confusion matrix
+    viz = Visualizer(param=config)
+    viz.plot_confusion_matrix(test_labels_expanded.flatten(), y_pred_binary.flatten())
+    cm_path = os.path.join(result_dir, 'confusion_matrix.png')
+    viz.save_figure(cm_path)
+    logger.info(f"Saved confusion matrix to {cm_path}")
+
+    # Total execution time
+    exec_end = time.time()
+    execution_time_seconds = exec_end - exec_start
     # Calculate metrics
-    accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-    precision = metrics.precision_score(test_labels_expanded, y_pred_binary)
-    recall = metrics.recall_score(test_labels_expanded, y_pred_binary)
-    f1 = metrics.f1_score(test_labels_expanded, y_pred_binary)
-    auc = metrics.roc_auc_score(test_labels_expanded, y_pred)
-    
-    # Print metrics
-    logger.info(f"Accuracy: {accuracy:.4f}")
-    logger.info(f"Precision: {precision:.4f}")
-    logger.info(f"Recall: {recall:.4f}")
-    logger.info(f"F1 Score: {f1:.4f}")
-    logger.info(f"AUC: {auc:.4f}")
-    
-    # Generate confusion matrix
-    cm = metrics.confusion_matrix(test_labels_expanded, y_pred_binary)
-    logger.info(f"Confusion Matrix:\n{cm}")
-    
-    # Plot metrics
-    plt.figure(figsize=(15, 5))
-    
-    # Plot ROC curve
-    plt.subplot(1, 3, 1)
-    fpr, tpr, _ = metrics.roc_curve(test_labels_expanded, y_pred)
-    plt.plot(fpr, tpr, label=f'AUC = {auc:.4f}')
-    plt.plot([0, 1], [0, 1], 'k--', label='Random')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve')
-    plt.legend()
-    
-    # Plot training history if available
-    if os.path.exists('pickle/pickle_mast/training_history.pkl'):
-        with open('pickle/pickle_mast/training_history.pkl', 'rb') as f:
-            history = pickle.load(f)
-        
-        plt.subplot(1, 3, 2)
-        plt.plot(history['loss'], label='Training Loss')
-        plt.plot(history['val_loss'], label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
-        plt.legend()
-        
-        plt.subplot(1, 3, 3)
-        plt.plot(history['accuracy'], label='Training Accuracy')
-        plt.plot(history['val_accuracy'], label='Validation Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.title('Training and Validation Accuracy')
-        plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig('result/result_mast/performance_metrics.png')
-    logger.info(f"Performance metrics saved to result/result_mast/performance_metrics.png")
-    
-    # Ensure necessary directories exist for saving artifacts
-    result_dir = config.get('result_directory', './result/result_MAST')
-    os.makedirs(result_dir, exist_ok=True)
+    accuracy = float(metrics.accuracy_score(test_labels_expanded, y_pred_binary))
 
-    # Save the hyperparameters used in the model to a new YAML file
-    hyperparams_file_path = os.path.join(result_dir, 'used_hyperparameters.yaml')
-    with open(hyperparams_file_path, 'w') as f:
-        yaml.safe_dump(config, f, default_flow_style=False)
-    logger.info(f"Hyperparameters used in the model saved to {hyperparams_file_path}")
+    # Extract training and validation accuracy from history
+    train_acc = float(history.history.get('accuracy', [0])[-1])
+    val_acc = float(history.history.get('val_accuracy', [0])[-1])
 
-    # Remove unnecessary lines from the results dictionary
-    results.pop('model_path', None)
-    results.pop('result_file_path', None)
+    # Extract per-class metrics and support
+    f1_0 = float(class_report['0.0']['f1-score'])
+    f1_1 = float(class_report['1.0']['f1-score'])
+    prec_0 = float(class_report['0.0']['precision'])
+    prec_1 = float(class_report['1.0']['precision'])
+    rec_0 = float(class_report['0.0']['recall'])
+    rec_1 = float(class_report['1.0']['recall'])
+    sup_0 = int(class_report['0.0']['support'])
+    sup_1 = int(class_report['1.0']['support'])
+
+    # Summary results with requested custom fields only
+    results = {
+        'execution_time_seconds': float(execution_time_seconds),
+        'model_training_time_seconds': float(model_training_time_seconds),
+        'overall_model': {
+            'F1Score': {'class_0': f1_0, 'class_1': f1_1},
+            'Precision': {'class_0': prec_0, 'class_1': prec_1},
+            'Recall': {'class_0': rec_0, 'class_1': rec_1},
+            'Support': {'class_0': sup_0, 'class_1': sup_1},
+            'TestAccuracy': accuracy,
+            'TrainAccuracy': train_acc,
+            'ValidationAccuracy': val_acc
+        }
+    }
 
     # Save as YAML file
-    yaml_file_path = os.path.join(result_dir, config.get('result_file', 'test_results.yaml'))
+    yaml_file_path = os.path.join(result_dir, config.get('result_file', 'result_MAST.yaml'))
     with open(yaml_file_path, 'w') as f:
         yaml.safe_dump(results, f, default_flow_style=False)
-
+    
     logger.info(f"Test results saved to {yaml_file_path}")
     
     return model

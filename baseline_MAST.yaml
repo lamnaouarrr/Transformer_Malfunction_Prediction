@@ -44,8 +44,8 @@ feature:
 fit:
   compile:
     optimizer: "adamW"
-    learning_rate: 0.00001 #0.0003
-    loss: "focal_loss"
+    learning_rate: 0.0003
+    loss: "binary_crossentropy"
     metrics: ["accuracy", "Precision", "Recall", "AUC"]
   epochs: 100
   batch_size: 16

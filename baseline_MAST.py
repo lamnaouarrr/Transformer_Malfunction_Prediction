@@ -1883,323 +1883,128 @@ def main():
             # Set random seeds for reproducibility
             tf.random.set_seed(training_params.get('random_seed', 42))
             np.random.seed(training_params.get('random_seed', 42))
-            
             # Load and preprocess dataset
             logger.info("Loading dataset")
-            # Fix: Use the normal directory to properly process both normal and abnormal data
             base_dir = config.get('base_directory', './dataset')
             normal_dir = os.path.join(base_dir, 'normal')
+            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(normal_dir, config)
+    # If loading model, but not loading data from pickle, we must still generate test_files, test_labels for evaluation
+    if 'test_files' not in locals() or 'test_labels' not in locals():
+        base_dir = config.get('base_directory', './dataset')
+        normal_dir = os.path.join(base_dir, 'normal')
+        _, _, _, _, test_files, test_labels = dataset_generator(normal_dir, config)
             
-            train_files, train_labels, val_files, val_labels, test_files, test_labels = dataset_generator(
-                normal_dir, config)
-            
-            # Get input shape from data
-            target_shape = (config["feature"]["n_mels"], 96)
-            logger.info(f"Target spectrogram shape: {target_shape}")
-            
-            # Preprocess to ensure consistent shapes
-            logger.info("Preprocessing training data...")
-            train_data = preprocess_spectrograms(train_files, target_shape)
-            logger.info(f"Preprocessed train data shape: {train_data.shape}")
-
-            logger.info("Preprocessing validation data...")
-            val_data = preprocess_spectrograms(val_files, target_shape)
-            logger.info(f"Preprocessed validation data shape: {val_data.shape}")
-            
-            # Normalize data for better training
-            logger.info("Normalizing data...")
-            # Calculate mean and std from training data
-            train_mean = np.mean(train_data)
-            train_std = np.std(train_data)
-            logger.info(f"Training data statistics - Mean: {train_mean:.4f}, Std: {train_std:.4f}")
-
-            # Apply normalization if std is not too small
-            if train_std > 1e-6:
-                train_data = (train_data - train_mean) / train_std
-                val_data = (val_data - train_mean) / train_std
-                logger.info("Z-score normalization applied")
-            else:
-                # If std is too small, just center the data
-                train_data = train_data - train_mean
-                val_data = val_data - train_mean
-                logger.info("Mean centering applied (std too small for z-score)")
-
-            # Balance the dataset
-            logger.info("Balancing dataset...")
-            train_data, train_labels_expanded = balance_dataset(train_data, train_labels, augment_minority=True)
-            
-            # Create pretrain and finetune models
-            pretrain_model, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
-            
-            # Check if we should perform pretraining
-            if mast_params.get('pretraining', {}).get('enabled', True):
-                logger.info("Starting MAST pretraining phase with masking")
-                
-                # Configure pretraining parameters
-                pretrain_epochs = mast_params.get('pretraining', {}).get('epochs', 50)
-                pretrain_batch_size = mast_params.get('pretraining', {}).get('batch_size', 32)
-                pretrain_lr = mast_params.get('pretraining', {}).get('learning_rate', 1e-4)
-                
-                # Prepare data for pretraining (no labels needed, just the spectrograms)
-                # Combine all available data for pretraining
-                X_pretrain = np.concatenate([train_data, val_data], axis=0)
-                
-                # Apply masking to create input-target pairs for reconstruction
-                mask_probability = mast_params.get('pretraining', {}).get('masking', {}).get('probability', 0.15)
-                mask_length = mast_params.get('pretraining', {}).get('masking', {}).get('length', 8)
-                
-                # Create a data generator for pretraining
-                def pretrain_generator():
-                    while True:
-                        # Select random batch
-                        indices = np.random.choice(len(X_pretrain), size=pretrain_batch_size)
-                        batch_x = X_pretrain[indices]
-                        
-                        # Add channel dimension if needed
-                        if len(batch_x.shape) == 3:
-                            batch_x = np.expand_dims(batch_x, axis=-1)
-                        
-                        # Apply masking
-                        masked_x, _ = apply_masking(
-                            batch_x, 
-                            mask_probability=mask_probability,
-                            mask_length=mask_length
-                        )
-                        
-                        # The model should reconstruct the original unmasked input
-                        yield masked_x, batch_x
-                
-                # Create tf.data.Dataset from generator
-                pretrain_dataset = tf.data.Dataset.from_generator(
-                    pretrain_generator,
-                    output_signature=(
-                        tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32),
-                        tf.TensorSpec(shape=(None, *target_shape, 1), dtype=tf.float32)
-                    )
-                ).prefetch(tf.data.AUTOTUNE)
-                
-                # Create LR schedule for pretraining
-                pretrain_lr_schedule = create_lr_schedule(
-                    pretrain_lr,
-                    warmup_epochs=5,
-                    decay_epochs=pretrain_epochs
-                )
-                
-                # Compile the pretraining model
-                pretrain_model.compile(
-                    optimizer=tf.keras.optimizers.AdamW(learning_rate=pretrain_lr),
-                    loss=tf.keras.losses.MeanSquaredError(),
-                    metrics=['mse']
-                )
-                
-                # Create callbacks for pretraining
-                pretrain_callbacks = [
-                    tf.keras.callbacks.LearningRateScheduler(pretrain_lr_schedule),
-                    tf.keras.callbacks.TensorBoard(
-                        log_dir=f"logs/log_mast/pretrain_{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                        histogram_freq=1
-                    ),
-                    tf.keras.callbacks.ModelCheckpoint(
-                        filepath="model/MAST/pretrain_model.h5",
-                        save_best_only=True,
-                        monitor='val_loss'
-                    )
-                ]
-                
-                # Train the pretraining model
-                pretrain_model.fit(
-                    pretrain_dataset,
-                    steps_per_epoch=len(X_pretrain) // pretrain_batch_size,
-                    epochs=pretrain_epochs,
-                    callbacks=pretrain_callbacks,
-                    verbose=1
-                )
-                
-                logger.info("MAST pretraining completed")
-                
-                # Save the pretrained weights
-                pretrain_model.save_weights("model/MAST/pretrain_weights.h5")
-                
-                # Load the pretrained weights into the fine-tuning model
-                # The shared Transformer layers will have the same names
-                logger.info("Transferring pretrained weights to fine-tuning model")
-                finetune_model.load_weights("model/MAST/pretrain_weights.h5", by_name=True, skip_mismatch=True)
-            
-            # Now proceed with fine-tuning for anomaly detection
-            logger.info("Starting MAST fine-tuning phase for anomaly detection")
-            
-            # Configure fine-tuning optimizer
-            optimizer = tf.keras.optimizers.AdamW(learning_rate=training_params.get('learning_rate', 0.0001))
-            
-            # Configure loss function based on configuration
-            loss_fn = tf.keras.losses.BinaryCrossentropy()
-            
-            # Compile model for fine-tuning
-            finetune_model.compile(
-                optimizer=optimizer,
-                loss=loss_fn,
-                metrics=['accuracy', 'AUC', 'Precision', 'Recall']
-            )
-            
-            # Add channel dimension if needed
-            if len(train_data.shape) == 3:
-                train_data = np.expand_dims(train_data, axis=-1)
-                val_data = np.expand_dims(val_data, axis=-1)
-            
-            # Set up callbacks for fine-tuning
-            callbacks = [
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=model_params['model_path'],
-                    save_best_only=True,
-                    monitor='val_loss'
-                ),
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=training_params.get('early_stopping_patience', 10),
-                    restore_best_weights=True
-                ),
-                tf.keras.callbacks.TensorBoard(
-                    log_dir=f"logs/log_mast/{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                    histogram_freq=1
-                ),
-                tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,
-                    patience=5,
-                    min_lr=1e-6
-                )
-            ]
-            
-            # Train the fine-tuning model
-            history = finetune_model.fit(
-                train_data, train_labels_expanded,
-                validation_data=(val_data, val_labels),
-                epochs=training_params.get('epochs', 100),
-                batch_size=training_params.get('batch_size', 32),
-                callbacks=callbacks,
-                verbose=1
-            )
-            
-            # Save the final model
-            model = finetune_model
-            model.save(model_params['model_path'])
-            
-            # Save training history
-            with open('pickle/pickle_mast/training_history.pkl', 'wb') as f:
-                pickle.dump(history.history, f)
-        
-        # Evaluate model on test set
-        logger.info("Evaluating model on test set")
-        
-        # Process test data
-        test_data, test_labels_expanded = list_to_spectrograms(
-            test_files,
-            test_labels,
-            msg="generate test_dataset",
-            augment=False,
-            param=config,
-            batch_size=20
-        )
-        
-        # Preprocess test data
-        test_data = preprocess_spectrograms(test_data, target_shape)
-        
-        # Apply same normalization to test data as was applied to training data
+    # Preprocess test data
+    test_data, test_labels_expanded = list_to_spectrograms(
+        test_files,
+        test_labels,
+        msg="generate test_dataset",
+        augment=False,
+        param=config,
+        batch_size=20
+    )
+    
+    # Normalize test data
+    target_shape = (config["feature"]["n_mels"], 96)
+    test_data = preprocess_spectrograms(test_data, target_shape)
+    
+    # Apply same normalization to test data as was applied to training data
+    if 'train_mean' in locals() and 'train_std' in locals():
         if train_std > 1e-6:
             test_data = (test_data - train_mean) / train_std
         else:
             test_data = test_data - train_mean
+    
+    # Ensure test data has channel dimension
+    if len(test_data.shape) == 3:
+        test_data = np.expand_dims(test_data, axis=-1)
+    
+    # Model evaluation
+    test_results = model.evaluate(test_data, test_labels_expanded, verbose=1)
+    logger.info(f"Test results: {dict(zip(model.metrics_names, test_results))}")
+    
+    # Generate predictions
+    y_pred = model.predict(test_data)
+    y_pred_binary = (y_pred > 0.5).astype(int)
+    
+    # Calculate metrics
+    accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
+    precision = metrics.precision_score(test_labels_expanded, y_pred_binary)
+    recall = metrics.recall_score(test_labels_expanded, y_pred_binary)
+    f1 = metrics.f1_score(test_labels_expanded, y_pred_binary)
+    auc = metrics.roc_auc_score(test_labels_expanded, y_pred)
+    
+    # Print metrics
+    logger.info(f"Accuracy: {accuracy:.4f}")
+    logger.info(f"Precision: {precision:.4f}")
+    logger.info(f"Recall: {recall:.4f}")
+    logger.info(f"F1 Score: {f1:.4f}")
+    logger.info(f"AUC: {auc:.4f}")
+    
+    # Generate confusion matrix
+    cm = metrics.confusion_matrix(test_labels_expanded, y_pred_binary)
+    logger.info(f"Confusion Matrix:\n{cm}")
+    
+    # Plot metrics
+    plt.figure(figsize=(15, 5))
+    
+    # Plot ROC curve
+    plt.subplot(1, 3, 1)
+    fpr, tpr, _ = metrics.roc_curve(test_labels_expanded, y_pred)
+    plt.plot(fpr, tpr, label=f'AUC = {auc:.4f}')
+    plt.plot([0, 1], [0, 1], 'k--', label='Random')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    
+    # Plot training history if available
+    if os.path.exists('pickle/pickle_mast/training_history.pkl'):
+        with open('pickle/pickle_mast/training_history.pkl', 'rb') as f:
+            history = pickle.load(f)
         
-        # Ensure test data has channel dimension
-        if len(test_data.shape) == 3:
-            test_data = np.expand_dims(test_data, axis=-1)
-        
-        # Model evaluation
-        test_results = model.evaluate(test_data, test_labels_expanded, verbose=1)
-        logger.info(f"Test results: {dict(zip(model.metrics_names, test_results))}")
-        
-        # Generate predictions
-        y_pred = model.predict(test_data)
-        y_pred_binary = (y_pred > 0.5).astype(int)
-        
-        # Calculate metrics
-        accuracy = metrics.accuracy_score(test_labels_expanded, y_pred_binary)
-        precision = metrics.precision_score(test_labels_expanded, y_pred_binary)
-        recall = metrics.recall_score(test_labels_expanded, y_pred_binary)
-        f1 = metrics.f1_score(test_labels_expanded, y_pred_binary)
-        auc = metrics.roc_auc_score(test_labels_expanded, y_pred)
-        
-        # Print metrics
-        logger.info(f"Accuracy: {accuracy:.4f}")
-        logger.info(f"Precision: {precision:.4f}")
-        logger.info(f"Recall: {recall:.4f}")
-        logger.info(f"F1 Score: {f1:.4f}")
-        logger.info(f"AUC: {auc:.4f}")
-        
-        # Generate confusion matrix
-        cm = metrics.confusion_matrix(test_labels_expanded, y_pred_binary)
-        logger.info(f"Confusion Matrix:\n{cm}")
-        
-        # Plot metrics
-        plt.figure(figsize=(15, 5))
-        
-        # Plot ROC curve
-        plt.subplot(1, 3, 1)
-        fpr, tpr, _ = metrics.roc_curve(test_labels_expanded, y_pred)
-        plt.plot(fpr, tpr, label=f'AUC = {auc:.4f}')
-        plt.plot([0, 1], [0, 1], 'k--', label='Random')
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC Curve')
+        plt.subplot(1, 3, 2)
+        plt.plot(history['loss'], label='Training Loss')
+        plt.plot(history['val_loss'], label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training and Validation Loss')
         plt.legend()
         
-        # Plot training history if available
-        if os.path.exists('pickle/pickle_mast/training_history.pkl'):
-            with open('pickle/pickle_mast/training_history.pkl', 'rb') as f:
-                history = pickle.load(f)
-            
-            plt.subplot(1, 3, 2)
-            plt.plot(history['loss'], label='Training Loss')
-            plt.plot(history['val_loss'], label='Validation Loss')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.title('Training and Validation Loss')
-            plt.legend()
-            
-            plt.subplot(1, 3, 3)
-            plt.plot(history['accuracy'], label='Training Accuracy')
-            plt.plot(history['val_accuracy'], label='Validation Accuracy')
-            plt.xlabel('Epoch')
-            plt.ylabel('Accuracy')
-            plt.title('Training and Validation Accuracy')
-            plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig('result/result_mast/performance_metrics.png')
-        logger.info(f"Performance metrics saved to result/result_mast/performance_metrics.png")
-        
-        # Ensure necessary directories exist for saving artifacts
-        result_dir = config.get('result_directory', './result/result_MAST')
-        os.makedirs(result_dir, exist_ok=True)
+        plt.subplot(1, 3, 3)
+        plt.plot(history['accuracy'], label='Training Accuracy')
+        plt.plot(history['val_accuracy'], label='Validation Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.title('Training and Validation Accuracy')
+        plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('result/result_mast/performance_metrics.png')
+    logger.info(f"Performance metrics saved to result/result_mast/performance_metrics.png")
+    
+    # Ensure necessary directories exist for saving artifacts
+    result_dir = config.get('result_directory', './result/result_MAST')
+    os.makedirs(result_dir, exist_ok=True)
 
-        # Save the hyperparameters used in the model to a new YAML file
-        hyperparams_file_path = os.path.join(result_dir, 'used_hyperparameters.yaml')
-        with open(hyperparams_file_path, 'w') as f:
-            yaml.safe_dump(config, f, default_flow_style=False)
-        logger.info(f"Hyperparameters used in the model saved to {hyperparams_file_path}")
+    # Save the hyperparameters used in the model to a new YAML file
+    hyperparams_file_path = os.path.join(result_dir, 'used_hyperparameters.yaml')
+    with open(hyperparams_file_path, 'w') as f:
+        yaml.safe_dump(config, f, default_flow_style=False)
+    logger.info(f"Hyperparameters used in the model saved to {hyperparams_file_path}")
 
-        # Remove unnecessary lines from the results dictionary
-        results.pop('model_path', None)
-        results.pop('result_file_path', None)
+    # Remove unnecessary lines from the results dictionary
+    results.pop('model_path', None)
+    results.pop('result_file_path', None)
 
-        # Save as YAML file
-        yaml_file_path = os.path.join(result_dir, config.get('result_file', 'test_results.yaml'))
-        with open(yaml_file_path, 'w') as f:
-            yaml.safe_dump(results, f, default_flow_style=False)
+    # Save as YAML file
+    yaml_file_path = os.path.join(result_dir, config.get('result_file', 'test_results.yaml'))
+    with open(yaml_file_path, 'w') as f:
+        yaml.safe_dump(results, f, default_flow_style=False)
 
-        logger.info(f"Test results saved to {yaml_file_path}")
-        
-        return model
+    logger.info(f"Test results saved to {yaml_file_path}")
+    
+    return model
 
 
 if __name__ == "__main__":

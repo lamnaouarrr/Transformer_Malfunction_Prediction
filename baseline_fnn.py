@@ -35,7 +35,7 @@ from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.mixture import GaussianMixture
 from pathlib import Path
-from tensorflow.keras.optimizers import AdamW
+from tensorflow.keras.optimizers import Adam
 ########################################################################
 
 ########################################################################
@@ -956,7 +956,7 @@ def main():
             compile_params["loss"] = "binary_crossentropy"
 
         if "optimizer" in compile_params and compile_params["optimizer"] == "adam":
-            compile_params["optimizer"] = tf.keras.optimizers.AdamW(learning_rate=learning_rate)
+            compile_params["optimizer"] = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         # Add weighted_metrics to fix the warning
         if "weighted_metrics" not in compile_params:

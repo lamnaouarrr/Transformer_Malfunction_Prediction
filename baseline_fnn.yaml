@@ -18,7 +18,7 @@ feature:
 # Fit algorithm parameters
 fit:
   compile:
-    optimizer: "adamW"
+    optimizer: "adam"
     learning_rate: 0.00016547949550578504
     loss: "binary_crossentropy"
     metrics: ["accuracy"]

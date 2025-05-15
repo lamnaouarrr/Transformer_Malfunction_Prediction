@@ -1838,7 +1838,7 @@ def main():
     
     # --- FAST PICKLE LOADING BLOCK ---
     import pickle
-    pickle_dir = config.get('pickle_directory', './pickle/pickle_MAST')
+    pickle_dir = config.get('pickle_directory', './pickle/pickle_mast')
     train_pickle = os.path.join(pickle_dir, 'train_data.pkl')
     train_labels_pickle = os.path.join(pickle_dir, 'train_labels.pkl')
     val_pickle = os.path.join(pickle_dir, 'val_data.pkl')

@@ -44,6 +44,7 @@ from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from skimage.metrics import structural_similarity as ssim
 from transformers import TFViTModel, ViTConfig
 from tensorflow.keras import layers  # Add explicit import for layers module
+from tensorflow.keras.optimizers import AdamW
 ########################################################################
 
 ########################################################################

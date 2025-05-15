@@ -1107,13 +1107,25 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         lambda x: tf.nn.depth_to_space(
             tf.reshape(x, [
                 tf.shape(x)[0],
-                tf.shape(x)[1] * patch_height,
-                tf.shape(x)[2] * patch_width,
+                num_patches_height,
+                num_patches_width,
                 block_size**2
             ]),
             block_size=block_size
         ),
         name="reconstruction_reshape"
+    )(reconstructed)
+
+    # Ensure output shape matches input shape
+    reconstructed = layers.Conv2D(
+        filters=1,
+        kernel_size=1,
+        padding="same",
+        activation=None,
+        name="reconstruction_output_shape_fix"
+    )(reconstructed)
+    reconstructed = layers.Cropping2D(
+        ((0, tf.shape(reconstructed)[1] - input_shape[0]), (0, tf.shape(reconstructed)[2] - input_shape[1]))
     )(reconstructed)
     
     # Create classifier head for anomaly detection

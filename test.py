@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from baseline_MAST import get_mast_pretraining_model
+from baseline_MAST.py import get_mast_pretraining_model
 
 # Define a variety of input shapes to test
 input_shapes = [

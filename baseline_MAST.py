@@ -1153,6 +1153,15 @@ def create_mast_model(input_shape, mast_params, transformer_params):
     return pretrain_model, finetune_model
 
 
+def get_mast_pretraining_model(input_shape=(128, 128), patch_size=(16, 16), masking_ratio=0.5):
+    mast_params = {"patch_size": patch_size[0], "pretraining": {"masking": {"probability": masking_ratio}}}
+    transformer_params = {
+        "embed_dim": 64, "num_heads": 4, "num_layers": 2, "mlp_dim": 128, "dropout_rate": 0.1
+    }
+    pretrain_model, _ = create_mast_model(input_shape, mast_params, transformer_params)
+    return pretrain_model
+
+
 class MaskingLayer(layers.Layer):
     """
     Layer that applies random masking to the input spectrogram for MAST pretraining.

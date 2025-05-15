@@ -1124,9 +1124,20 @@ def create_mast_model(input_shape, mast_params, transformer_params):
         activation=None,
         name="reconstruction_output_shape_fix"
     )(reconstructed)
-    reconstructed = layers.Cropping2D(
-        ((0, tf.shape(reconstructed)[1] - input_shape[0]), (0, tf.shape(reconstructed)[2] - input_shape[1]))
-    )(reconstructed)
+    # Robust cropping/padding to match input shape
+    def crop_or_pad_to_shape(x):
+        input_h, input_w = input_shape
+        out_h = tf.shape(x)[1]
+        out_w = tf.shape(x)[2]
+        # Crop if too large
+        x = x[:, :input_h, :input_w, :]
+        # Pad if too small
+        pad_h = tf.maximum(0, input_h - out_h)
+        pad_w = tf.maximum(0, input_w - out_w)
+        paddings = [[0, 0], [0, pad_h], [0, pad_w], [0, 0]]
+        x = tf.pad(x, paddings)
+        return x
+    reconstructed = layers.Lambda(crop_or_pad_to_shape, name="output_shape_match")(reconstructed)
     
     # Create classifier head for anomaly detection
     classifier = layers.Dense(512, activation='gelu', name="classifier_dense_1")(cls_output)

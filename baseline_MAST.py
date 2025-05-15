@@ -1872,9 +1872,13 @@ def main():
                 mast_params = model_params.get('mast', {})
                 transformer_params = model_params.get('architecture', {}).get('transformer', {})
                 _, finetune_model = create_mast_model(target_shape, mast_params, transformer_params)
-                finetune_model.load_weights(model_params['model_path'])
+                try:
+                    finetune_model.load_weights(model_params['model_path'], by_name=True, skip_mismatch=True)
+                    logger.info("Weights loaded into new model instance with by_name=True, skip_mismatch=True.")
+                except Exception as e2:
+                    logger.error(f"Failed to load weights with by_name=True, skip_mismatch=True: {e2}")
+                    raise e2
                 model = finetune_model
-                logger.info("Weights loaded into new model instance.")
         else:
             # Set random seeds for reproducibility
             tf.random.set_seed(training_params.get('random_seed', 42))
